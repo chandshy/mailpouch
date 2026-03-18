@@ -68,20 +68,20 @@
     "win32"
   ],
   "dependencies": {
-    "@modelcontextprotocol/sdk": "~1.20.1",
-    "imapflow": "~1.1.0",
-    "mailparser": "~3.7.5",
-    "nodemailer": "~6.10.1"
+    "@modelcontextprotocol/sdk": "~1.27.1",
+    "imapflow": "~1.2.15",
+    "mailparser": "~3.9.4",
+    "nodemailer": "~8.0.2"
   },
   "optionalDependencies": {
     "@napi-rs/keyring": "~1.2.0"
   },
   "devDependencies": {
-    "@types/node": "^22.10.2",
+    "@types/node": "^25.5.0",
     "@types/nodemailer": "^6.4.19",
-    "@vitest/coverage-v8": "^4.0.0",
+    "@vitest/coverage-v8": "^4.1.0",
     "typescript": "^5.7.2",
-    "vitest": "^4.0.0"
+    "vitest": "^4.1.0"
   },
   "files": [
     "dist/**/*",
@@ -90,6 +90,9 @@
     "CHANGELOG.md",
     "package.json"
   ],
+  "overrides": {
+    "fast-xml-parser": ">=5.5.6"
+  },
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org/"
