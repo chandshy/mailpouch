@@ -518,10 +518,11 @@ export class SimpleIMAPService {
                   ? `${env.from[0].name} <${env.from[0].address ?? ''}>`
                   : (env.from[0].address ?? ''))
               : '';
-            const toAddrs = (env.to ?? []).map((a: any) =>
+            type EnvAddr = { name?: string; address?: string };
+            const toAddrs = (env.to ?? []).map((a: EnvAddr) =>
               a.name ? `${a.name} <${a.address ?? ''}>` : (a.address ?? '')
             );
-            const ccAddrs = (env.cc ?? []).map((a: any) =>
+            const ccAddrs = (env.cc ?? []).map((a: EnvAddr) =>
               a.name ? `${a.name} <${a.address ?? ''}>` : (a.address ?? '')
             );
 
@@ -1118,9 +1119,9 @@ export class SimpleIMAPService {
       const uid = result && typeof result === 'object' ? (result as AppendResult).uid : undefined;
       logger.info('Draft saved', 'IMAPService', { uid });
       return { success: true, uid };
-    } catch (error: any) {
+    } catch (error: unknown) {
       logger.error('Failed to save draft', 'IMAPService', error);
-      return { success: false, error: error.message };
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
     }
     }); // end tracer.span('imap.saveDraft')
   }
@@ -1435,9 +1436,9 @@ export class SimpleIMAPService {
         const folder = cached?.folder ?? 'INBOX';
         if (!emailsByFolder.has(folder)) emailsByFolder.set(folder, []);
         emailsByFolder.get(folder)!.push(emailId);
-      } catch (error: any) {
+      } catch (error: unknown) {
         results.failed++;
-        results.errors.push(`Invalid email ID ${emailId}: ${error.message}`);
+        results.errors.push(`Invalid email ID ${emailId}: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
 
@@ -1454,7 +1455,7 @@ export class SimpleIMAPService {
             if (cachedForBulkMove) cachedForBulkMove.folder = targetFolder;
             results.success++;
           }
-        } catch (batchError: any) {
+        } catch (batchError: unknown) {
           // Batch failed — fall back to per-email
           logger.warn(`Batch move failed for folder ${sourceFolder}, falling back to per-email`, 'IMAPService', batchError);
           for (const emailId of ids) {
@@ -1463,9 +1464,9 @@ export class SimpleIMAPService {
               const cachedForBulkMove = this.getCacheEntry(emailId);
               if (cachedForBulkMove) cachedForBulkMove.folder = targetFolder;
               results.success++;
-            } catch (error: any) {
+            } catch (error: unknown) {
               results.failed++;
-              results.errors.push(`Failed to move email ${emailId}: ${error.message}`);
+              results.errors.push(`Failed to move email ${emailId}: ${error instanceof Error ? error.message : String(error)}`);
               logger.warn(`Failed to move email ${emailId}`, 'IMAPService', error);
             }
           }
@@ -1544,9 +1545,9 @@ export class SimpleIMAPService {
         const folder = cached?.folder ?? 'INBOX';
         if (!emailsByFolder2.has(folder)) emailsByFolder2.set(folder, []);
         emailsByFolder2.get(folder)!.push(emailId);
-      } catch (error: any) {
+      } catch (error: unknown) {
         results.failed++;
-        results.errors.push(`Invalid email ID ${emailId}: ${error.message}`);
+        results.errors.push(`Invalid email ID ${emailId}: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
 
@@ -1561,7 +1562,7 @@ export class SimpleIMAPService {
             this.emailCache.delete(emailId);
             results.success++;
           }
-        } catch (batchError: any) {
+        } catch (batchError: unknown) {
           // Batch failed — fall back to per-email
           logger.warn(`Batch delete failed for folder ${folder}, falling back to per-email`, 'IMAPService', batchError);
           for (const emailId of ids) {
@@ -1569,9 +1570,9 @@ export class SimpleIMAPService {
               await this.client.messageDelete(emailId, { uid: true });
               this.emailCache.delete(emailId);
               results.success++;
-            } catch (error: any) {
+            } catch (error: unknown) {
               results.failed++;
-              results.errors.push(`Failed to delete email ${emailId}: ${error.message}`);
+              results.errors.push(`Failed to delete email ${emailId}: ${error instanceof Error ? error.message : String(error)}`);
               logger.warn(`Failed to delete email ${emailId}`, 'IMAPService', error);
             }
           }
@@ -1609,8 +1610,9 @@ export class SimpleIMAPService {
 
       logger.info(`Folder created: ${folderName}`, 'IMAPService');
       return true;
-    } catch (error: any) {
-      if (error.responseText?.includes('ALREADYEXISTS')) {
+    } catch (error: unknown) {
+      const rt = (error as { responseText?: string }).responseText;
+      if (rt?.includes('ALREADYEXISTS')) {
         logger.warn(`Folder already exists: ${folderName}`, 'IMAPService');
         throw new Error(`Folder '${folderName}' already exists`);
       }
@@ -1646,11 +1648,12 @@ export class SimpleIMAPService {
 
       logger.info(`Folder deleted: ${folderName}`, 'IMAPService');
       return true;
-    } catch (error: any) {
-      if (error.responseText?.includes('NONEXISTENT')) {
+    } catch (error: unknown) {
+      const rt = (error as { responseText?: string }).responseText;
+      if (rt?.includes('NONEXISTENT')) {
         throw new Error(`Folder '${folderName}' does not exist`);
       }
-      if (error.responseText?.includes('HASCHILDREN') || error.responseText?.includes('not empty')) {
+      if (rt?.includes('HASCHILDREN') || rt?.includes('not empty')) {
         throw new Error(`Folder '${folderName}' is not empty. Move or delete emails first.`);
       }
       logger.error('Failed to delete folder', 'IMAPService', error);
@@ -1686,11 +1689,12 @@ export class SimpleIMAPService {
 
       logger.info(`Folder renamed: ${oldName} -> ${newName}`, 'IMAPService');
       return true;
-    } catch (error: any) {
-      if (error.responseText?.includes('NONEXISTENT')) {
+    } catch (error: unknown) {
+      const rt = (error as { responseText?: string }).responseText;
+      if (rt?.includes('NONEXISTENT')) {
         throw new Error(`Folder '${oldName}' does not exist`);
       }
-      if (error.responseText?.includes('ALREADYEXISTS')) {
+      if (rt?.includes('ALREADYEXISTS')) {
         throw new Error(`Folder '${newName}' already exists`);
       }
       logger.error('Failed to rename folder', 'IMAPService', error);
