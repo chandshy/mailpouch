@@ -1,8 +1,24 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { join } from "path";
 import { homedir } from "os";
-import { buildPermissions, defaultConfig, getConfigPath } from "./loader.js";
-import { ALL_TOOLS, TOOL_CATEGORIES } from "./schema.js";
+import { buildPermissions, defaultConfig, getConfigPath, configExists, loadConfig, saveConfig } from "./loader.js";
+import { ALL_TOOLS, TOOL_CATEGORIES, DEFAULT_RESPONSE_LIMITS } from "./schema.js";
+
+// ─── fs mocking for loadConfig / saveConfig / configExists ─────────────────────
+vi.mock("fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("fs")>();
+  return {
+    ...actual,
+    existsSync: vi.fn(),
+    readFileSync: vi.fn(),
+    writeFileSync: vi.fn(),
+    renameSync: vi.fn(),
+    appendFile: vi.fn((_path: string, _data: string, _enc: string, cb: () => void) => cb()),
+  };
+});
+
+// Import mocked fs functions for use in tests
+import { existsSync, readFileSync, writeFileSync, renameSync } from "fs";
 
 describe("buildPermissions", () => {
   describe("read_only", () => {
@@ -182,5 +198,164 @@ describe("getConfigPath", () => {
         delete process.env.PROTONMAIL_MCP_CONFIG;
       }
     }
+  });
+});
+
+// ─── configExists ──────────────────────────────────────────────────────────────
+
+describe("configExists", () => {
+  const mockedExistsSync = vi.mocked(existsSync);
+
+  it("returns true when the config file exists", () => {
+    mockedExistsSync.mockReturnValue(true);
+    expect(configExists()).toBe(true);
+  });
+
+  it("returns false when the config file does not exist", () => {
+    mockedExistsSync.mockReturnValue(false);
+    expect(configExists()).toBe(false);
+  });
+});
+
+// ─── loadConfig ────────────────────────────────────────────────────────────────
+
+describe("loadConfig", () => {
+  const mockedExistsSync = vi.mocked(existsSync);
+  const mockedReadFileSync = vi.mocked(readFileSync);
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  it("returns null when the config file does not exist", () => {
+    mockedExistsSync.mockReturnValue(false);
+    expect(loadConfig()).toBeNull();
+  });
+
+  it("returns null when the config file contains invalid JSON", () => {
+    mockedExistsSync.mockReturnValue(true);
+    mockedReadFileSync.mockReturnValue("NOT JSON{{{" as unknown as Buffer);
+    expect(loadConfig()).toBeNull();
+  });
+
+  it("returns a parsed ServerConfig for a valid minimal config file", () => {
+    mockedExistsSync.mockReturnValue(true);
+    const minimal = JSON.stringify({
+      configVersion: 1,
+      connection: { smtpHost: "localhost", smtpPort: 1025, imapHost: "localhost", imapPort: 1143, username: "u", password: "p", smtpToken: "", bridgeCertPath: "", debug: false },
+      permissions: { preset: "full", tools: {} },
+    });
+    mockedReadFileSync.mockReturnValue(minimal as unknown as Buffer);
+    const cfg = loadConfig();
+    expect(cfg).not.toBeNull();
+    expect(cfg!.permissions.preset).toBe("full");
+    expect(cfg!.connection.smtpHost).toBe("localhost");
+  });
+
+  it("falls back to read_only preset when config has an unknown preset value", () => {
+    mockedExistsSync.mockReturnValue(true);
+    const malicious = JSON.stringify({
+      configVersion: 1,
+      connection: {},
+      permissions: { preset: "superuser", tools: {} },
+    });
+    mockedReadFileSync.mockReturnValue(malicious as unknown as Buffer);
+    const cfg = loadConfig();
+    expect(cfg!.permissions.preset).toBe("read_only");
+  });
+
+  it("filters out unknown tool names from config on disk", () => {
+    mockedExistsSync.mockReturnValue(true);
+    const withUnknown = JSON.stringify({
+      configVersion: 1,
+      connection: {},
+      permissions: {
+        preset: "full",
+        tools: {
+          get_emails: { enabled: true, rateLimit: null },
+          __proto__: { enabled: true, rateLimit: null },
+          evil_tool: { enabled: true, rateLimit: null },
+        },
+      },
+    });
+    mockedReadFileSync.mockReturnValue(withUnknown as unknown as Buffer);
+    const cfg = loadConfig();
+    expect(cfg).not.toBeNull();
+    // Known tools are kept
+    expect(cfg!.permissions.tools["get_emails"]).toBeDefined();
+    // Unknown tools are stripped
+    expect((cfg!.permissions.tools as Record<string, unknown>)["evil_tool"]).toBeUndefined();
+  });
+
+  it("clamps maxResponseBytes to [100_000, 1_048_576]", () => {
+    mockedExistsSync.mockReturnValue(true);
+    // Provide a value below the minimum
+    const cfg1json = JSON.stringify({
+      configVersion: 1, connection: {}, permissions: { preset: "full", tools: {} },
+      responseLimits: { maxResponseBytes: 1, maxEmailBodyChars: 5000, maxEmailListResults: 10, maxAttachmentBytes: 500 },
+    });
+    mockedReadFileSync.mockReturnValue(cfg1json as unknown as Buffer);
+    const cfg1 = loadConfig();
+    expect(cfg1!.responseLimits!.maxResponseBytes).toBe(100_000);
+
+    // Provide a value above the maximum
+    const cfg2json = JSON.stringify({
+      configVersion: 1, connection: {}, permissions: { preset: "full", tools: {} },
+      responseLimits: { maxResponseBytes: 99_999_999, maxEmailBodyChars: 5000, maxEmailListResults: 10, maxAttachmentBytes: 500 },
+    });
+    mockedReadFileSync.mockReturnValue(cfg2json as unknown as Buffer);
+    const cfg2 = loadConfig();
+    expect(cfg2!.responseLimits!.maxResponseBytes).toBe(1_048_576);
+  });
+
+  it("clamps maxEmailListResults to [1, 200]", () => {
+    mockedExistsSync.mockReturnValue(true);
+    const cfgjson = JSON.stringify({
+      configVersion: 1, connection: {}, permissions: { preset: "full", tools: {} },
+      responseLimits: { maxResponseBytes: 500000, maxEmailBodyChars: 5000, maxEmailListResults: 9999, maxAttachmentBytes: 500 },
+    });
+    mockedReadFileSync.mockReturnValue(cfgjson as unknown as Buffer);
+    const cfg = loadConfig();
+    expect(cfg!.responseLimits!.maxEmailListResults).toBe(200);
+  });
+
+  it("clamps non-finite responseLimits values to the minimum", () => {
+    mockedExistsSync.mockReturnValue(true);
+    const cfgjson = JSON.stringify({
+      configVersion: 1, connection: {}, permissions: { preset: "full", tools: {} },
+      responseLimits: { maxResponseBytes: null, maxEmailBodyChars: null, maxEmailListResults: null, maxAttachmentBytes: null },
+    });
+    mockedReadFileSync.mockReturnValue(cfgjson as unknown as Buffer);
+    const cfg = loadConfig();
+    // clamp(null, min, max) → min because !isFinite(null) → !isFinite(0) is false actually
+    // JSON null → 0 in number context; isFinite(0) is true, so clamp(0, 100000, ...) → 100000
+    expect(cfg!.responseLimits!.maxResponseBytes).toBe(100_000);
+  });
+});
+
+// ─── saveConfig ────────────────────────────────────────────────────────────────
+
+describe("saveConfig", () => {
+  const mockedWriteFileSync = vi.mocked(writeFileSync);
+  const mockedRenameSync = vi.mocked(renameSync);
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  it("calls writeFileSync and renameSync to perform an atomic write", () => {
+    const cfg = defaultConfig();
+    saveConfig(cfg);
+    expect(mockedWriteFileSync).toHaveBeenCalledTimes(1);
+    expect(mockedRenameSync).toHaveBeenCalledTimes(1);
+  });
+
+  it("writes valid JSON containing the config", () => {
+    const cfg = defaultConfig();
+    cfg.connection.username = "testuser";
+    saveConfig(cfg);
+    const [, payload] = mockedWriteFileSync.mock.calls[0] as [string, string];
+    const parsed = JSON.parse(payload);
+    expect(parsed.connection.username).toBe("testuser");
   });
 });
