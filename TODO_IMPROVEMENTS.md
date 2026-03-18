@@ -1,6 +1,6 @@
 # TODO Improvements — Prioritized Backlog
 
-Last updated: Cycle #2 (2026-03-17)
+Last updated: Cycle #3 (2026-03-18)
 
 ---
 
@@ -33,23 +33,15 @@ Second "// 3." corrected to "// 4." in `src/index.ts`.
 ### [DONE - Cycle 2] `list_labels` detection logic cleanup
 Removed redundant `|| f.name?.startsWith("Labels/")` condition.
 
-### 1. `move_email` / `bulk_move_emails` — missing targetFolder validation
-**File:** `src/index.ts` cases `move_email` (line ~1854) and `bulk_move_emails` (line ~1934)
-**Issue:** `args.targetFolder` is passed directly to `imapService.moveEmail()` without calling `validateTargetFolder()`. The other handlers (`remove_label`, `bulk_remove_label`) now use the helper; these two don't.
-**Fix:** Add `validateTargetFolder()` call before the `moveEmail()` call in both handlers.
-**Effort:** ~5 lines each, very low risk
+### [DONE - Cycle 3] `move_email` / `bulk_move_emails` — missing targetFolder validation
+Added `validateTargetFolder()` call before `imapService.moveEmail()` in both handlers.
+Returns `McpError(InvalidParams)` for `..`, control chars, or oversized strings.
 
-### 2. `send_test_email` validation — friendly error
-**File:** `src/index.ts` case `send_test_email`
-**Issue:** `args.to` is not validated before passing to `smtpService`. If invalid, error propagates from SMTP service and gets caught by `safeErrorMessage` which may strip detail.
-**Fix:** Add `isValidEmail(args.to)` check at the handler level with a clear error message, consistent with `send_email`.
-**Effort:** ~5 lines, low risk
+### [DONE - Cycle 3] `send_test_email` validation — friendly error
+Added `isValidEmail(args.to)` check at handler entry. Returns `McpError(InvalidParams)`.
 
-### 3. `parseEmails` — silent dropping of invalid addresses
-**File:** `src/utils/helpers.ts`
-**Issue:** Invalid addresses in a comma-separated list are silently dropped. No warning is emitted.
-**Fix:** Log a warning for dropped addresses.
-**Effort:** ~5 lines, low risk
+### [DONE - Cycle 3] `parseEmails` — silent dropping of invalid addresses
+Imported `logger` into helpers.ts. `parseEmails` now calls `logger.warn(...)` for each dropped address.
 
 ### 4. `send_test_email` body uses emoji in HTML
 **File:** `src/index.ts` case `send_test_email`

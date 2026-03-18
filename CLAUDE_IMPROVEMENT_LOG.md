@@ -123,3 +123,57 @@ No new HIGH/MEDIUM issues found. Confirmed all cycle 1 fixes still intact.
 5. IMAP connection health check (`NOOP` before ops) — medium effort, moderate risk
 
 ---
+
+## Cycle #3
+**Timestamp:** 2026-03-18 00:00–00:10 Eastern
+**Git commit:** `d4a261a`
+**Branch:** main
+**Model:** claude-sonnet-4-6
+
+### Audit Highlights (new findings this cycle)
+
+No new HIGH/MEDIUM issues found. Confirmed all cycle 1 & 2 fixes still intact.
+
+**Confirmed from Next Cycle Focus list:**
+- `move_email` handler — `args.targetFolder` passed to `imapService.moveEmail()` without `validateTargetFolder()` (now fixed)
+- `bulk_move_emails` handler — same gap (now fixed)
+- `send_test_email` handler — `args.to` not validated before SMTP (now fixed)
+- `parseEmails` — silently dropped invalid addresses with no log (now fixed)
+
+**Additional audit findings (no new issues):**
+- `archive_email`, `move_to_trash`, `move_to_spam` use hardcoded literal strings — no validation needed
+- All 4 handlers that accept caller-supplied `targetFolder` now uniformly use `validateTargetFolder()`
+- `send_email` delegates validation to smtpService; `send_test_email` now validates at handler level first
+
+### Work Completed This Cycle
+
+1. **`move_email`** — Added `validateTargetFolder(args.targetFolder)` check before `imapService.moveEmail()`. Returns `McpError(InvalidParams)` for `..`, control chars, or oversized strings. (+4 lines)
+
+2. **`bulk_move_emails`** — Added `validateTargetFolder(args.targetFolder)` check before iterating IDs. Fails fast before touching any email. (+3 lines)
+
+3. **`send_test_email`** — Added `isValidEmail(args.to)` check at handler entry. Returns `McpError(InvalidParams, "Invalid recipient email address: <addr>")`. (+3 lines)
+
+4. **`parseEmails` in `src/utils/helpers.ts`** — Imported `logger`. Rewrote filter to a `for` loop that calls `logger.warn(...)` for each dropped invalid address. Callers using CC/BCC paths will now see warnings in logs. (+11 lines, -3 lines)
+
+**Files changed:** `src/index.ts` (+10 lines), `src/utils/helpers.ts` (+17 lines, -5 lines)
+
+### Validation Results
+
+- `npm run build` — PASS (0 TypeScript errors)
+- `npm test` — PASS (242/242 tests, 14 test files)
+
+### Git Status
+
+- Commit: `d4a261a`
+- Pushed to: `origin/main`
+
+### Next Cycle Focus
+
+**Priority items for Cycle #4:**
+1. Add tests for the new `move_email`, `bulk_move_emails`, `send_test_email` handler-level validation (invalid targetFolder / invalid email address inputs)
+2. Cursor token HMAC binding — bind cursor JSON to HMAC-SHA256 keyed on a server-startup secret (LOW security impact, medium effort)
+3. IMAP reconnect on silent TCP drop — `ensureConnection()` NOOP check (MEDIUM risk, medium effort)
+4. `send_test_email` body emoji cleanup (cosmetic, trivial)
+5. Review any remaining handlers that receive free-text user input without sanitization
+
+---
