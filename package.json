@@ -77,7 +77,7 @@
     "@napi-rs/keyring": "~1.2.0"
   },
   "devDependencies": {
-    "@types/node": "^22.10.2",
+    "@types/node": "^25.5.0",
     "@types/nodemailer": "^6.4.19",
     "@vitest/coverage-v8": "^4.0.0",
     "typescript": "^5.7.2",
