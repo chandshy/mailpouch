@@ -973,8 +973,30 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                 },
               },
             },
-            topSenders: { type: "array", items: { type: "object" } },
-            topRecipients: { type: "array", items: { type: "object" } },
+            topSenders: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  email: { type: "string" },
+                  count: { type: "number", description: "Number of emails received from this sender" },
+                  lastContact: { type: "string", format: "date-time" },
+                },
+                required: ["email", "count", "lastContact"],
+              },
+            },
+            topRecipients: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  email: { type: "string" },
+                  count: { type: "number", description: "Number of emails sent to this recipient" },
+                  lastContact: { type: "string", format: "date-time" },
+                },
+                required: ["email", "count", "lastContact"],
+              },
+            },
             responseTimeStats: {
               description: "Null when no sent replies could be matched to received emails.",
               oneOf: [
@@ -992,8 +1014,37 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                 { type: "null" },
               ],
             },
-            peakActivityHours: { type: "array", items: { type: "object" } },
-            attachmentStats: { type: "object" },
+            peakActivityHours: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  hour: { type: "number", description: "Hour of day (0–23)" },
+                  count: { type: "number", description: "Number of emails in this hour" },
+                },
+                required: ["hour", "count"],
+              },
+            },
+            attachmentStats: {
+              type: "object",
+              properties: {
+                totalAttachments: { type: "number" },
+                totalSizeMB: { type: "number" },
+                averageSizeMB: { type: "number" },
+                mostCommonTypes: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    properties: {
+                      type: { type: "string", description: "MIME top-level type (e.g. image, application)" },
+                      count: { type: "number" },
+                    },
+                    required: ["type", "count"],
+                  },
+                },
+              },
+              required: ["totalAttachments", "totalSizeMB", "averageSizeMB", "mostCommonTypes"],
+            },
           },
           required: ["volumeTrends", "topSenders", "topRecipients"],
         },
@@ -1019,9 +1070,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                 type: "object",
                 properties: {
                   email: { type: "string" },
+                  name: { type: "string", description: "Display name if available" },
                   emailsSent: { type: "number" },
                   emailsReceived: { type: "number" },
                   lastInteraction: { type: "string", format: "date-time" },
+                  firstInteraction: { type: "string", format: "date-time" },
+                  averageResponseTime: { type: "number", description: "Average response time in hours, if measurable" },
+                  isFavorite: { type: "boolean" },
                 },
                 required: ["email", "emailsSent", "emailsReceived"],
               },
