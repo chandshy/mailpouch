@@ -4,6 +4,33 @@ This file records every autonomous improvement cycle run on this codebase.
 
 ---
 
+## Cycle #26 — RFC 2822 subject length cap (send_email/save_draft/schedule_email), escalation handler McpError consistency
+**Timestamp:** 2026-03-18
+**Branch:** main
+
+### Audit Highlights
+
+**Build & Tests (pre-work):** Clean build, 535/535 tests passing.
+
+**New Findings (all corrected this cycle):**
+
+1. **`send_email` / `save_draft` / `schedule_email` — no handler-level subject length cap** — RFC 2822 §2.1.1 specifies that a single header line MUST NOT exceed 998 characters (excluding the CRLF terminator). None of the three outbound email handlers checked the `subject` field length before forwarding it to nodemailer or IMAP. A multi-kilobyte subject could cause header-bloat issues, be silently truncated or rejected by the receiving MTA, or trigger OOM in MIME parsers. Added a shared `MAX_SUBJECT_LENGTH = 998` constant and a guard `if (subject.length > MAX_SUBJECT_LENGTH) throw new McpError(InvalidParams, ...)` to all three handlers.
+
+2. **`request_permission_escalation` / `check_escalation_status` — parameter validation used `return { isError: true, content: [...] }` instead of `throw new McpError()`** — Both meta-tool handlers used the non-standard `return { isError: true }` pattern for parameter validation failures (invalid `target_preset` and malformed `challenge_id` respectively), while every other handler in the codebase throws `new McpError(ErrorCode.InvalidParams, ...)` for the same class of error. The non-standard pattern bypasses the outer try/catch's `McpError` pass-through and produces a different response shape. Replaced both with `throw new McpError(ErrorCode.InvalidParams, ...)`.
+
+### Changes
+
+- `src/index.ts`: Added `MAX_SUBJECT_LENGTH = 998` constant before the try/switch block. Added subject length guard in `send_email` (4 lines). Added subject length guard in `save_draft` (4 lines). Added subject length guard in `schedule_email` (4 lines). Replaced `return { isError: true, ... }` with `throw new McpError(ErrorCode.InvalidParams, ...)` in `request_permission_escalation` target_preset check (2 lines). Same replacement in `check_escalation_status` challenge_id check (2 lines).
+- `src/utils/helpers.test.ts`: Added 32 new tests covering all three new guard paths: subject length cap for send_email/save_draft/schedule_email (10 tests), request_permission_escalation target_preset validation (10 tests), check_escalation_status challenge_id format validation (12 tests).
+
+### Test Results
+
+**Before:** 535 tests passing
+**After:** 567 tests passing (+32)
+**Build:** Clean (0 TypeScript errors)
+
+---
+
 ## Cycle #25 — get_emails/search_emails limit type guard, search_emails date-range cross-validation, download_attachment index upper bound
 **Timestamp:** 2026-03-18
 **Branch:** main
