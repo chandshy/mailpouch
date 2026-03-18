@@ -68,7 +68,7 @@
     "win32"
   ],
   "dependencies": {
-    "@modelcontextprotocol/sdk": "~1.20.1",
+    "@modelcontextprotocol/sdk": "~1.27.1",
     "imapflow": "~1.1.0",
     "mailparser": "~3.7.5",
     "nodemailer": "~6.10.1"
