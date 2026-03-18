@@ -1,6 +1,6 @@
 # TODO Improvements — Prioritized Backlog
 
-Last updated: Cycle #32 (2026-03-18)
+Last updated: Cycle #33 (2026-03-18)
 
 ---
 
@@ -349,4 +349,12 @@ The `LogEntry` interface has an optional `data?: any` field carrying sanitized/r
 ### [DONE - Cycle 32] `list_labels` — `(f: any)` cast in array filter
 The `list_labels` filter used `(f: any)` with optional chaining `f.path?.startsWith()`. Since `getFolders()` returns `EmailFolder[]` and `path` is non-optional, the cast was spurious. Replaced with `(f: EmailFolder)` and direct `f.path.startsWith()`. Added `EmailFolder` to the import line.
 
-IMPROVEMENT CYCLES COMPLETE — 2026-03-18 — 32 cycles
+## NEW — Cycle #33 Findings (all completed in Cycle #33)
+
+### [DONE - Cycle 33] `send_email` / `reply_to_email` / `save_draft` / `schedule_email` — `isHtml` missing boolean type guard
+All four handlers cast `args.isHtml as boolean | undefined` with no runtime type check. A non-boolean truthy value (e.g. `"yes"` or `1`) would pass silently to nodemailer and enable HTML mode without any caller error. Added `if (args.isHtml !== undefined && typeof args.isHtml !== "boolean") throw McpError(InvalidParams)` in all four handlers, consistent with the type guards added for other optional fields in Cycles #28–#32.
+
+### [DONE - Cycle 33] `send_email` / `save_draft` / `schedule_email` — `body` field has no max-length cap
+No upper bound on outbound email body. A 100 MB body would exhaust Node.js heap or cause an SMTP timeout with an opaque error. For `schedule_email` the body is serialized to disk and re-read on every startup, compounding the resource cost. Added `MAX_BODY_LENGTH = 10 * 1024 * 1024` constant and guard in all three handlers → `McpError(InvalidParams, "'body' must not exceed 10 MB.")`.
+
+IMPROVEMENT CYCLES COMPLETE — 2026-03-18 — 33 cycles

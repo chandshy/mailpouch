@@ -4,6 +4,33 @@ This file records every autonomous improvement cycle run on this codebase.
 
 ---
 
+## Cycle #33 — isHtml boolean type guard, body max-length cap
+**Timestamp:** 2026-03-18
+**Branch:** main
+
+### Audit Highlights
+
+**Build & Tests (pre-work):** Clean build, 720/720 tests passing.
+
+**New Findings (all corrected this cycle):**
+
+1. **`send_email` / `reply_to_email` / `save_draft` / `schedule_email` — `isHtml` missing boolean type guard** — All four handlers cast `args.isHtml as boolean | undefined` with no runtime type check. A non-boolean truthy value (e.g. string `"yes"`, number `1`, array `[true]`) would pass through silently and be forwarded to nodemailer, which evaluates the value as truthy and enables HTML rendering mode without any error to the caller. While the functional impact is limited (wrong mode selection, not a security issue), it is an inconsistency with every other validated optional field in the codebase. Added `if (args.isHtml !== undefined && typeof args.isHtml !== "boolean") throw new McpError(ErrorCode.InvalidParams, "'isHtml' must be a boolean when provided.")` in all four handlers, consistent with the `cc`/`bcc` type guards (Cycle #31) and `customMessage` type guard (Cycle #32).
+
+2. **`send_email` / `save_draft` / `schedule_email` — `body` field has no max-length cap** — There is no upper bound on the outbound email body. A 100 MB body would exhaust Node.js heap (or cause an SMTP timeout with an opaque "Email delivery failed" result) before any error is surfaced to the caller. For `schedule_email` the problem is compounded: the body is serialized into the scheduler's JSON persistence file and re-loaded on every startup, making an oversized body a persistent resource drain. Added `MAX_BODY_LENGTH = 10 * 1024 * 1024` (10 MB) constant near `MAX_SUBJECT_LENGTH` and guard `if (body.length > MAX_BODY_LENGTH) throw new McpError(ErrorCode.InvalidParams, "'body' must not exceed 10 MB.")` in all three handlers. 10 MB is well above any legitimate email body; Proton Bridge's own limit is lower, but the handler-level guard gives callers a clear `McpError(InvalidParams)` rather than an opaque delivery failure.
+
+### Changes
+
+- `src/index.ts`: Added `MAX_BODY_LENGTH = 10 * 1024 * 1024` constant (with explanatory comment) below `MAX_SUBJECT_LENGTH`. Added `isHtml` type guard in `send_email` (4 lines + comment). Added body max-length guard in `send_email` (4 lines + comment). Added `isHtml` type guard in `reply_to_email` (4 lines + comment). Added body max-length guard in `save_draft` (4 lines + comment). Added `isHtml` type guard in `save_draft` (4 lines + comment). Added body max-length guard in `schedule_email` (4 lines + comment). Added `isHtml` type guard in `schedule_email` (4 lines + comment).
+- `src/utils/helpers.test.ts`: Added 17 new tests: 10 for the `isHtml` boolean type guard and 7 for the `body` max-length guard (including boundary, over-boundary, and constant-value cases).
+
+### Test Results
+
+**Before:** 720 tests passing
+**After:** 737 tests passing (+17)
+**Build:** Clean (0 TypeScript errors)
+
+---
+
 ## Cycle #32 — send_test_email customMessage type guard, get_logs outputSchema data field, list_labels type safety
 **Timestamp:** 2026-03-18
 **Branch:** main

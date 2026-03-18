@@ -1,7 +1,18 @@
 # Final Security & Quality Audit Report
 ## Codebase: protonmail-mcp-server
 ## Date: 2026-03-18
-## Cycles completed: 32
+## Cycles completed: 33
+
+### Cycle #33 Addendum
+
+Cycle #33 identified and resolved two quality gaps:
+
+1. **`isHtml` boolean type guard in 4 handlers** — `send_email`, `reply_to_email`, `save_draft`, and `schedule_email` all used `args.isHtml as boolean | undefined` with no runtime type check. A non-boolean truthy value (e.g. `"yes"`, `1`, `[true]`) passed silently to nodemailer which evaluates it as truthy and enables HTML rendering mode without any error to the caller. Added `if (args.isHtml !== undefined && typeof args.isHtml !== "boolean") throw new McpError(InvalidParams)` in all four handlers, consistent with the type guards for all other optional fields.
+2. **`body` max-length cap in 3 send handlers** — No upper bound existed on outbound email body length. A 100 MB body would exhaust Node.js heap or cause an SMTP timeout with an opaque delivery failure. For `schedule_email` the body is serialized to disk, making an oversized body a persistent resource drain. Added `MAX_BODY_LENGTH = 10 MB` constant and guard in `send_email`, `save_draft`, and `schedule_email`.
+
+No security findings beyond the above. Build clean. 737/737 tests pass (+17 over Cycle #32 baseline of 720).
+
+---
 
 ### Cycle #32 Addendum
 
