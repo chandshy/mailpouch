@@ -254,7 +254,7 @@ legend {
 
 /* ── Form fields ── */
 .field { margin-bottom: 18px; }
-.field label {
+.field label:not(.toggle-wrap) {
   display: block; font-size: 13px; font-weight: 600;
   color: var(--text2); margin-bottom: 6px;
 }
