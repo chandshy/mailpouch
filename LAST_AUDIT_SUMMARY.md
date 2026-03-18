@@ -1,51 +1,51 @@
-# Last Audit Summary — Cycle #5
-**Date:** 2026-03-18 00:30 Eastern
+# Last Audit Summary — Cycle #6
+**Date:** 2026-03-18 00:50 Eastern
 **Auditor:** Claude Sonnet 4.6 (auto-improve cycle)
 
 ---
 
 ## Scope
 
-This cycle performed a focused audit of the areas flagged in Cycle #4's "Next Cycle Focus":
-- `src/index.ts` — `decodeCursor` function: `parsed.folder` field validation
-- `src/index.ts` — `get_email_by_id` handler: `emailId` non-empty/numeric guard
-- `src/index.ts` — `download_attachment` handler: `email_id` and `attachment_index` guards
-- `src/index.ts` — scan of all remaining handlers for any other missing input guards
-- `src/services/simple-imap-service.ts` — `getEmailById` and `downloadAttachment` signatures and internal validation
+This cycle performed a focused audit of the areas flagged in Cycle #5's "Next Cycle Focus":
+- `src/utils/helpers.test.ts` — existing test structure reviewed to plan new test additions without duplication
+- `src/index.ts` — `decodeCursor` function: confirmed `validateTargetFolder` guard from Cycle #5 (lines 159–177)
+- `src/index.ts` — `get_email_by_id` handler: confirmed numeric UID guard from Cycle #5 (lines 1652–1662)
+- `src/index.ts` — `download_attachment` handler: confirmed email_id and attachment_index guards from Cycle #5 (lines 1805–1819)
+- `src/index.ts` — `search_emails` handler: confirmed no length cap on `from`/`to`/`subject` free-text fields (now fixed)
+- `src/services/simple-imap-service.ts` — `searchEmails` method: imapflow handles IMAP SEARCH criteria encoding internally; no string interpolation into raw IMAP commands confirmed
 
-No new HIGH or MEDIUM issues were found. All cycle 1–4 fixes confirmed intact.
+No new HIGH or MEDIUM issues were found. All cycle 1–5 fixes confirmed intact.
 
 ---
 
 ## Issues Confirmed / Fixed This Cycle
 
-**[DONE] `decodeCursor` — `parsed.folder` now validated via `validateTargetFolder()`**
-Inside `decodeCursor`, after passing structural type checks, `validateTargetFolder(parsed.folder)` is called. If it returns a non-null error string (traversal `..`, control chars, or >1000 chars), the function returns `null`, which callers treat as "Invalid or expired cursor". (+2 lines in `src/index.ts`)
+**[DONE] Add 29 unit tests for Cycle #5 handler guards**
+Three new `describe` blocks added to `src/utils/helpers.test.ts`:
+- `decodeCursor folder validation (validateTargetFolder)` — 8 tests covering valid inputs, traversal payloads, null bytes, C0 control chars, and boundary/over-limit lengths
+- `get_email_by_id handler validation (numeric UID guard)` — 10 tests covering the exact inline guard expression `(!rawEmailId || typeof rawEmailId !== 'string' || !/^\d+$/.test(rawEmailId))`
+- `download_attachment handler validation` — 11 tests covering both the email_id guard and the `(!Number.isInteger(rawAttIdx) || rawAttIdx < 0)` attachment_index guard
 
-**[DONE] `get_email_by_id` — handler-level numeric UID guard**
-`args.emailId` is now checked with `!/^\d+$/.test(rawEmailId)` before the IMAP call. Returns `McpError(InvalidParams, "emailId must be a non-empty numeric UID string.")` for empty, non-string, or non-numeric values. (+3 lines in `src/index.ts`)
-
-**[DONE] `download_attachment` — handler-level guards on `email_id` and `attachment_index`**
-`args.email_id` validated with the same numeric UID pattern. `args.attachment_index` validated with `!Number.isInteger(rawAttIdx) || rawAttIdx < 0`. Both return `McpError(InvalidParams, ...)` with clear messages. (+6 lines in `src/index.ts`)
+**[DONE] `search_emails` free-text length caps**
+Added `const MAX_SEARCH_TEXT = 500` and three inline checks at handler entry in `src/index.ts`. Any `from`, `to`, or `subject` field exceeding 500 characters now throws `McpError(InvalidParams)` with a clear message before the IMAP call. (+12 lines in `src/index.ts`)
 
 ---
 
-## Other Handlers Reviewed (no issues found)
+## Other Areas Reviewed (no issues found)
 
-- `search_emails` `from`/`to`/`subject` — passed to imapflow search criteria object. imapflow serialises these internally; no string interpolation into raw IMAP commands. No injection risk identified. Max-length guard noted as low-priority future item.
-- `cancel_scheduled_email` `args.id` — scheduler returns false for unknown/empty IDs, caller returns "Not found or not pending". No injection risk; guard not needed.
-- `mark_email_read`, `star_email`, `delete_email` — `emailId` passed to service methods that call `validateEmailId()` (throws if non-numeric). Service-level protection is sufficient; handler-level guard would be redundant but consistent. Not added (existing pattern acceptable).
-- `reply_to_email` — `emailId` validated with `!/^\d+$/.test(emailId)` at line 2387 (already present from prior work).
+- `search_emails` imapflow safety: imapflow's IMAP SEARCH serialiser encodes criteria objects; no raw string interpolation into IMAP commands. The 500-char cap is defence-in-depth only.
+- Cycle 1–5 validation helpers and handler guards: all confirmed intact via full test suite (287/287 pass).
+- `download_attachment` `attachment_index`: `Number.isInteger` correctly rejects floats, NaN, strings, and undefined while accepting 0 (first attachment).
 
 ---
 
 ## Remaining / Newly Identified Issues
 
-**[LOW] Add unit tests for Cycle #5 guards**
-No tests yet for the new `decodeCursor` folder-validation path, `get_email_by_id` emailId guard, or `download_attachment` guards. Pattern established in Cycle #4.
+**[LOW] `create_folder` / `rename_folder` args — handler-level validateFolderName**
+`args.folderName` (create_folder) and `args.newName` (rename_folder) may not have `validateFolderName()` called at handler level before being passed to the IMAP service. Worth auditing in Cycle #7.
 
-**[LOW] `search_emails` free-text fields — max-length guard**
-`from`, `to`, `subject` fields have no length cap at handler level. imapflow handles encoding safely; no injection risk. A 500-char cap would be a cosmetic consistency improvement.
+**[LOW] Remaining `args.X as Y` casts — type-check audit**
+Many handlers use `args.X as SomeType` without a runtime check. JSON schema validation at the MCP layer provides some protection, but a targeted scan would identify any gaps.
 
 **[MEDIUM] IMAP reconnect on TCP RST**
 `ensureConnection()` relies on `isConnected` flag which doesn't detect silent TCP drops. Architectural — defer.
@@ -58,6 +58,6 @@ No tests yet for the new `decodeCursor` folder-validation path, `get_email_by_id
 |----------|-------|--------|
 | HIGH     | 0     | — |
 | MEDIUM   | 1     | IMAP reconnect (existing, architectural) |
-| LOW      | 2     | unit tests for new guards + search_emails length cap |
+| LOW      | 2     | create/rename folder handler-level validation + args cast audit |
 
-All HIGH/MEDIUM security issues from Cycles #1–4 are fixed and tested. Test count remains 258 (no new tests this cycle — test additions deferred to Cycle #6). All three targeted LOW-priority fixes from Cycle #4's Next Cycle Focus are now complete.
+All HIGH/MEDIUM security issues from Cycles #1–5 are fixed and tested. Test count increased from 258 to 287 (+29 new tests). Both targeted items from Cycle #5's Next Cycle Focus are now complete.

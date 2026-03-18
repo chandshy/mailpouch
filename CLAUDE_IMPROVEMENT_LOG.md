@@ -275,3 +275,55 @@ No new HIGH/MEDIUM issues found. Confirmed all cycle 1–4 fixes still intact.
 4. IMAP reconnect / NOOP health check — architectural backlog, defer.
 
 ---
+
+## Cycle #6
+**Timestamp:** 2026-03-18 00:50–01:00 Eastern
+**Git commit:** `403dcaa`
+**Branch:** main
+**Model:** claude-sonnet-4-6
+
+### Audit Highlights (new findings this cycle)
+
+No new HIGH/MEDIUM issues found. Confirmed all cycle 1–5 fixes still intact.
+
+**Confirmed from Next Cycle Focus list:**
+- `decodeCursor` — `validateTargetFolder` guard added in Cycle #5 had no unit tests covering its various rejection paths. (now tested)
+- `get_email_by_id` — numeric UID guard from Cycle #5 had no unit tests. (now tested)
+- `download_attachment` — `email_id` and `attachment_index` guards from Cycle #5 had no unit tests. (now tested)
+- `search_emails` `from`/`to`/`subject` — no length cap at handler level. (now fixed)
+
+**Additional audit items checked:**
+- `search_emails` input schema reviewed: `from`, `to`, `subject` are unbound `string` fields with no `maxLength` in schema and no handler-level guard. Length checks added inline. imapflow encodes these safely; the new guard is defence-in-depth only.
+- All other handlers reviewed — no additional gaps found.
+
+### Work Completed This Cycle
+
+1. **Add 29 unit tests in `src/utils/helpers.test.ts`** — Three new `describe` blocks:
+   - `decodeCursor folder validation (validateTargetFolder)` — 8 tests: valid INBOX, valid path with slash, boundary (1000 chars), traversal `../../etc/passwd`, embedded `Labels/../INBOX`, null byte, C0 control char, over-limit (1001 chars)
+   - `get_email_by_id handler validation (numeric UID guard)` — 10 tests: valid "12345", valid "1", empty string, "abc", "12a3", "-1", "1.5", null, undefined, null-byte injection
+   - `download_attachment handler validation` — 11 tests: email_id valid/empty/non-numeric/null; attachment_index valid 0/valid 3/negative/-1/float 1.5/NaN/string "0"/undefined
+   (+179 lines in helpers.test.ts)
+
+2. **`search_emails` max-length guards** — Added `MAX_SEARCH_TEXT = 500` constant and three length checks (for `from`, `to`, `subject`) at handler entry in `src/index.ts`. Returns `McpError(InvalidParams)` with a clear message for each. (+12 lines)
+
+**Files changed:** `src/utils/helpers.test.ts` (+179 lines), `src/index.ts` (+12 lines)
+
+### Validation Results
+
+- `npm run build` — PASS (0 TypeScript errors)
+- `npm test` — PASS (287/287 tests, 14 test files, +29 new tests vs 258 in cycle 5)
+
+### Git Status
+
+- Commit: `403dcaa`
+- Pushed to: `origin/main`
+
+### Next Cycle Focus
+
+**Priority items for Cycle #7:**
+1. Cursor token HMAC binding — architectural backlog, still deferred (medium effort, low security payoff since cursors are ephemeral paginated tokens).
+2. IMAP reconnect / NOOP health check — architectural backlog, still deferred (medium effort, moderate risk).
+3. Review remaining any-typed `args` casts in handlers — identify whether any args are passed to services without a runtime type-check (find patterns like `args.X as Y` where Y is a complex type or object).
+4. `create_folder` / `rename_folder` — `folderName` / `newName` args: check whether `validateFolderName()` (or equivalent) is called before passing to IMAP service.
+
+---

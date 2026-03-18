@@ -61,18 +61,28 @@ Fixed in `src/index.ts`. Added `!/^\d+$/.test(rawEmailId)` guard in `get_email_b
 
 ---
 
-## NEW — Cycle #5 Findings
+## NEW — Cycle #5 Findings (all completed in Cycle #6)
 
-### 9. Add tests for Cycle #5 handler-level guards
-**File:** `src/utils/helpers.test.ts`
-**Issue:** No unit tests yet for the new `decodeCursor` folder-validation path, `get_email_by_id` emailId numeric guard, or `download_attachment` email_id / attachment_index guards.
-**Effort:** LOW — ~20 tests, same pattern as Cycle #4 test additions
-**Risk:** NONE (test-only change)
+### [DONE - Cycle 6] Add tests for Cycle #5 handler-level guards
+Added 29 unit tests in `src/utils/helpers.test.ts` covering all branches of the three Cycle #5 guards: `decodeCursor` folder-validation (8 tests), `get_email_by_id` numeric UID guard (10 tests), and `download_attachment` email_id + attachment_index guards (11 tests).
 
-### 10. `search_emails` free-text fields — consider max-length guard
-**File:** `src/index.ts` `search_emails` handler
-**Issue:** `from`, `to`, `subject` fields passed to imapflow without length cap. imapflow handles encoding; no injection risk, but excessively long strings could produce large IMAP SEARCH commands.
-**Effort:** LOW — add 3 length checks (e.g. max 500 chars each)
+### [DONE - Cycle 6] `search_emails` free-text fields — max-length guard
+Added `MAX_SEARCH_TEXT = 500` and three inline checks in the `search_emails` handler in `src/index.ts`. Returns `McpError(InvalidParams)` for `from`/`to`/`subject` exceeding 500 characters.
+
+---
+
+## NEW — Cycle #6 Findings
+
+### 11. `create_folder` / `rename_folder` args — validateFolderName check
+**File:** `src/index.ts` `create_folder` and `rename_folder` handlers
+**Issue:** `args.folderName` and `args.newName` may be passed to IMAP service without `validateFolderName()` check at handler level. Service may have internal validation; worth confirming and adding handler-level guard for consistency.
+**Effort:** LOW — ~4 lines each handler
+**Risk:** LOW
+
+### 12. Remaining `args.X as Y` casts — type-check audit
+**File:** `src/index.ts`
+**Issue:** Many handlers use `args.X as SomeType` without a runtime check. Most are guarded by JSON schema validation at the MCP layer, but a targeted audit would identify any gaps where a malformed arg could reach a service method unguarded.
+**Effort:** LOW–MEDIUM — audit only, fix if gaps found
 **Risk:** LOW
 
 ---
