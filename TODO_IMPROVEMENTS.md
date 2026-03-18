@@ -1,6 +1,6 @@
 # TODO Improvements — Prioritized Backlog
 
-Last updated: Cycle #10 (2026-03-18)
+Last updated: Cycle #11 (2026-03-18)
 
 ---
 
@@ -117,24 +117,31 @@ Partially addressed: `truncate()` in `helpers.ts` received expanded JSDoc. `Simp
 
 ---
 
-## NEW — Cycle #10 Findings
+## NEW — Cycle #10 Findings (all completed in Cycle #11)
 
-### 20. `(result as any).uid` in `simple-imap-service.ts` saveDraft
-**File:** `src/services/simple-imap-service.ts` line 774
-**Issue:** imapflow's `client.append()` return type omits `uid` from its TypeScript declarations. The `as any` cast is currently required. A local `interface AppendResult { uid?: number }` type assertion would be cleaner.
-**Effort:** LOW (~5 lines)
+### [DONE - Cycle 11] `(result as any).uid` in `simple-imap-service.ts` saveDraft
+Added local `interface AppendResult { uid?: number }` before the class definition. Cast narrowed from `as any` to `as AppendResult`. Zero remaining `as any` casts for this access path.
+
+### [DONE - Cycle 11] `(att as any).content = undefined` in `simple-imap-service.ts` wipeCache
+`EmailAttachment.content` was already `content?: Buffer | string` (optional). The cast was spurious. Replaced with direct `att.content = undefined`.
+
+### [DONE - Cycle 11] JSDoc coverage — SimpleIMAPService and SmtpService public methods
+14 public methods now documented: `connect`, `disconnect`, `isActive`, `getFolders`, `getEmails`, `getEmailById`, `searchEmails`, `markEmailRead`, `starEmail`, `moveEmail` (SimpleIMAPService); `verifyConnection`, `sendEmail`, `sendTestEmail`, `close` (SmtpService). `saveDraft` was already documented.
+
+---
+
+## NEW — Cycle #11 Findings
+
+### 23. `smtp-service.ts` `wipeCredentials()` — remaining `as any` casts
+**File:** `src/services/smtp-service.ts` lines 359–361
+**Issue:** `(config.smtp as any).password = ""`, `(config.smtp as any).smtpToken = ""`, `(config.smtp as any).username = ""` — avoidable. `SMTPConfig` fields are mutable strings; direct assignment compiles cleanly (confirmed in Cycle #10 for the shutdown handler in `index.ts`).
+**Effort:** LOW (~3 lines)
 **Risk:** None
 
-### 21. `(att as any).content = undefined` in `simple-imap-service.ts` wipeCache
-**File:** `src/services/simple-imap-service.ts` line 1196
-**Issue:** `EmailAttachment.content` is typed `Buffer | string` (no undefined). The cast is needed to null out content for memory scrubbing. Making `content?: Buffer | string` in `types/index.ts` would allow direct `att.content = undefined`.
-**Effort:** LOW (~3 lines)
-**Risk:** LOW — verify all callers handle optional content (already guarded with `if (att.content && Buffer.isBuffer(att.content))`)
-
-### 22. JSDoc coverage — SimpleIMAPService and SmtpService public methods
-**Files:** `src/services/simple-imap-service.ts`, `src/services/smtp-service.ts`
-**Issue:** Most public methods (connect, disconnect, getEmails, getEmailById, saveDraft, sendEmail, markEmailRead, starEmail, moveEmail, searchEmails) have no JSDoc. Top 10 most-used public methods should be documented.
-**Effort:** LOW
+### 24. `clearCache()` in `simple-imap-service.ts` — missing JSDoc
+**File:** `src/services/simple-imap-service.ts`
+**Issue:** `clearCache()` is a public method with no JSDoc comment. Trivial one-liner.
+**Effort:** Trivial
 **Risk:** None
 
 ---
