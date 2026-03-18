@@ -226,3 +226,52 @@ No new HIGH/MEDIUM issues found. Confirmed all cycle 1, 2, & 3 fixes still intac
 5. `decodeCursor` — the `parsed.folder` field is accepted as-is without `validateTargetFolder()` check; a crafted cursor could inject a traversal path into the IMAP `getEmails()` call. LOW severity but worth closing.
 
 ---
+
+## Cycle #5
+**Timestamp:** 2026-03-18 00:30–00:45 Eastern
+**Git commit:** `eb6d607`
+**Branch:** main
+**Model:** claude-sonnet-4-6
+
+### Audit Highlights (new findings this cycle)
+
+No new HIGH/MEDIUM issues found. Confirmed all cycle 1–4 fixes still intact.
+
+**Confirmed from Next Cycle Focus list:**
+- `decodeCursor` — `parsed.folder` NOT validated before returning `EmailCursor`. A crafted base64url cursor with `../../etc` as the folder field would be accepted by the type check (`typeof parsed.folder === "string"`) and passed directly to `imapService.getEmails()`. (now fixed)
+- `get_email_by_id` handler — `args.emailId` cast as `string` with no non-empty / numeric check. Service's `validateEmailId` throws with an opaque internal error message on bad input. (now fixed with handler-level guard)
+- `download_attachment` handler — `args.email_id` has no non-empty check; `args.attachment_index` has no integer/range guard at handler level (service does `Math.trunc` + bounds check, returns null with generic "Attachment not found" for invalid index). (now fixed)
+
+**Additional audit findings:**
+- `search_emails` `from`/`to`/`subject` fields — passed to imapflow `search()` criteria object. imapflow encodes IMAP SEARCH criteria via its own serialiser; no string interpolation into raw IMAP commands. Risk is LOW; callers see whatever imapflow produces for odd inputs. No handler-level guard added (imapflow handles this).
+- All other handlers reviewed: no additional missing guards found. `cancel_scheduled_email` `args.id` — scheduler returns false for unknown IDs without a guard, but this is benign (no injection risk, friendly error already returned).
+
+### Work Completed This Cycle
+
+1. **`decodeCursor`** — Added `validateTargetFolder(parsed.folder) !== null` check inside `decodeCursor` before returning the cursor. Rejects cursors whose folder field contains `..`, control chars, or exceeds 1000 chars. Returns null (treated as "Invalid or expired cursor" by callers). (+2 lines)
+
+2. **`get_email_by_id`** — Added `!/^\d+$/.test(rawEmailId)` guard at handler entry. Returns `McpError(InvalidParams, "emailId must be a non-empty numeric UID string.")` for empty, non-string, or non-numeric inputs. (+3 lines)
+
+3. **`download_attachment`** — Added `!/^\d+$/.test(rawAttEmailId)` guard on `email_id` and `!Number.isInteger(rawAttIdx) || rawAttIdx < 0` guard on `attachment_index`. Both return `McpError(InvalidParams, ...)` with clear messages. (+6 lines)
+
+**Files changed:** `src/index.ts` (+16 lines, -5 lines)
+
+### Validation Results
+
+- `npm run build` — PASS (0 TypeScript errors)
+- `npm test` — PASS (258/258 tests, 14 test files)
+
+### Git Status
+
+- Commit: `eb6d607`
+- Pushed to: `origin/main`
+
+### Next Cycle Focus
+
+**Priority items for Cycle #6:**
+1. Add unit tests for new `decodeCursor` folder-validation path and `get_email_by_id` / `download_attachment` handler-level guards (similar pattern to Cycle #4 test additions). (~20 tests, LOW risk)
+2. `search_emails` `from`/`to`/`subject` — consider adding max-length guards (e.g. 500 chars) to prevent excessively large IMAP SEARCH commands. LOW risk, LOW effort.
+3. Cursor token HMAC binding — architectural backlog, defer.
+4. IMAP reconnect / NOOP health check — architectural backlog, defer.
+
+---

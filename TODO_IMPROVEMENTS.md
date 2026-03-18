@@ -1,6 +1,6 @@
 # TODO Improvements — Prioritized Backlog
 
-Last updated: Cycle #4 (2026-03-18)
+Last updated: Cycle #5 (2026-03-18)
 
 ---
 
@@ -51,19 +51,29 @@ Added 16 tests in `src/utils/helpers.test.ts` covering `move_email`, `bulk_move_
 
 ---
 
-## NEW — Cycle #4 Findings
+## NEW — Cycle #4 Findings (all completed in Cycle #5)
 
-### 7. `decodeCursor` folder field not validated against traversal
-**File:** `src/index.ts`, `decodeCursor()` + `get_emails` / `get_emails_by_label` cases
-**Issue:** The `parsed.folder` string from a base64url cursor is passed directly to `imapService.getEmails(folder, ...)`. A crafted cursor could inject a traversal path (e.g. `../../etc`). The cursor is server-generated in practice, but no HMAC binding prevents forgery.
-**Effort:** LOW — add `validateTargetFolder(parsed.folder)` inside `decodeCursor` before returning.
-**Risk:** LOW (cursor forgery only meaningful if attacker can also read responses)
+### [DONE - Cycle 5] `decodeCursor` folder field not validated against traversal
+Fixed in `src/index.ts` `decodeCursor()`. Added `validateTargetFolder(parsed.folder) !== null` check before returning cursor. Crafted cursors with traversal paths (e.g. `../../etc`) now return null and are rejected as "Invalid or expired cursor".
 
-### 8. `get_email_by_id` / `download_attachment` — no handler-level type check on emailId/attachmentIndex
-**File:** `src/index.ts`
-**Issue:** `args.emailId` is cast directly with `as string`; `args.attachmentIndex` is cast with `as number`. No check that emailId is a non-empty string or attachmentIndex is a non-negative integer.
-**Effort:** LOW — add 2-line guards per handler
-**Risk:** LOW (imapflow will reject invalid types, but error message would be opaque)
+### [DONE - Cycle 5] `get_email_by_id` / `download_attachment` — no handler-level type check on emailId/attachmentIndex
+Fixed in `src/index.ts`. Added `!/^\d+$/.test(rawEmailId)` guard in `get_email_by_id`. Added numeric UID guard + `!Number.isInteger(rawAttIdx) || rawAttIdx < 0` guard in `download_attachment`. Both return `McpError(InvalidParams)` with clear messages.
+
+---
+
+## NEW — Cycle #5 Findings
+
+### 9. Add tests for Cycle #5 handler-level guards
+**File:** `src/utils/helpers.test.ts`
+**Issue:** No unit tests yet for the new `decodeCursor` folder-validation path, `get_email_by_id` emailId numeric guard, or `download_attachment` email_id / attachment_index guards.
+**Effort:** LOW — ~20 tests, same pattern as Cycle #4 test additions
+**Risk:** NONE (test-only change)
+
+### 10. `search_emails` free-text fields — consider max-length guard
+**File:** `src/index.ts` `search_emails` handler
+**Issue:** `from`, `to`, `subject` fields passed to imapflow without length cap. imapflow handles encoding; no injection risk, but excessively long strings could produce large IMAP SEARCH commands.
+**Effort:** LOW — add 3 length checks (e.g. max 500 chars each)
+**Risk:** LOW
 
 ---
 
