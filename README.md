@@ -8,7 +8,7 @@
 
 Give Claude AI — or any MCP-compatible AI agent — secure, controlled access to your ProtonMail inbox via [Proton Bridge](https://proton.me/mail/bridge).
 
-**29 tools · MCP Resources · MCP Prompts · Permission presets · Per-tool rate limiting · Human-gated escalation · Browser-based settings UI**
+**40 tools · MCP Resources · MCP Prompts · Permission presets · Per-tool rate limiting · Human-gated escalation · Browser-based settings UI**
 
 ---
 
@@ -126,7 +126,7 @@ Choose how much the AI is allowed to do:
 | **Read-Only** *(default)* | Read, search, analytics, connection status | Starting out, untrusted agents |
 | **Supervised** | All tools; deletion capped at 5/hr, sending at 20/hr | Day-to-day agentic use |
 | **Send-Only** | Reading + sending only, no deletion or folder writes | Agents that only need to send |
-| **Full Access** | All 29 tools, no rate limits | Trusted workflows where you review actions |
+| **Full Access** | All 40 tools, no rate limits | Trusted workflows where you review actions |
 
 You can change this at any time from the **Permissions** tab.
 
@@ -212,6 +212,8 @@ If any of these fail, see the [Troubleshooting](#9-troubleshooting) section belo
 | `search_emails` | Search by subject, sender, body, date range, read status, attachments |
 | `get_folders` | List all folders with message counts and unread counts |
 | `get_unread_count` | Cheap per-folder unread count — call before `get_emails` to decide whether to fetch |
+| `list_labels` | List all ProtonMail labels with message counts |
+| `get_emails_by_label` | Fetch emails from a specific label folder with cursor pagination |
 
 ### Analytics (read-only — always available)
 
@@ -238,6 +240,7 @@ If any of these fail, see the [Troubleshooting](#9-troubleshooting) section belo
 | `send_email` | Send email with HTML/text body, attachments, CC, BCC, Reply-To |
 | `send_test_email` | Send a test email to verify SMTP is working |
 | `reply_to_email` | Reply to an email (sets In-Reply-To and References headers) |
+| `forward_email` | Forward an email to a new recipient with optional message |
 
 ### Actions (requires supervised or full preset)
 
@@ -247,9 +250,16 @@ If any of these fail, see the [Troubleshooting](#9-troubleshooting) section belo
 | `star_email` | Star or unstar an email |
 | `move_email` | Move an email to a different folder |
 | `archive_email` | Move an email to the Archive folder |
+| `move_to_trash` | Move an email to the Trash folder |
+| `move_to_spam` | Move an email to the Spam folder |
+| `move_to_folder` | Move an email to a custom folder (`Folders/<name>`) |
 | `move_to_label` | Apply a ProtonMail label to an email (`Labels/<name>`) |
+| `remove_label` | Remove a label from an email (move back to INBOX or specified folder) |
+| `bulk_mark_read` | Mark multiple emails read/unread |
+| `bulk_star` | Star/unstar multiple emails |
 | `bulk_move_emails` | Move multiple emails to a folder |
 | `bulk_move_to_label` | Apply a label to multiple emails |
+| `bulk_remove_label` | Remove a label from multiple emails |
 
 ### Folders (requires supervised or full preset)
 
@@ -266,6 +276,7 @@ If any of these fail, see the [Troubleshooting](#9-troubleshooting) section belo
 | `delete_email` | Permanently delete an email |
 | `delete_folder` | Delete a folder (must be empty) |
 | `bulk_delete_emails` | Delete multiple emails permanently |
+| `bulk_delete` | Alias for `bulk_delete_emails` |
 
 ### Escalation (always available)
 

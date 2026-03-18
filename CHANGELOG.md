@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [2.0.0] - 2026-03-17
 
 ### Added
-- **29 tools** (up from 20 in v1.0.0) with structured output and MCP annotations
+- **40 tools** (up from 20 in v1.0.0) with structured output and MCP annotations
 - **Permission system** with 4 presets: read_only (default), supervised, send_only, full
 - **Per-tool rate limiting** with configurable limits per preset
 - **Human-gated escalation system** — two-channel design with CSRF protection, 5-minute expiry, audit trail

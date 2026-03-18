@@ -325,6 +325,23 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         outputSchema: ACTION_RESULT_SCHEMA,
       },
       {
+        name: "forward_email",
+        title: "Forward Email",
+        description:
+          "Forward an existing email to a new recipient. Fetches the original, prepends an optional message, and sends with Fwd:-prefixed subject.",
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+        inputSchema: {
+          type: "object",
+          properties: {
+            emailId: { type: "string", description: "UID of the email to forward" },
+            to: { type: "string", description: "Recipient address(es), comma-separated" },
+            message: { type: "string", description: "Optional message to prepend before the forwarded content" },
+          },
+          required: ["emailId", "to"],
+        },
+        outputSchema: ACTION_RESULT_SCHEMA,
+      },
+      {
         name: "send_test_email",
         title: "Send Test Email",
         description:
@@ -473,6 +490,59 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             totalUnread: { type: "number" },
           },
           required: ["unreadByFolder", "totalUnread"],
+        },
+      },
+
+      {
+        name: "list_labels",
+        title: "List Labels",
+        description:
+          "List all ProtonMail labels with message counts. Returns only labels (Labels/ prefix), not regular folders.",
+        annotations: { readOnlyHint: true, openWorldHint: true },
+        inputSchema: { type: "object", properties: {} },
+        outputSchema: {
+          type: "object",
+          properties: {
+            labels: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  name: { type: "string" },
+                  path: { type: "string" },
+                  totalMessages: { type: "number" },
+                  unreadMessages: { type: "number" },
+                },
+              },
+            },
+            count: { type: "number" },
+          },
+          required: ["labels", "count"],
+        },
+      },
+      {
+        name: "get_emails_by_label",
+        title: "Get Emails by Label",
+        description:
+          "Fetch emails from a specific label folder. Shortcut for get_emails with folder set to Labels/<label>.",
+        annotations: { readOnlyHint: true, openWorldHint: true },
+        inputSchema: {
+          type: "object",
+          properties: {
+            label: { type: "string", description: "Label name without prefix (e.g. Work)" },
+            limit: { type: "number", default: 50, description: "Emails per page, 1-200" },
+            cursor: { type: "string", description: "Opaque cursor from previous response" },
+          },
+          required: ["label"],
+        },
+        outputSchema: {
+          type: "object",
+          properties: {
+            emails: { type: "array", items: { type: "object" } },
+            count: { type: "number" },
+            folder: { type: "string" },
+            nextCursor: { type: "string" },
+          },
         },
       },
 
@@ -628,6 +698,83 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         outputSchema: ACTION_RESULT_SCHEMA,
       },
       {
+        name: "move_to_trash",
+        title: "Move Email to Trash",
+        description:
+          "Move an email to the Trash folder. Convenience wrapper for move_email targeting Trash.",
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+        inputSchema: {
+          type: "object",
+          properties: { emailId: { type: "string" } },
+          required: ["emailId"],
+        },
+        outputSchema: ACTION_RESULT_SCHEMA,
+      },
+      {
+        name: "move_to_spam",
+        title: "Move Email to Spam",
+        description:
+          "Move an email to the Spam folder. Convenience wrapper for move_email targeting Spam.",
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+        inputSchema: {
+          type: "object",
+          properties: { emailId: { type: "string" } },
+          required: ["emailId"],
+        },
+        outputSchema: ACTION_RESULT_SCHEMA,
+      },
+      {
+        name: "move_to_folder",
+        title: "Move Email to Custom Folder",
+        description:
+          "Move an email to a custom folder (Folders/<name>). Similar to move_to_label but for Folders/ paths.",
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+        inputSchema: {
+          type: "object",
+          properties: {
+            emailId: { type: "string" },
+            folder: {
+              type: "string",
+              description: "Folder name without prefix (e.g. Work). Moves to Folders/Work.",
+            },
+          },
+          required: ["emailId", "folder"],
+        },
+        outputSchema: ACTION_RESULT_SCHEMA,
+      },
+      {
+        name: "bulk_mark_read",
+        title: "Bulk Mark Emails Read/Unread",
+        description:
+          "Mark multiple emails as read or unread. Emits progress notifications. Returns success/failed counts.",
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+        inputSchema: {
+          type: "object",
+          properties: {
+            emailIds: { type: "array", items: { type: "string" }, description: "Array of email UIDs" },
+            isRead: { type: "boolean", default: true },
+          },
+          required: ["emailIds"],
+        },
+        outputSchema: BULK_RESULT_SCHEMA,
+      },
+      {
+        name: "bulk_star",
+        title: "Bulk Star/Unstar Emails",
+        description:
+          "Star or unstar multiple emails. Emits progress notifications. Returns success/failed counts.",
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+        inputSchema: {
+          type: "object",
+          properties: {
+            emailIds: { type: "array", items: { type: "string" }, description: "Array of email UIDs" },
+            isStarred: { type: "boolean", default: true },
+          },
+          required: ["emailIds"],
+        },
+        outputSchema: BULK_RESULT_SCHEMA,
+      },
+      {
         name: "bulk_move_emails",
         title: "Bulk Move Emails",
         description:
@@ -683,6 +830,40 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         outputSchema: BULK_RESULT_SCHEMA,
       },
       {
+        name: "remove_label",
+        title: "Remove Label from Email",
+        description:
+          "Remove a label from an email by moving it back to INBOX (or a specified target folder).",
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+        inputSchema: {
+          type: "object",
+          properties: {
+            emailId: { type: "string" },
+            label: { type: "string", description: "Label name to remove (e.g. Work)" },
+            targetFolder: { type: "string", default: "INBOX", description: "Where to move the email (default: INBOX)" },
+          },
+          required: ["emailId", "label"],
+        },
+        outputSchema: ACTION_RESULT_SCHEMA,
+      },
+      {
+        name: "bulk_remove_label",
+        title: "Bulk Remove Label from Emails",
+        description:
+          "Remove a label from multiple emails by moving them back to INBOX (or a specified folder). Emits progress notifications.",
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+        inputSchema: {
+          type: "object",
+          properties: {
+            emailIds: { type: "array", items: { type: "string" } },
+            label: { type: "string", description: "Label name to remove" },
+            targetFolder: { type: "string", default: "INBOX", description: "Where to move emails (default: INBOX)" },
+          },
+          required: ["emailIds", "label"],
+        },
+        outputSchema: BULK_RESULT_SCHEMA,
+      },
+      {
         name: "delete_email",
         title: "Delete Email",
         description:
@@ -700,6 +881,21 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         title: "Bulk Delete Emails",
         description:
           "Permanently delete multiple emails. Irreversible. Emits progress notifications if a progressToken is provided in _meta. Returns success/failed counts.",
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+        inputSchema: {
+          type: "object",
+          properties: {
+            emailIds: { type: "array", items: { type: "string" } },
+          },
+          required: ["emailIds"],
+        },
+        outputSchema: BULK_RESULT_SCHEMA,
+      },
+      {
+        name: "bulk_delete",
+        title: "Bulk Delete Emails",
+        description:
+          "Alias for bulk_delete_emails. Permanently delete multiple emails. Irreversible.",
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
         inputSchema: {
           type: "object",
@@ -1218,6 +1414,43 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return actionOk(result.messageId);
       }
 
+      case "forward_email": {
+        const fwdId = args.emailId as string;
+        const fwdOriginal = await imapService.getEmailById(fwdId);
+        if (!fwdOriginal) {
+          return { content: [{ type: "text" as const, text: "Original email not found" }], isError: true, structuredContent: { success: false, reason: "Original email not found" } };
+        }
+
+        const fwdCleanSubject = fwdOriginal.subject.replace(/[\r\n\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
+        const fwdSubject = fwdCleanSubject.toLowerCase().startsWith("fwd:")
+          ? fwdCleanSubject
+          : `Fwd: ${fwdCleanSubject}`;
+
+        const fwdHeader = [
+          "---------- Forwarded message ----------",
+          `From: ${fwdOriginal.from}`,
+          `Date: ${fwdOriginal.date.toISOString()}`,
+          `Subject: ${fwdCleanSubject}`,
+          `To: ${(fwdOriginal.to ?? []).join(", ")}`,
+          "",
+        ].join("\n");
+
+        const userMessage = args.message ? `${args.message as string}\n\n` : "";
+        const fwdBody = `${userMessage}${fwdHeader}\n${fwdOriginal.body ?? ""}`;
+
+        const fwdResult = await smtpService.sendEmail({
+          to: args.to as string,
+          subject: fwdSubject,
+          body: fwdBody,
+          isHtml: fwdOriginal.isHtml,
+        });
+
+        if (!fwdResult.success) {
+          return { content: [{ type: "text" as const, text: "Forward failed" }], isError: true, structuredContent: { success: false, reason: "Email delivery failed" } };
+        }
+        return actionOk(fwdResult.messageId);
+      }
+
       case "send_test_email": {
         const result = await smtpService.sendTestEmail(
           args.to as string,
@@ -1293,6 +1526,36 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return ok({ unreadByFolder, totalUnread });
       }
 
+      case "list_labels": {
+        const allFolders = await imapService.getFolders();
+        const labels = allFolders.filter((f: any) => f.path?.startsWith("Labels/") || f.name?.startsWith("Labels/"));
+        return ok({ labels, count: labels.length });
+      }
+
+      case "get_emails_by_label": {
+        const lblName = args.label as string;
+        const lblFolder = `Labels/${lblName}`;
+        const lblLimit = Math.min(Math.max((args.limit as number) || 50, 1), 200);
+
+        let lblOffset = 0;
+        if (args.cursor) {
+          const decoded = decodeCursor(args.cursor as string);
+          if (!decoded || decoded.folder !== lblFolder) {
+            return { content: [{ type: "text" as const, text: "Invalid or expired cursor" }], isError: true, structuredContent: { success: false, reason: "Invalid cursor" } };
+          }
+          lblOffset = decoded.offset;
+        }
+
+        const lblEmails = await imapService.getEmails(lblFolder, lblLimit, lblOffset);
+        let lblNextCursor: string | undefined;
+        if (lblEmails.length === lblLimit) {
+          lblNextCursor = encodeCursor({ folder: lblFolder, offset: lblOffset + lblLimit, limit: lblLimit });
+        }
+
+        const lblStructured = { emails: lblEmails, folder: lblFolder, count: lblEmails.length, ...(lblNextCursor ? { nextCursor: lblNextCursor } : {}) };
+        return ok(lblStructured);
+      }
+
       // ── Folder Management ─────────────────────────────────────────────────────
 
       case "get_folders": {
@@ -1342,6 +1605,66 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "archive_email": {
         await imapService.moveEmail(args.emailId as string, "Archive");
         return actionOk();
+      }
+
+      case "move_to_trash": {
+        await imapService.moveEmail(args.emailId as string, "Trash");
+        return actionOk();
+      }
+
+      case "move_to_spam": {
+        await imapService.moveEmail(args.emailId as string, "Spam");
+        return actionOk();
+      }
+
+      case "move_to_folder": {
+        const folderName = args.folder as string;
+        await imapService.moveEmail(args.emailId as string, `Folders/${folderName}`);
+        return actionOk();
+      }
+
+      case "bulk_mark_read": {
+        const bmrIds = Array.isArray(args.emailIds) ? args.emailIds : [];
+        const bmrEmailIds: string[] = bmrIds
+          .filter((id): id is string => typeof id === "string" && id.length > 0)
+          .slice(0, MAX_BULK_IDS);
+        const bmrIsRead = args.isRead !== undefined ? (args.isRead as boolean) : true;
+        const bmrTotal = bmrEmailIds.length;
+        const bmrResults = { success: 0, failed: 0, errors: [] as string[] };
+
+        for (let i = 0; i < bmrEmailIds.length; i++) {
+          try {
+            await imapService.markEmailRead(bmrEmailIds[i], bmrIsRead);
+            bmrResults.success++;
+          } catch (e: any) {
+            bmrResults.failed++;
+            bmrResults.errors.push(`${bmrEmailIds[i]}: ${safeErrorMessage(e)}`);
+          }
+          await sendProgress(i + 1, bmrTotal, `Marked ${i + 1} of ${bmrTotal}`);
+        }
+        return bulkOk(bmrResults);
+      }
+
+      case "bulk_star": {
+        const bsIds = Array.isArray(args.emailIds) ? args.emailIds : [];
+        const bsEmailIds: string[] = bsIds
+          .filter((id): id is string => typeof id === "string" && id.length > 0)
+          .slice(0, MAX_BULK_IDS);
+        const bsIsStarred = args.isStarred !== undefined ? (args.isStarred as boolean) : true;
+        const bsTotal = bsEmailIds.length;
+        const bsResults = { success: 0, failed: 0, errors: [] as string[] };
+
+        for (let i = 0; i < bsEmailIds.length; i++) {
+          try {
+            await imapService.starEmail(bsEmailIds[i], bsIsStarred);
+            bsResults.success++;
+          } catch (e: any) {
+            bsResults.failed++;
+            bsResults.errors.push(`${bsEmailIds[i]}: ${safeErrorMessage(e)}`);
+          }
+          await sendProgress(i + 1, bsTotal, `Starred ${i + 1} of ${bsTotal}`);
+        }
+        return bulkOk(bsResults);
       }
 
       case "bulk_move_emails": {
@@ -1421,12 +1744,43 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return bulkOk(results2);
       }
 
+      case "remove_label": {
+        const rlTarget = (args.targetFolder as string) || "INBOX";
+        await imapService.moveEmail(args.emailId as string, rlTarget);
+        return actionOk();
+      }
+
+      case "bulk_remove_label": {
+        const brlIds = Array.isArray(args.emailIds) ? args.emailIds : [];
+        const brlEmailIds: string[] = brlIds
+          .filter((id): id is string => typeof id === "string" && id.length > 0)
+          .slice(0, MAX_BULK_IDS);
+        const brlTarget = (args.targetFolder as string) || "INBOX";
+        const brlTotal = brlEmailIds.length;
+        const brlResults = { success: 0, failed: 0, errors: [] as string[] };
+
+        for (let i = 0; i < brlEmailIds.length; i++) {
+          try {
+            await imapService.moveEmail(brlEmailIds[i], brlTarget);
+            brlResults.success++;
+          } catch (e: any) {
+            brlResults.failed++;
+            brlResults.errors.push(`${brlEmailIds[i]}: ${safeErrorMessage(e)}`);
+          }
+          await sendProgress(i + 1, brlTotal, `Unlabeled ${i + 1} of ${brlTotal}`);
+        }
+
+        analyticsCache = null;
+        return bulkOk(brlResults);
+      }
+
       case "delete_email": {
         await imapService.deleteEmail(args.emailId as string);
         analyticsCache = null;
         return actionOk();
       }
 
+      case "bulk_delete":
       case "bulk_delete_emails": {
         const rawIds3 = Array.isArray(args.emailIds) ? args.emailIds : [];
         const emailIds3: string[] = rawIds3

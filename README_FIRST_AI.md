@@ -96,6 +96,19 @@ Use this before `get_emails` to check if a folder has anything new.
 
 Returns `{ unreadByFolder: { "INBOX": 3, "Sent": 0, ... }, totalUnread: 3 }`.
 
+#### `list_labels`
+List all ProtonMail labels (folders with `Labels/` prefix) with message counts.
+Returns `{ labels: [...], count }`.
+
+#### `get_emails_by_label`
+Fetch emails from a specific label folder with cursor pagination.
+```
+label   string  Label name without prefix (e.g. Work)
+limit   number  1–200, default 50
+cursor  string  Opaque cursor from previous response
+```
+Returns `{ emails, folder, count, nextCursor? }`.
+
 #### `get_folders`
 List all folders with `name`, `path`, `totalMessages`, `unreadMessages`.
 Labels appear as folders with a `Labels/` prefix (e.g. `Labels/Work`).
@@ -190,6 +203,16 @@ isHtml   boolean  Default false.
 replyAll boolean  Include original CC recipients. Default false.
 ```
 
+#### `forward_email`
+Forward an existing email to a new recipient. Prepends an optional message
+and sends with `Fwd:`-prefixed subject.
+
+```
+emailId  string   UID of the email to forward.
+to       string   Recipient address(es), comma-separated.
+message  string   Optional message to prepend before forwarded content.
+```
+
 #### `send_test_email`
 Send a test email to verify SMTP is working. Returns `{ success, messageId }`.
 
@@ -216,6 +239,25 @@ emailId       string
 targetFolder  string  Full IMAP path, e.g. "Archive", "Folders/Work"
 ```
 
+#### `move_to_trash`
+Move an email to the Trash folder.
+```
+emailId  string
+```
+
+#### `move_to_spam`
+Move an email to the Spam folder.
+```
+emailId  string
+```
+
+#### `move_to_folder`
+Move an email to a custom folder (`Folders/<name>`).
+```
+emailId  string
+folder   string  Folder name without prefix (e.g. Work). Moves to Folders/Work.
+```
+
 #### `move_to_label`
 Apply a ProtonMail label to an email. The label path is constructed as
 `Labels/<label>`. The label folder must exist (use `create_folder` first).
@@ -225,6 +267,30 @@ emailId  string
 label    string  Label name only (not the full path). E.g. "urgent", not "Labels/urgent".
                  Max 255 chars. No slashes, no control characters.
 ```
+
+#### `remove_label`
+Remove a label from an email by moving it back to INBOX (or a specified folder).
+```
+emailId       string
+label         string  Label name to remove (e.g. Work)
+targetFolder  string  Where to move the email (default: INBOX)
+```
+
+#### `bulk_mark_read`
+Mark multiple emails as read or unread.
+```
+emailIds  string[]  Array of UIDs. Max 200.
+isRead    boolean   Default true.
+```
+Returns `{ success, failed, errors }`.
+
+#### `bulk_star`
+Star or unstar multiple emails.
+```
+emailIds   string[]  Array of UIDs. Max 200.
+isStarred  boolean   Default true.
+```
+Returns `{ success, failed, errors }`.
 
 #### `bulk_move_emails`
 ```
@@ -239,6 +305,15 @@ Apply a label to multiple emails. Same constraints as `move_to_label`.
 emailIds  string[]  Max 200.
 label     string
 ```
+
+#### `bulk_remove_label`
+Remove a label from multiple emails by moving them to INBOX (or specified folder).
+```
+emailIds      string[]  Max 200.
+label         string    Label name to remove.
+targetFolder  string    Where to move emails (default: INBOX).
+```
+Returns `{ success, failed, errors }`.
 
 ---
 
@@ -285,6 +360,9 @@ folderName  string
 emailIds  string[]  Max 200.
 ```
 Returns `{ success, failed, errors }`.
+
+#### `bulk_delete`
+Alias for `bulk_delete_emails`. Same input/output.
 
 ---
 

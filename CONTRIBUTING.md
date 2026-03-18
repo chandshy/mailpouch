@@ -106,7 +106,7 @@ feat: add email filtering by date range
 
 ```
 src/
-├── index.ts                    # Main MCP server (29 tools, Resources, Prompts)
+├── index.ts                    # Main MCP server (40 tools, Resources, Prompts)
 ├── settings-main.ts            # Settings UI entry point
 ├── config/
 │   ├── schema.ts               # Tool list, categories, permission types

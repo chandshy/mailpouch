@@ -7,16 +7,20 @@
 
 export const ALL_TOOLS = [
   // Sending
-  "send_email", "reply_to_email", "send_test_email",
+  "send_email", "reply_to_email", "forward_email", "send_test_email",
   // Reading
   "get_emails", "get_email_by_id", "search_emails", "get_unread_count",
+  "list_labels", "get_emails_by_label",
   // Folder management
   "get_folders", "sync_folders", "create_folder", "delete_folder", "rename_folder",
   // Email actions
   "mark_email_read", "star_email", "move_email", "archive_email",
-  "bulk_move_emails", "move_to_label", "bulk_move_to_label",
+  "move_to_trash", "move_to_spam", "move_to_folder",
+  "bulk_mark_read", "bulk_star", "bulk_move_emails",
+  "move_to_label", "bulk_move_to_label",
+  "remove_label", "bulk_remove_label",
   // Deletion
-  "delete_email", "bulk_delete_emails",
+  "delete_email", "bulk_delete_emails", "bulk_delete",
   // Analytics
   "get_email_stats", "get_email_analytics", "get_contacts", "get_volume_trends",
   // System
@@ -39,13 +43,13 @@ export const TOOL_CATEGORIES: Record<string, ToolCategory> = {
   sending: {
     label: "Sending",
     description: "Compose and send outbound email",
-    tools: ["send_email", "reply_to_email", "send_test_email"],
+    tools: ["send_email", "reply_to_email", "forward_email", "send_test_email"],
     risk: "moderate",
   },
   reading: {
     label: "Reading",
     description: "Fetch, search, and preview email content",
-    tools: ["get_emails", "get_email_by_id", "search_emails", "get_unread_count"],
+    tools: ["get_emails", "get_email_by_id", "search_emails", "get_unread_count", "list_labels", "get_emails_by_label"],
     risk: "safe",
   },
   folders: {
@@ -56,17 +60,20 @@ export const TOOL_CATEGORIES: Record<string, ToolCategory> = {
   },
   actions: {
     label: "Email Actions",
-    description: "Mark read/unread, star, move, label, and bulk-move emails",
+    description: "Mark read/unread, star, move, label, and bulk operations",
     tools: [
       "mark_email_read", "star_email", "move_email", "archive_email",
-      "bulk_move_emails", "move_to_label", "bulk_move_to_label",
+      "move_to_trash", "move_to_spam", "move_to_folder",
+      "bulk_mark_read", "bulk_star", "bulk_move_emails",
+      "move_to_label", "bulk_move_to_label",
+      "remove_label", "bulk_remove_label",
     ],
     risk: "moderate",
   },
   deletion: {
     label: "Deletion",
     description: "Permanently delete emails — irreversible",
-    tools: ["delete_email", "bulk_delete_emails"],
+    tools: ["delete_email", "bulk_delete_emails", "bulk_delete"],
     risk: "destructive",
   },
   analytics: {
