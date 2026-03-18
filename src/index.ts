@@ -2817,6 +2817,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "get_logs": {
         const VALID_LEVELS = new Set(["debug", "info", "warn", "error"]);
+        if (args.level !== undefined && typeof args.level !== "string") {
+          throw new McpError(ErrorCode.InvalidParams, "'level' must be a string when provided.");
+        }
         const rawLevel = args.level as string | undefined;
         const level = rawLevel && VALID_LEVELS.has(rawLevel)
           ? (rawLevel as "debug" | "info" | "warn" | "error")
