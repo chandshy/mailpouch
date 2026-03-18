@@ -3016,7 +3016,8 @@ server.setRequestHandler(GetPromptRequestSchema, async (request) => {
 
   switch (name) {
     case "triage_inbox": {
-      const limit = parseInt((args.limit as string) || "20", 10);
+      const rawLimit = parseInt((args.limit as string) || "20", 10);
+      const limit = isNaN(rawLimit) ? 20 : Math.min(Math.max(1, rawLimit), 100);
       // Sanitize agent-supplied focus to prevent prompt injection.
       const focus = args.focus ? sanitizeText(args.focus as string, 200) : undefined;
       let emails: EmailMessage[] = [];
@@ -3197,7 +3198,8 @@ After the user reviews, use bulk_delete_emails or bulk_move_emails to take actio
     }
 
     case "thread_summary": {
-      const emailId = args.emailId as string;
+      // Validate emailId early to prevent prompt injection via a crafted ID string.
+      const emailId = requireNumericEmailId(args.emailId);
       let emailContent = "Could not load the email.";
       try {
         const email = await imapService.getEmailById(emailId);
