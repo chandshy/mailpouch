@@ -718,3 +718,72 @@ No new HIGH/MEDIUM issues found. Confirmed all cycle 1–5 fixes still intact.
 4. `create_folder` / `rename_folder` — `folderName` / `newName` args: check whether `validateFolderName()` (or equivalent) is called before passing to IMAP service.
 
 ---
+
+## Cycle #13
+**Timestamp:** 2026-03-18 03:00–03:30 Eastern
+**Git commit:** `40a79f4`
+**Branch:** main
+**Model:** claude-sonnet-4-6
+
+### Audit Highlights
+
+**Phase 1 — DRY numeric emailId guard:**
+The pattern `if (!X || typeof X !== "string" || !/^\d+$/.test(X)) throw new McpError(...)` was repeated across 11 individual handler cases (10 using field name "emailId", 1 using "email_id" for `download_attachment`), plus 1 looser variant in `compose_reply`. Total: 12 guard sites.
+
+**Phase 2 — IMAP healthCheck gap:**
+`isActive()` only checks the `isConnected` boolean flag. Silent TCP drops leave the flag true while the socket is dead. `ImapFlow.noop()` is available as the probe mechanism (confirmed at runtime). No `healthCheck()` method existed yet.
+
+### Work Completed This Cycle
+
+**[DONE] `requireNumericEmailId()` helper extracted to `src/utils/helpers.ts`**
+- Signature: `requireNumericEmailId(raw: unknown, fieldName?: string): string`
+- Throws `McpError(ErrorCode.InvalidParams, "<fieldName> must be a non-empty numeric UID string.")` on failure; returns the validated string on success.
+- Added `McpError` / `ErrorCode` import to `helpers.ts`.
+- Added export to `helpers.ts`; added import to `src/index.ts`.
+- Replaced 12 guard sites in `src/index.ts`:
+  - `get_email_by_id` (rawEmailId → `requireNumericEmailId(args.emailId)`)
+  - `download_attachment` (rawAttEmailId → `requireNumericEmailId(args.email_id, "email_id")`)
+  - `mark_email_read` (merEmailId)
+  - `star_email` (seEmailId)
+  - `move_email` (mvEmailId)
+  - `archive_email` (aeEmailId)
+  - `move_to_trash` (mttEmailId)
+  - `move_to_spam` (mtsEmailId)
+  - `move_to_label` (mtlEmailId)
+  - `remove_label` (rlEmailId)
+  - `delete_email` (deEmailId)
+  - `compose_reply` (emailId — previously weaker pattern, now hardened to full guard)
+- Net reduction: ~39 lines from `src/index.ts` (3 lines → 1 line per site).
+
+**[DONE] `SimpleIMAPService.healthCheck()` added**
+- Public method `async healthCheck(): Promise<boolean>`.
+- Returns `false` immediately if `!client || !isConnected`.
+- Issues `this.client.noop()` and returns `true` on success, `false` on any error.
+- Never throws — all NOOP failures are caught and returned as `false`.
+- Not yet wired into the server (additive only).
+
+**[DONE] 19 new unit tests added (393 total)**
+- `src/utils/helpers.test.ts`: 14 tests for `requireNumericEmailId` covering valid cases, custom fieldName in error, ErrorCode.InvalidParams on `empty string / "abc" / "12x" / "-5" / "3.14" / null / undefined / numeric(42) / null-byte`.
+- `src/services/simple-imap-service.newfeatures.test.ts`: 5 tests for `healthCheck` covering `isConnected=false`, `client=null`, NOOP resolves (returns true), NOOP rejects (returns false), and no-throw guarantee.
+
+### Validation Results
+
+```
+Test Files  14 passed (14)
+Tests       393 passed (393)   ← was 374 before Cycle #13
+Start at    00:37:56
+Duration    2.13s
+```
+
+All pre-existing tests continued to pass. Zero regressions.
+
+### Git Status
+- Commit `40a79f4` pushed to `main`.
+- 5 files changed: +179 insertions, -49 deletions.
+
+### Next Cycle Focus
+1. Wire `healthCheck()` into the server — add a `check_connection` tool or call from `ensureConnection()` as a reconnect probe before reporting failure.
+2. `ensureConnection()` error wrapping — wrap reconnection failures with a friendly "IMAP connection lost; reconnect via the settings tool." message.
+3. Review the `move_to_label` / `bulk_move_to_label` inline label validation (still duplicated inline) — extract to use `validateLabelName()` helper already in helpers.ts.
+
+---

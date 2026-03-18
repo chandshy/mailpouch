@@ -1,65 +1,54 @@
-# Last Audit Summary — Cycle #12
-**Date:** 2026-03-18 02:45 Eastern
+# Last Audit Summary — Cycle #13
+**Date:** 2026-03-18 03:00 Eastern
 **Auditor:** Claude Sonnet 4.6 (auto-improve cycle)
 
 ---
 
 ## Scope
 
-This cycle performed a focused audit of the items carried forward from Cycle #11's "Next Cycle Focus" plus a fresh scan of escalation.ts, loader.ts, and keychain.ts for any remaining `as any` casts:
+This cycle performed a focused audit of the two items carried forward from Cycle #12's "Next Cycle Focus":
 
-- `src/services/smtp-service.ts` — `wipeCredentials()` `as any` casts (3 occurrences)
-- `src/services/simple-imap-service.ts` — `clearCache()` missing JSDoc
-- `src/permissions/escalation.ts` — fresh `as any` scan + JSDoc check
-- `src/config/loader.ts` — fresh `as any` scan + JSDoc check
-- `src/security/keychain.ts` — fresh `as any` scan + JSDoc check
-- `src/security/memory.ts` — NEW FINDING: 5 spurious `as any` casts in `scrubEmail()`
-
-No new HIGH or MEDIUM issues found. All cycle 1–11 fixes confirmed intact.
+- `src/index.ts` — Systematic grep of all `!/^\d+$/.test(` occurrences to map the 12 repeated numeric emailId guard blocks
+- `src/utils/helpers.ts` — Full read to confirm structure and suitable insertion point for `requireNumericEmailId()`
+- `src/services/simple-imap-service.ts` — `ensureConnection()` and `isActive()` review; confirmed `ImapFlow.noop()` is available at runtime
 
 ---
 
 ## Issues Confirmed / Fixed This Cycle
 
-**[DONE] `smtp-service.ts` `wipeCredentials()` — 3 casts removed**
-`(this.config.smtp as any).password = ""`, `.smtpToken = ""`, `.username = ""` all replaced with direct property writes. `SMTPConfig.password` and `.username` are `string` (non-optional, mutable); `.smtpToken` is `string | undefined` (optional, mutable). TypeScript compiles cleanly with no cast. Identical pattern was confirmed working in Cycle #10 when the shutdown handler in `index.ts` was fixed.
+**[DONE] `requireNumericEmailId()` helper — 12 guard sites replaced**
 
-**[DONE] `simple-imap-service.ts` `clearCache()` — JSDoc added**
-One-line JSDoc added: "Clear all in-memory email and folder caches, forcing fresh IMAP fetches on next access."
+Audit found the guard pattern repeated at exactly 12 sites:
+- 10 sites using field name `emailId` (handlers: `get_email_by_id`, `mark_email_read`, `star_email`, `move_email`, `archive_email`, `move_to_trash`, `move_to_spam`, `move_to_label`, `remove_label`, `delete_email`)
+- 1 site using field name `email_id` (`download_attachment`)
+- 1 looser variant (no `!X ||` prefix, slightly different message) in `compose_reply`
 
-**[DONE] `security/memory.ts` `scrubEmail()` — 5 casts removed (new finding)**
-The `scrubEmail()` internal function had 5 `as any` casts:
-- `(email as any).body = ""` → `email.body = ""`  (`EmailMessage.body: string`, non-optional mutable field)
-- `(email as any).subject = ""` → `email.subject = ""` (`EmailMessage.subject: string`, non-optional mutable field)
-- `(email as any).from = ""` → `email.from = ""` (`EmailMessage.from: string`, non-optional mutable field)
-- `(att as any).content = undefined` → `att.content = undefined` (`EmailAttachment.content?: Buffer | string`, optional — undefined is assignable)
-- `(att as any).filename = ""` → `att.filename = ""` (`EmailAttachment.filename: string`, non-optional mutable field)
+All 12 replaced with `requireNumericEmailId(args.X)` or `requireNumericEmailId(args.X, "email_id")`. The `compose_reply` variant was simultaneously hardened to the full guard. Net: ~39 lines removed from `src/index.ts`.
 
-All 5 were spurious. Direct writes compile cleanly under strict TypeScript.
+**[DONE] `SimpleIMAPService.healthCheck()` — additive NOOP probe**
+
+New `async healthCheck(): Promise<boolean>` method added after `isActive()`. Confirmed `ImapFlow` exposes `.noop()` at runtime. Method returns `false` when `!client || !isConnected`, returns `true` when NOOP resolves, returns `false` (without throwing) when NOOP rejects. Behavior mirrors "check but never crash" contract. Not yet wired into server — deferred to next cycle.
 
 ---
 
-## Confirmed Clean Files (no `as any` casts found)
+## New Findings This Cycle
 
-- `src/permissions/escalation.ts` — zero `as any` matches
-- `src/config/loader.ts` — zero `as any` matches
-- `src/security/keychain.ts` — zero `as any` matches
-- `src/services/simple-imap-service.ts` — zero remaining after Cycles #10, #11, #12
-- `src/services/analytics-service.ts` — zero remaining after Cycle #10
-- `src/services/smtp-service.ts` — zero remaining after this cycle
+### 28. Wire `healthCheck()` into the server
+The method exists but is not called. Could become a `check_imap_connection` tool, or called from `ensureConnection()` as a probe before attempting reconnect.
+
+### 29. Inline label validation duplication in `move_to_label` / `bulk_move_to_label`
+Both handlers contain 3 consecutive if-blocks (empty check, control char/slash/traversal check, length check) instead of calling `validateLabelName()` which already implements identical logic in `helpers.ts`. Same pattern as was cleaned up for folders in Cycle #7.
+
+### 27 (carried forward). `ensureConnection()` error wrapping
+Raw imapflow errors still propagate when reconnect fails. A friendly user-facing message would improve experience.
 
 ---
 
-## Remaining `as any` in Production Code (all required/accepted)
+## Confirmed Clean Areas
 
-| File | Location | Reason |
-|------|----------|--------|
-| `src/settings/tui.ts` | 4 casts on `rl as any` | Accessing private readline internals (`_writeToOutput`); no public API |
-| `src/settings/server.ts` | 2 casts on `err as any` | Standard TypeScript `catch (err: any)` pattern for accessing `.code` |
-| `src/security/memory.ts` | `wipeString(obj: any, ...)` parameter | Generic utility; `any` is intentional |
-| `src/security/memory.ts` | `wipeObject(obj: Record<string, any>, ...)` parameter | Generic utility; `any` is intentional |
-
-**Zero avoidable `as any` casts remain in production code.**
+- Zero avoidable `as any` casts remain (confirmed intact from Cycles #10–#12)
+- All Cycle #1–#12 security fixes confirmed intact
+- 393 tests pass (up from 374 before this cycle)
 
 ---
 
@@ -69,8 +58,6 @@ All 5 were spurious. Direct writes compile cleanly under strict TypeScript.
 |----------|-------|--------|
 | HIGH     | 0     | — |
 | MEDIUM   | 0     | — |
-| LOW      | 3     | 8 avoidable `as any` casts (all fixed); 0 remaining |
+| LOW      | 2     | Item 28 (wire healthCheck) + Item 29 (inline label validation) new; Item 27 carried forward |
 
-The complete `as any` elimination sweep that began in Cycle #10 is now fully finished. All avoidable casts in all production files have been removed over Cycles #10–#12. Remaining `as any` usages are all in the required/accepted category (private API access, generic utilities, standard error handling).
-
-Next focus: code quality improvements — extracting the repeated numeric emailId guard to a helper, adding `healthCheck()` to IMAP service, and improving error messages for lost connections.
+Next focus: wire `healthCheck()` into server (Item 28), refactor inline label validation to use `validateLabelName()` (Item 29), and `ensureConnection()` friendly error message (Item 27).

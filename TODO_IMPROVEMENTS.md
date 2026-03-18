@@ -149,23 +149,29 @@ Removed all 5 casts in `scrubEmail()`. `EmailMessage.body/subject/from` and `Ema
 
 ## NEW — Cycle #12 Findings
 
-### 25. `SimpleIMAPService.healthCheck()` — NOOP-based connection probe
-**File:** `src/services/simple-imap-service.ts`
-**Issue:** `ensureConnection()` only checks the `isConnected` flag. Silent TCP drops leave `isConnected = true` while the socket is dead. A `healthCheck()` method issuing an IMAP NOOP (or `client.noop()`) would detect stale connections before operations fail. Don't wire into server yet — add the method and test it first.
-**Effort:** MEDIUM
-**Risk:** LOW (additive, no behavior change to existing paths)
+### [DONE - Cycle 13] `SimpleIMAPService.healthCheck()` — NOOP-based connection probe
+Added `async healthCheck(): Promise<boolean>`. Issues `this.client.noop()`. Returns true on success, false on any failure or when disconnected. Never throws. 5 new unit tests added.
 
-### 26. DRY — numeric emailId guard in 12+ handlers
-**File:** `src/index.ts`
-**Issue:** The pattern `const X = args.emailId as string; if (!/^\d+$/.test(X)) throw McpError(...)` is repeated ~12 times across handlers. Could be extracted to a helper `parseNumericEmailId(raw: unknown, fieldName?: string): string` that throws `McpError(InvalidParams, ...)` internally. Reduces repetition and ensures consistent error messages.
-**Effort:** LOW-MEDIUM
-**Risk:** LOW (refactor, no behavior change)
+### [DONE - Cycle 13] DRY — numeric emailId guard in 12+ handlers
+Extracted `requireNumericEmailId(raw: unknown, fieldName?: string): string` to `src/utils/helpers.ts`. Throws `McpError(InvalidParams, ...)` on failure. Replaced all 12 guard sites in `src/index.ts`. 14 new unit tests added.
 
 ### 27. Error message clarity for lost IMAP connections
 **File:** `src/services/simple-imap-service.ts`
 **Issue:** When IMAP connection is lost and an operation is attempted, the raw imapflow error propagates. Wrapping `ensureConnection()` failures with a friendly "IMAP connection lost; reconnect via the settings tool." message would improve user experience.
 **Effort:** LOW
 **Risk:** LOW
+
+### 28. Wire `healthCheck()` into the server
+**File:** `src/index.ts` or `src/services/simple-imap-service.ts`
+**Issue:** `healthCheck()` was added in Cycle #13 but not yet used. Options: (a) add a `check_imap_connection` tool that calls it; (b) call from `ensureConnection()` as a probe before attempting reconnect.
+**Effort:** LOW
+**Risk:** LOW (additive)
+
+### 29. Inline label validation in `move_to_label` / `bulk_move_to_label`
+**File:** `src/index.ts`
+**Issue:** Both handlers still have inline label validation (3 separate if-blocks each) rather than calling the `validateLabelName()` helper that already exists in `helpers.ts`. This is the same pattern fixed for folders in Cycle #7.
+**Effort:** LOW
+**Risk:** LOW (pure refactor)
 
 ---
 
