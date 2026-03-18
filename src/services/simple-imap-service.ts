@@ -2,18 +2,36 @@
  * IMAP Service for reading emails via Proton Bridge
  */
 
-import { ImapFlow } from 'imapflow';
+import { ImapFlow, type SearchObject } from 'imapflow';
 import { readFileSync, statSync } from 'fs';
 import { join as pathJoin } from 'path';
 import type { ParsedMail, Attachment } from 'mailparser';
 import { simpleParser } from 'mailparser';
-import nodemailer from 'nodemailer';
+import nodemailer, { type SendMailOptions } from 'nodemailer';
 import { EmailMessage, EmailFolder, SearchEmailOptions, SaveDraftOptions } from '../types/index.js';
 import { logger } from '../utils/logger.js';
 import { tracer, type SpanTags } from '../utils/tracer.js';
 
 /** imapflow's append() return value includes uid at runtime but it is omitted from the type declaration. */
 interface AppendResult { uid?: number }
+
+/**
+ * imapflow bodyStructure tree node — the shape of each node returned by
+ * `FetchQueryObject.bodyStructure`.  Only the properties accessed by
+ * `countAttachments()` and `extractAttachmentMeta()` are declared here.
+ */
+interface ImapBodyNode {
+  childNodes?: ImapBodyNode[];
+  disposition?: string;
+  dispositionParameters?: Record<string, string>;
+  parameters?: Record<string, string>;
+  type?: string;
+  subtype?: string;
+  size?: number;
+  id?: string;
+}
+
+// ImapSearchCriteria is provided by imapflow as SearchObject (imported above).
 
 /**
  * Truncate email body to a reasonable length for list views
@@ -56,7 +74,7 @@ export class SimpleIMAPService {
   private folderCache: Map<string, EmailFolder> = new Map();
   private connectionConfig: { host: string; port: number; username?: string; password?: string; bridgeCertPath?: string; secure?: boolean } | null = null;
   /** Tracks UIDVALIDITY per folder path to detect server-side mailbox rebuilds. */
-  private uidValidityMap: Map<string, number> = new Map();
+  private uidValidityMap: Map<string, bigint> = new Map();
   /** True when TLS certificate validation is disabled (no Bridge cert configured). */
   insecureTls = false;
 
@@ -87,7 +105,7 @@ export class SimpleIMAPService {
     try {
       const mailbox = this.client?.mailbox;
       if (!mailbox || typeof mailbox === 'boolean') return;
-      const currentValidity = (mailbox as any).uidValidity as number | undefined;
+      const currentValidity = (mailbox as { uidValidity?: bigint }).uidValidity;
       if (currentValidity === undefined) return;
 
       const stored = this.uidValidityMap.get(folder);
@@ -110,12 +128,12 @@ export class SimpleIMAPService {
    * A part is considered an attachment if its disposition is 'attachment'
    * or if its type is neither 'text' nor 'multipart' (GAP 2.4).
    */
-  private countAttachments(structure: any): number {
+  private countAttachments(structure: ImapBodyNode | null | undefined): number {
     if (!structure) return 0;
     // Multipart node — recurse into childNodes
     if (structure.childNodes && Array.isArray(structure.childNodes)) {
       return structure.childNodes.reduce(
-        (sum: number, child: any) => sum + this.countAttachments(child),
+        (sum: number, child: ImapBodyNode) => sum + this.countAttachments(child),
         0
       );
     }
@@ -178,7 +196,7 @@ export class SimpleIMAPService {
    * (filename, contentType, size, contentId) without downloading binary content.
    * Used by getEmails() list view (GAP 2.4).
    */
-  private extractAttachmentMeta(structure: any): Array<{ filename: string; contentType: string; size: number; contentId?: string }> {
+  private extractAttachmentMeta(structure: ImapBodyNode | null | undefined): Array<{ filename: string; contentType: string; size: number; contentId?: string }> {
     const results: Array<{ filename: string; contentType: string; size: number; contentId?: string }> = [];
     if (!structure) return results;
 
@@ -620,7 +638,7 @@ export class SimpleIMAPService {
 
             // Extract content-type for PGP detection
             const contentType = parsed.headers?.get('content-type');
-            const ctStr = typeof contentType === 'string' ? contentType : ((contentType as any)?.value ?? '');
+            const ctStr = typeof contentType === 'string' ? contentType : ((contentType as unknown as { value?: string } | null)?.value ?? '');
 
             // Extract X-Pm-Internal-Id for stable Proton message ID
             const pmId = parsed.headers?.get('x-pm-internal-id');
@@ -706,7 +724,7 @@ export class SimpleIMAPService {
     const lock = await this.client.getMailboxLock(folder);
 
     try {
-      const searchCriteria: any = {};
+      const searchCriteria: SearchObject = {};
 
       // Strip IMAP search-unsafe characters (quote and backslash) to prevent
       // search criteria injection.  imapflow passes these as quoted strings
@@ -725,19 +743,10 @@ export class SimpleIMAPService {
         if (!isNaN(d.getTime())) searchCriteria.before = d;
       }
 
-      if (options.isRead !== undefined) {
-        if (options.isRead) {
-          searchCriteria.seen = true;
-        } else {
-          searchCriteria.unseen = true;
-        }
-      }
-
-      if (options.isStarred !== undefined) {
-        if (options.isStarred) {
-          searchCriteria.flagged = true;
-        }
-      }
+      // imapflow SearchObject uses a single boolean for seen/unseen, answered/unanswered,
+      // and draft/undraft — `seen: false` means "unseen", etc.
+      if (options.isRead    !== undefined) searchCriteria.seen     = options.isRead;
+      if (options.isStarred !== undefined) searchCriteria.flagged  = options.isStarred;
 
       // Body/text search
       if (options.body) searchCriteria.body = sanitizeImapStr(options.body);
@@ -745,13 +754,12 @@ export class SimpleIMAPService {
 
       // Additional header fields
       if (options.bcc) searchCriteria.bcc = sanitizeImapStr(options.bcc);
-      if (options.header) searchCriteria.header = [options.header.field, options.header.value];
+      // header is { [field]: value } in the SearchObject API (not a tuple)
+      if (options.header) searchCriteria.header = { [options.header.field]: options.header.value };
 
-      // Flag criteria
-      if (options.answered === true)  searchCriteria.answered = true;
-      if (options.answered === false) searchCriteria.unanswered = true;
-      if (options.isDraft === true)   searchCriteria.draft = true;
-      if (options.isDraft === false)  searchCriteria.undraft = true;
+      // Flag criteria — imapflow uses boolean: true = flag set, false = flag not set
+      if (options.answered !== undefined) searchCriteria.answered = options.answered;
+      if (options.isDraft  !== undefined) searchCriteria.draft    = options.isDraft;
 
       // Size criteria
       if (options.larger !== undefined)  searchCriteria.larger = options.larger;
@@ -1069,7 +1077,7 @@ export class SimpleIMAPService {
         ? undefined
         : Array.isArray(options.bcc) ? options.bcc.join(', ') : options.bcc;
 
-      const mailOptions: any = {
+      const mailOptions: SendMailOptions = {
         to: toAddresses,
         cc: ccAddresses,
         bcc: bccAddresses,
@@ -1765,7 +1773,7 @@ export class SimpleIMAPService {
           logger.debug('IDLE: watching INBOX for changes', 'IMAPService');
 
           // Listen for new messages (EXISTS) or deletions (EXPUNGE)
-          this.idleClient.on('exists', (data: any) => {
+          this.idleClient.on('exists', (data: { count?: number }) => {
             logger.debug('IDLE: new messages detected, invalidating cache', 'IMAPService', { count: data.count });
             // Invalidate only INBOX email cache entries (not all folders)
             for (const [id, entry] of this.emailCache) {

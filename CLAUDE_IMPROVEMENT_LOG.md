@@ -4,6 +4,149 @@ This file records every autonomous improvement cycle run on this codebase.
 
 ---
 
+## Cycle #40 — Complete any elimination in simple-imap-service.ts; import SearchObject from imapflow
+**Timestamp:** 2026-03-18
+**Branch:** main
+
+### Audit Highlights
+Loaded Cycle 39 state. Remaining `any` types in simple-imap-service.ts:
+- `searchCriteria: any` (line 709) — local IMAP search object built incrementally
+- `mailOptions: any` (line 1072) — nodemailer draft options
+- `structure: any` (lines 113, 181) — imapflow bodyStructure tree node in countAttachments/extractAttachmentMeta
+- `(mailbox as any).uidValidity` (line 90) — imapflow MailboxObject property
+- `(contentType as any)?.value` (line 623) — mailparser HeaderValue object
+- `data: any` in IDLE 'exists' event (line 1768)
+
+### Work Completed
+1. **Import `SearchObject` from imapflow** — replaced hand-rolled `ImapSearchCriteria` interface with the canonical type. Imported as `type { SearchObject }`.
+2. **Fixed `searchCriteria` boolean inversions** — imapflow `SearchObject` uses a single boolean for `seen`/`answered`/`draft` (false = inverse). Removed non-existent `unseen`/`unanswered`/`undraft` properties. Also fixes a latent bug where `isStarred: false` was previously a no-op.
+3. **Fixed `header` assignment** — changed from tuple `[field, value]` to object `{ [field]: value }` to match `SearchObject.header: { [key: string]: boolean | string }`.
+4. **Import `SendMailOptions` from nodemailer** — replaced `mailOptions: any` with `mailOptions: SendMailOptions`.
+5. **Defined `ImapBodyNode` interface** — typed `structure` parameter in `countAttachments()` and `extractAttachmentMeta()` using a precise interface matching all accessed properties.
+6. **Narrowed `(mailbox as any).uidValidity`** — cast to `{ uidValidity?: bigint }` (imapflow uses bigint). Updated `uidValidityMap` type from `Map<string, number>` to `Map<string, bigint>`.
+7. **Narrowed `(contentType as any)?.value`** — cast through `unknown` to `{ value?: string } | null`.
+8. **Narrowed `data: any` in IDLE event** — typed as `{ count?: number }`.
+
+### Validation
+- `npm run build` — ✅ clean (no errors)
+- `npm test` — ✅ 849/849 passed
+
+### Git Status
+Committed and pushed. See commit hash after push.
+
+### Next Cycle Focus
+- Remaining `any` types: `wipeString(obj: any)` in memory.ts (legitimate), `body: any` in settings/server.ts JSON parsers, `SysTray: any`/`tray: any` in tray.ts (no types package for systray2)
+- Email cache byte-size limit (max ~50 MB at 500 entries × 100 KB average)
+- CHANGELOG.md entry for Cycles 37–40 type-safety milestone
+- Vitest coverage thresholds
+
+---
+
+## Cycle #39 — Final any sweep in simple-imap-service.ts; zero any catches in codebase
+**Timestamp:** 2026-03-18
+**Branch:** main
+**Commit:** 9d49ef0
+
+### Audit Highlights
+Loaded Cycle 38 state. Remaining any sites in simple-imap-service.ts:
+- `(a: any)` in envelope address mapping (2 sites)
+- `catch (error: any)` in saveDraft, bulkMoveEmails (×3), bulkDeleteEmails (×3), createFolder, deleteFolder, renameFolder
+
+### Work Completed
+1. **Envelope address maps** — `(a: any)` → `(a: EnvAddr)` with inline `type EnvAddr = {name?: string; address?: string}`
+2. **saveDraft** — `error.message` → `instanceof` guard
+3. **bulkMoveEmails** — 3 sites: group-by catch, batch-fallback catch, per-email catch; all `any` → `unknown` with `instanceof` guards where `.message` accessed
+4. **bulkDeleteEmails** — 3 sites: same pattern
+5. **createFolder/deleteFolder/renameFolder** — `error.responseText` accessed via narrow cast `{responseText?: string}` instead of double `any`; extracted to local `rt` variable
+
+### Validation
+- `npm run build` — ✅ clean
+- `npm test` — ✅ 849/849 passed
+- Verified: `grep -rn "catch.*: any" src/` → 0 matches
+
+### Git Status
+Pushed. Commit `9d49ef0` on `main`.
+
+### Next Cycle Focus
+- All `any` catch blocks eliminated (Cycles 37–39). **Codebase now type-safe at all error boundaries.**
+- Remaining `any` context: `searchCriteria: any` in IMAP search (line ~708), `(result as any).uid` wrapper check, `mailOptions: any` in service
+- Performance: email cache byte-size limit; folderCache TTL
+- Consider adding `CHANGELOG.md` entry for the Cycles 37–39 type-safety sweep
+
+---
+
+## Cycle #38 — Complete catch(unknown) sweep — all remaining any catch sites
+**Timestamp:** 2026-03-18
+**Branch:** main
+**Commit:** cc81539
+
+### Audit Highlights
+Loaded Cycle 37 state. Remaining any-catch sites:
+- `index.ts`: 10 sites (bulk-op handlers, schedule_email inner, top-level tool catch, startup .catch)
+- `scheduler.ts`: 1 site (processDue)
+- `smtp-service.ts`: 1 site (sendEmail)
+- `settings/server.ts`: 5 sites
+- `helpers.ts`: 1 site (retry lastError)
+
+Also verified: `trimForAnalytics()` and `sendProgress()` are actively used (audit agent was wrong in Cycle 37).
+
+### Work Completed
+1. **index.ts** — 10 catch sites: `any` → `unknown` across bulk-op handlers, schedule_email (with `safeErrorMessage` substitution for direct `.message` access), top-level tool catch, startup Promise .catch callbacks
+2. **scheduler.ts** — processDue catch: extracted `errMsg` with `instanceof` guard; fixed downstream `.message` accesses
+3. **smtp-service.ts** — sendEmail catch: `instanceof` guard with "Unknown error" fallback
+4. **settings/server.ts** — 5 sites: `instanceof` ternary for message extraction; `.code` access via `{code?: string}` cast
+5. **helpers.ts** — `let lastError: any` → `unknown`; catch typed explicitly
+
+### Validation
+- `npm run build` — ✅ clean (caught 2 additional `.message` accesses on `unknown` in scheduler, fixed immediately)
+- `npm test` — ✅ 849/849 passed
+
+### Git Status
+Pushed. Commit `cc81539` on `main`.
+
+### Next Cycle Focus
+- `simple-imap-service.ts` has 7 remaining `catch (error: any)` sites
+- `simple-imap-service.ts` also has `(a: any)` in IMAP envelope address parsing (lines 521, 524)
+- Email cache byte-size limit (performance)
+- folderCache TTL invalidation (stale data)
+
+---
+
+## Cycle #37 — Type safety sweep: catch unknown, LogEntry.data, logger signatures
+**Timestamp:** 2026-03-18
+**Branch:** main
+**Commit:** 525adfe
+
+### Audit Highlights
+Used fresh 4-agent parallel audit from same session (security, type safety/error handling, performance/dead code, test/dependency). Key survivors from the 36-cycle series:
+- `catch (e/err/error)` untyped blocks in scheduler, smtp-service, index.ts bridge functions
+- `LogEntry.data?: any` → should be `unknown`
+- Logger method signatures accepting `any` data
+- `config/loader.ts` non-null assertion `base.responseLimits!` (documented as safe, not removed)
+- `trimForAnalytics()` and `sendProgress()` verified as active (not dead code — audit agent was wrong)
+
+### Work Completed
+1. **`LogEntry.data?: any` → `data?: unknown`** (`src/types/index.ts`) — prevents accidental any propagation through log pipeline
+2. **Logger method signatures** (`src/utils/logger.ts`) — all 5 methods (debug/info/warn/error/private log) tightened from `data?: any` to `data?: unknown`; callers unaffected since `unknown` accepts any value
+3. **`catch (err: unknown)`** in `src/services/scheduler.ts` — load() and persist() methods
+4. **`catch (err/error: unknown)`** in `src/services/smtp-service.ts` — cert load and verifyConnection
+5. **`catch (e: unknown)`** in `src/index.ts` — 6 untyped sites: launchProtonBridge, killProtonBridge, watchdog IMAP reconnect, credential migration, config load, background sync
+6. **`config/loader.ts:184`** — reverted `??{}` attempt (broke required-field spread type); added comment documenting why `!` is safe (defaultConfig always populates field)
+
+### Validation
+- `npm run build` — clean (0 errors, 0 warnings)
+- `npm test` — 849/849 passed (no regression)
+
+### Git Status
+Pushed. Commit `525adfe` on `main`.
+
+### Next Cycle Focus
+- Remaining `catch (e: any)` sites in `src/settings/server.ts` (13 sites) and `src/index.ts` MCP tool handlers (~20 sites)
+- `helpers.ts:148` — `let lastError: any` → `unknown`
+- Consider adding a `safeErrorMessage` utility that extracts `.message` from `unknown` errors — would unblock mass `catch (unknown)` adoption in tool handlers
+
+---
+
 ## Cycle #36 — replyAll boolean guard, dateFrom/dateTo string guards, label string guards
 **Timestamp:** 2026-03-18
 **Branch:** main

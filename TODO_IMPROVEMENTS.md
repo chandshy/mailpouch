@@ -349,6 +349,22 @@ The `LogEntry` interface has an optional `data?: any` field carrying sanitized/r
 ### [DONE - Cycle 32] `list_labels` — `(f: any)` cast in array filter
 The `list_labels` filter used `(f: any)` with optional chaining `f.path?.startsWith()`. Since `getFolders()` returns `EmailFolder[]` and `path` is non-optional, the cast was spurious. Replaced with `(f: EmailFolder)` and direct `f.path.startsWith()`. Added `EmailFolder` to the import line.
 
+## NEW — Cycle #38 Findings / Next Cycle Focus
+
+### [DONE - Cycle 39] `simple-imap-service.ts` — 7 remaining `catch (error: any)` sites + envelope `(a: any)`
+**File:** `src/services/simple-imap-service.ts` lines 1121, 1438, 1466, 1547, 1572, 1612, 1649, 1689
+**Issue:** All remaining `any` catch blocks in production code. Each accesses `error.message`.
+**Effort:** LOW (extract `errMsg` pattern identical to scheduler fix)
+**Risk:** LOW
+
+### [PENDING - Cycle 39] `simple-imap-service.ts` — `(a: any)` in IMAP envelope parsing
+**File:** `src/services/simple-imap-service.ts` lines ~521, ~524
+**Issue:** `(env.to ?? []).map((a: any) => ...)` — envelope address objects typed as `any`.
+**Effort:** LOW (define inline interface `{name?: string; address?: string}`)
+**Risk:** LOW
+
+---
+
 ## NEW — Cycle #36 Findings (all completed in Cycle #36)
 
 ### [DONE - Cycle 36] `reply_to_email` — `replyAll` missing boolean type guard
