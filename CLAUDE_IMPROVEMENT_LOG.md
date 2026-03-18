@@ -4,6 +4,35 @@ This file records every autonomous improvement cycle run on this codebase.
 
 ---
 
+## Cycle #32 — send_test_email customMessage type guard, get_logs outputSchema data field, list_labels type safety
+**Timestamp:** 2026-03-18
+**Branch:** main
+
+### Audit Highlights
+
+**Build & Tests (pre-work):** Clean build, 710/710 tests passing.
+
+**New Findings (all corrected this cycle):**
+
+1. **`send_test_email` — `customMessage` field missing type guard** — The optional `customMessage` parameter was cast directly as `string | undefined` and passed to `smtpService.sendTestEmail()`. The SMTP service uses it as `customMessage || <default HTML body>` — meaning a non-string value (e.g. `42` or `["Custom"]`) is truthy, satisfies the `||` short-circuit, and is silently coerced to a string via template literal in the HTML body, producing a garbled test email (`"42"` or `"Custom"` rendered as body text) with no error to the caller. Added `if (args.customMessage !== undefined && typeof args.customMessage !== "string") throw new McpError(ErrorCode.InvalidParams, "'customMessage' must be a string when provided.")` before the SMTP call, consistent with the `message` type guard added to `forward_email` in Cycle #31.
+
+2. **`get_logs` outputSchema — missing `data` field** — The `LogEntry` interface (in `src/types/index.ts`) includes an optional `data?: any` field that carries structured metadata attached to log entries (sanitized and redacted by the logger). The `get_logs` outputSchema declared items with `required: ["timestamp","level","context","message"]` but did not list `data` at all, meaning downstream MCP clients and agents had no schema documentation for the field. Added `data: { description: "Optional structured metadata attached to the log entry (sensitive fields redacted)" }` to the items properties, consistent with the outputSchema accuracy work in Cycles #18–#19.
+
+3. **`list_labels` — `(f: any)` cast in array filter** — The `list_labels` handler used `allFolders.filter((f: any) => f.path?.startsWith("Labels/"))` with an explicit `any` cast. Since `imapService.getFolders()` already returns `Promise<EmailFolder[]>` and `EmailFolder.path` is a non-optional string, the `any` cast and optional-chaining (`?.`) were both spurious. Replaced with `(f: EmailFolder) => f.path.startsWith("Labels/")`, and added `EmailFolder` to the import line from `"./types/index.js"`. Zero `any` casts in this filter.
+
+### Changes
+
+- `src/index.ts`: Added `EmailFolder` to imports. Added `customMessage` type guard in `send_test_email` (8 lines + comment). Added `data` field to `get_logs` items outputSchema (1 line). Changed `list_labels` filter from `(f: any)` to `(f: EmailFolder)` and removed spurious optional chaining.
+- `src/utils/helpers.test.ts`: Added 10 new tests covering the `send_test_email` `customMessage` type guard: 4 passing cases (undefined, non-empty string, empty string, plain text) and 6 triggering cases (number 42, number 0, boolean, null, array, plain object).
+
+### Test Results
+
+**Before:** 710 tests passing
+**After:** 720 tests passing (+10)
+**Build:** Clean (0 TypeScript errors)
+
+---
+
 ## Cycle #31 — cc/bcc type guards across sending handlers, forward_email message type guard
 **Timestamp:** 2026-03-18
 **Branch:** main

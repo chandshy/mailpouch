@@ -1,6 +1,6 @@
 # TODO Improvements — Prioritized Backlog
 
-Last updated: Cycle #31 (2026-03-18)
+Last updated: Cycle #32 (2026-03-18)
 
 ---
 
@@ -338,4 +338,15 @@ All three handlers cast `args.cc` and `args.bcc` directly as `string | undefined
 ### [DONE - Cycle 31] `forward_email` — `message` field missing type guard
 The optional `message` parameter was used as `args.message ? \`${args.message as string}\n\n\` : ""` with no type check. A non-string value (number, array) is truthy, passes the ternary, and is silently coerced via template literal. Added `if (args.message !== undefined && typeof args.message !== "string") throw McpError(InvalidParams, "'message' must be a string when provided.")` before the template-literal use, consistent with all other optional string fields in the codebase.
 
-IMPROVEMENT CYCLES COMPLETE — 2026-03-18 — 31 cycles
+## NEW — Cycle #32 Findings (all completed in Cycle #32)
+
+### [DONE - Cycle 32] `send_test_email` — `customMessage` field missing type guard
+The optional `customMessage` parameter was cast directly as `string | undefined` with no type check. A non-string value (number, array, object) is truthy, satisfies the SMTP service's `customMessage || <default>` fallback, and is silently coerced to a string producing a garbled test email body. Added `if (args.customMessage !== undefined && typeof args.customMessage !== "string") throw McpError(InvalidParams)` consistent with the `message` guard in `forward_email` (Cycle #31).
+
+### [DONE - Cycle 32] `get_logs` outputSchema — missing `data` field
+The `LogEntry` interface has an optional `data?: any` field carrying sanitized/redacted metadata, but the `get_logs` outputSchema items did not list `data`. Added `data: { description: "Optional structured metadata attached to the log entry (sensitive fields redacted)" }` to the items properties for accurate schema documentation.
+
+### [DONE - Cycle 32] `list_labels` — `(f: any)` cast in array filter
+The `list_labels` filter used `(f: any)` with optional chaining `f.path?.startsWith()`. Since `getFolders()` returns `EmailFolder[]` and `path` is non-optional, the cast was spurious. Replaced with `(f: EmailFolder)` and direct `f.path.startsWith()`. Added `EmailFolder` to the import line.
+
+IMPROVEMENT CYCLES COMPLETE — 2026-03-18 — 32 cycles

@@ -1,7 +1,19 @@
 # Final Security & Quality Audit Report
 ## Codebase: protonmail-mcp-server
 ## Date: 2026-03-18
-## Cycles completed: 21
+## Cycles completed: 32
+
+### Cycle #32 Addendum
+
+Cycle #32 identified and resolved three quality gaps:
+
+1. **`send_test_email` `customMessage` missing type guard** — A non-string `customMessage` (number, array, object) is truthy, satisfies the SMTP service's `customMessage || <default>` fallback, and is silently coerced to a string producing garbled HTML in the test email body. Added `if (args.customMessage !== undefined && typeof args.customMessage !== "string") throw new McpError(InvalidParams)` consistent with the `message` guard in `forward_email` (Cycle #31).
+2. **`get_logs` outputSchema missing `data` field** — `LogEntry.data?: any` is included in log entries returned by `getLogs()` but was not documented in the outputSchema items. Added `data` property with a descriptive entry.
+3. **`list_labels` `(f: any)` cast** — Filter parameter typed as `any` despite `getFolders()` returning `EmailFolder[]`. Replaced with `(f: EmailFolder)` and removed spurious optional chaining. `EmailFolder` added to imports.
+
+No security findings. Build clean. 720/720 tests pass (+10 over Cycle #31 baseline of 710).
+
+---
 
 ### Cycle #21 Addendum
 
