@@ -9,8 +9,9 @@
  */
 
 import { loadConfig, defaultConfig } from "../config/loader.js";
-import type { ToolName } from "../config/schema.js";
+import { DEFAULT_RESPONSE_LIMITS, type ToolName, type ResponseLimits } from "../config/schema.js";
 import { logger } from "../utils/logger.js";
+import { tracer } from "../utils/tracer.js";
 
 interface RateBucket {
   /** Timestamps (ms) of calls within the current rolling window */
@@ -41,39 +42,49 @@ export class PermissionManager {
    * the settings UI (`npm run settings`) and save a config file.
    */
   check(tool: ToolName): PermissionResult {
+    const resultTags: { tool: string; allowed?: boolean; reason?: string } = { tool };
+    return tracer.spanSync('permission.check', resultTags, () => {
     this.refreshConfigIfStale();
 
     // Fall back to read-only defaults when no config file is present.
     const config = this.cachedConfig ?? defaultConfig();
 
     const perm = config.permissions?.tools?.[tool];
-    if (!perm) return { allowed: true };
+    if (!perm) {
+      resultTags.allowed = true;
+      resultTags.reason = '';
+      return { allowed: true };
+    }
 
     if (!perm.enabled) {
-      return {
-        allowed: false,
-        reason: `'${tool}' is disabled in server settings. Enable it in the settings UI to allow agentic access.`,
-      };
+      const reason = `'${tool}' is disabled in server settings. Enable it in the settings UI to allow agentic access.`;
+      resultTags.allowed = false;
+      resultTags.reason = reason;
+      return { allowed: false, reason };
     }
 
     const limit = perm.rateLimit;
     if (limit !== null && limit !== undefined && limit > 0) {
       if (!this.consumeRateSlot(tool, limit)) {
         logger.warn(`Rate limit reached for tool '${tool}' (limit: ${limit}/hour)`, "PermissionManager");
-        return {
-          allowed: false,
-          reason: `'${tool}' rate limit of ${limit} calls/hour has been reached. Try again later or raise the limit in settings.`,
-        };
+        const reason = `'${tool}' rate limit of ${limit} calls/hour has been reached. Try again later or raise the limit in settings.`;
+        resultTags.allowed = false;
+        resultTags.reason = reason;
+        return { allowed: false, reason };
       }
     }
 
+    resultTags.allowed = true;
+    resultTags.reason = '';
     return { allowed: true };
+    }); // end tracer.spanSync('permission.check')
   }
 
   /**
    * Return current call counts for each rate-limited tool (for the status UI).
    */
   rateLimitStatus(): Record<string, { used: number; limit: number }> {
+    return tracer.spanSync('permission.rateLimitStatus', {}, () => {
     this.refreshConfigIfStale();
     const config = this.cachedConfig;
     if (!config) return {};
@@ -92,6 +103,14 @@ export class PermissionManager {
       }
     }
     return out;
+    }); // end tracer.spanSync('permission.rateLimitStatus')
+  }
+
+  /** Return current response-size limits (hot-reloaded via 15 s config cache). */
+  getResponseLimits(): ResponseLimits {
+    this.refreshConfigIfStale();
+    const config = this.cachedConfig ?? defaultConfig();
+    return config.responseLimits ?? DEFAULT_RESPONSE_LIMITS;
   }
 
   /** Force an immediate config reload (e.g., after the settings UI saves). */

@@ -24,19 +24,22 @@ describe("SimpleIMAPService.downloadAttachment", () => {
   it("returns null when email has no attachments", async () => {
     const svc = new SimpleIMAPService();
     vi.spyOn(svc as any, "validateEmailId").mockImplementation(() => {});
-    // Inject an email with no attachments into cache
+    // Inject an email with no attachments into cache (new format: { email, cachedAt })
     (svc as any).emailCache.set("123", {
-      id: "123",
-      from: "a@b.com",
-      to: [],
-      subject: "Test",
-      body: "Hello",
-      isHtml: false,
-      date: new Date(),
-      folder: "INBOX",
-      isRead: false,
-      isStarred: false,
-      hasAttachment: false,
+      email: {
+        id: "123",
+        from: "a@b.com",
+        to: [],
+        subject: "Test",
+        body: "Hello",
+        isHtml: false,
+        date: new Date(),
+        folder: "INBOX",
+        isRead: false,
+        isStarred: false,
+        hasAttachment: false,
+      },
+      cachedAt: Date.now(),
     });
     const result = await svc.downloadAttachment("123", 0);
     expect(result).toBeNull();
@@ -47,20 +50,23 @@ describe("SimpleIMAPService.downloadAttachment", () => {
     vi.spyOn(svc as any, "validateEmailId").mockImplementation(() => {});
     const buf = Buffer.from("hello");
     (svc as any).emailCache.set("123", {
-      id: "123",
-      from: "a@b.com",
-      to: [],
-      subject: "Test",
-      body: "Hello",
-      isHtml: false,
-      date: new Date(),
-      folder: "INBOX",
-      isRead: false,
-      isStarred: false,
-      hasAttachment: true,
-      attachments: [
-        { filename: "file.txt", contentType: "text/plain", size: 5, content: buf },
-      ],
+      email: {
+        id: "123",
+        from: "a@b.com",
+        to: [],
+        subject: "Test",
+        body: "Hello",
+        isHtml: false,
+        date: new Date(),
+        folder: "INBOX",
+        isRead: false,
+        isStarred: false,
+        hasAttachment: true,
+        attachments: [
+          { filename: "file.txt", contentType: "text/plain", size: 5, content: buf },
+        ],
+      },
+      cachedAt: Date.now(),
     });
     const result = await svc.downloadAttachment("123", 5);
     expect(result).toBeNull();
@@ -70,21 +76,25 @@ describe("SimpleIMAPService.downloadAttachment", () => {
     const svc = new SimpleIMAPService();
     vi.spyOn(svc as any, "validateEmailId").mockImplementation(() => {});
     const content = Buffer.from("hello world");
+    // Inject directly (bypassing setCacheEntry) so content is NOT stripped
     (svc as any).emailCache.set("456", {
-      id: "456",
-      from: "a@b.com",
-      to: [],
-      subject: "Test",
-      body: "Hello",
-      isHtml: false,
-      date: new Date(),
-      folder: "INBOX",
-      isRead: false,
-      isStarred: false,
-      hasAttachment: true,
-      attachments: [
-        { filename: "hello.txt", contentType: "text/plain", size: content.length, content },
-      ],
+      email: {
+        id: "456",
+        from: "a@b.com",
+        to: [],
+        subject: "Test",
+        body: "Hello",
+        isHtml: false,
+        date: new Date(),
+        folder: "INBOX",
+        isRead: false,
+        isStarred: false,
+        hasAttachment: true,
+        attachments: [
+          { filename: "hello.txt", contentType: "text/plain", size: content.length, content },
+        ],
+      },
+      cachedAt: Date.now(),
     });
     const result = await svc.downloadAttachment("456", 0);
     expect(result).not.toBeNull();
@@ -100,21 +110,25 @@ describe("SimpleIMAPService.downloadAttachment", () => {
     const svc = new SimpleIMAPService();
     vi.spyOn(svc as any, "validateEmailId").mockImplementation(() => {});
     const base64Content = Buffer.from("test data").toString("base64");
+    // Inject directly (bypassing setCacheEntry) so string content is preserved
     (svc as any).emailCache.set("789", {
-      id: "789",
-      from: "a@b.com",
-      to: [],
-      subject: "Test",
-      body: "Hello",
-      isHtml: false,
-      date: new Date(),
-      folder: "INBOX",
-      isRead: false,
-      isStarred: false,
-      hasAttachment: true,
-      attachments: [
-        { filename: "data.bin", contentType: "application/octet-stream", size: 9, content: base64Content },
-      ],
+      email: {
+        id: "789",
+        from: "a@b.com",
+        to: [],
+        subject: "Test",
+        body: "Hello",
+        isHtml: false,
+        date: new Date(),
+        folder: "INBOX",
+        isRead: false,
+        isStarred: false,
+        hasAttachment: true,
+        attachments: [
+          { filename: "data.bin", contentType: "application/octet-stream", size: 9, content: base64Content },
+        ],
+      },
+      cachedAt: Date.now(),
     });
     const result = await svc.downloadAttachment("789", 0);
     expect(result).not.toBeNull();
@@ -126,20 +140,23 @@ describe("SimpleIMAPService.downloadAttachment", () => {
     const svc = new SimpleIMAPService();
     vi.spyOn(svc as any, "validateEmailId").mockImplementation(() => {});
     (svc as any).emailCache.set("999", {
-      id: "999",
-      from: "a@b.com",
-      to: [],
-      subject: "Test",
-      body: "Hello",
-      isHtml: false,
-      date: new Date(),
-      folder: "INBOX",
-      isRead: false,
-      isStarred: false,
-      hasAttachment: true,
-      attachments: [
-        { filename: "empty.txt", contentType: "text/plain", size: 0 },
-      ],
+      email: {
+        id: "999",
+        from: "a@b.com",
+        to: [],
+        subject: "Test",
+        body: "Hello",
+        isHtml: false,
+        date: new Date(),
+        folder: "INBOX",
+        isRead: false,
+        isStarred: false,
+        hasAttachment: true,
+        attachments: [
+          { filename: "empty.txt", contentType: "text/plain", size: 0 },
+        ],
+      },
+      cachedAt: Date.now(),
     });
     const result = await svc.downloadAttachment("999", 0);
     expect(result).toBeNull();

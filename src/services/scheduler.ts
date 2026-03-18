@@ -7,11 +7,12 @@
  * immediately on startup.
  */
 
-import { readFileSync, writeFileSync, renameSync, existsSync } from "fs";
+import { readFileSync, writeFileSync, renameSync, chmodSync, existsSync } from "fs";
 import { join, dirname } from "path";
 import { ScheduledEmail, SendEmailOptions } from "../types/index.js";
 import { SMTPService } from "./smtp-service.js";
 import { logger } from "../utils/logger.js";
+import { tracer } from "../utils/tracer.js";
 
 /** Maximum number of seconds in the future for a scheduled send (30 days). */
 const MAX_SCHEDULE_AHEAD_MS = 30 * 24 * 60 * 60 * 1000;
@@ -53,20 +54,28 @@ export class SchedulerService {
   // ─── Lifecycle ──────────────────────────────────────────────────────────────
 
   start(): void {
+    if (this.timer) return; // already running — prevent duplicate timers
+    tracer.spanSync('scheduler.start', {}, () => {
     this.load();
     // Process any overdue emails from a previous session immediately
-    void this.processDue();
-    this.timer = setInterval(() => void this.processDue(), POLL_INTERVAL_MS);
+    void this.processDue().catch(err => logger.error("Scheduler processDue error", "Scheduler", err));
+    this.timer = setInterval(
+      () => void this.processDue().catch(err => logger.error("Scheduler processDue error", "Scheduler", err)),
+      POLL_INTERVAL_MS,
+    );
     logger.info(`Scheduler started (${this.pending().length} pending)`, "Scheduler");
+    }); // end tracer.spanSync('scheduler.start')
   }
 
   stop(): void {
+    tracer.spanSync('scheduler.stop', {}, () => {
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
     }
     this.persist();
     logger.info("Scheduler stopped", "Scheduler");
+    }); // end tracer.spanSync('scheduler.stop')
   }
 
   // ─── Public API ─────────────────────────────────────────────────────────────
@@ -78,6 +87,7 @@ export class SchedulerService {
    * @returns The assigned scheduled email ID.
    */
   schedule(options: SendEmailOptions, sendAt: Date): string {
+    return tracer.spanSync('scheduler.schedule', { sendAtMs: sendAt.getTime(), hasAttachments: !!(options.attachments?.length) }, () => {
     const now = Date.now();
     const delta = sendAt.getTime() - now;
 
@@ -104,28 +114,41 @@ export class SchedulerService {
     this.persist();
     logger.info(`Email scheduled for ${item.scheduledAt}`, "Scheduler", { id: item.id });
     return item.id;
+    }); // end tracer.spanSync('scheduler.schedule')
   }
 
   /** Cancel a pending scheduled email. Returns false if not found or not pending. */
   cancel(id: string): boolean {
+    return tracer.spanSync('scheduler.cancel', { id }, () => {
     const item = this.items.find(i => i.id === id);
     if (!item || item.status !== "pending") return false;
     item.status = "cancelled";
     this.persist();
     logger.info(`Scheduled email cancelled`, "Scheduler", { id });
     return true;
+    }); // end tracer.spanSync('scheduler.cancel')
   }
 
   /** Return all scheduled emails sorted by scheduledAt ascending. */
   list(): ScheduledEmail[] {
-    return [...this.items].sort(
+    const tags: { resultCount?: number } = {};
+    return tracer.spanSync('scheduler.list', tags, () => {
+    const result = [...this.items].sort(
       (a, b) => new Date(a.scheduledAt).getTime() - new Date(b.scheduledAt).getTime()
     );
+    tags.resultCount = result.length;
+    return result;
+    }); // end tracer.spanSync('scheduler.list')
   }
 
   /** Return only pending items. */
   pending(): ScheduledEmail[] {
-    return this.items.filter(i => i.status === "pending");
+    const tags: { resultCount?: number } = {};
+    return tracer.spanSync('scheduler.pending', tags, () => {
+    const result = this.items.filter(i => i.status === "pending");
+    tags.resultCount = result.length;
+    return result;
+    }); // end tracer.spanSync('scheduler.pending')
   }
 
   // ─── Internal ───────────────────────────────────────────────────────────────
@@ -134,14 +157,18 @@ export class SchedulerService {
     if (this.isProcessing) return;
     this.isProcessing = true;
 
+    const now = new Date();
+    const due = this.items.filter(
+      i => i.status === "pending" && new Date(i.scheduledAt) <= now
+    );
+
+    if (due.length === 0) {
+      this.isProcessing = false;
+      return;
+    }
+
+    return tracer.span('scheduler.processDue', { dueCount: due.length }, async () => {
     try {
-      const now = new Date();
-      const due = this.items.filter(
-        i => i.status === "pending" && new Date(i.scheduledAt) <= now
-      );
-
-      if (due.length === 0) return;
-
       logger.info(`Processing ${due.length} due scheduled email(s)`, "Scheduler");
 
       for (const item of due) {
@@ -176,6 +203,7 @@ export class SchedulerService {
     } finally {
       this.isProcessing = false;
     }
+    }); // end tracer.span('scheduler.processDue')
   }
 
   private load(): void {
@@ -243,6 +271,10 @@ export class SchedulerService {
     try {
       writeFileSync(tmp, JSON.stringify(this.items, null, 2), { encoding: "utf-8", mode: 0o600 });
       renameSync(tmp, this.storePath);
+      // Ensure destination file has 0600 permissions (renameSync preserves the
+      // temp file's mode on POSIX, but chmod is a no-op-safe belt-and-suspenders
+      // guard; silently ignored on Windows where chmod has no effect).
+      try { chmodSync(this.storePath, 0o600); } catch { /* ignore on Windows */ }
     } catch (err) {
       logger.warn("Failed to persist scheduled emails", "Scheduler", err);
     }

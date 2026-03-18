@@ -7,6 +7,9 @@
  * tool annotations, progress notifications, cursor-based pagination.
  */
 
+import { writeFileSync } from "fs";
+import { createConnection } from "net";
+import { spawn } from "child_process";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -26,7 +29,7 @@ import { SMTPService } from "./services/smtp-service.js";
 import { SimpleIMAPService } from "./services/simple-imap-service.js";
 import { AnalyticsService } from "./services/analytics-service.js";
 import { SchedulerService } from "./services/scheduler.js";
-import { logger } from "./utils/logger.js";
+import { logger, getLogFilePath } from "./utils/logger.js";
 import { isValidEmail, validateLabelName, validateFolderName, validateTargetFolder, requireNumericEmailId, validateAttachments } from "./utils/helpers.js";
 import { permissions } from "./permissions/manager.js";
 import {
@@ -34,63 +37,32 @@ import {
   getEscalationStatus,
   isUpgrade,
 } from "./permissions/escalation.js";
-import { loadConfig, defaultConfig, migrateCredentials } from "./config/loader.js";
+import { loadConfig, defaultConfig, migrateCredentials, loadCredentialsFromKeychain } from "./config/loader.js";
 import type { ToolName, PermissionPreset } from "./config/schema.js";
 import { isValidChallengeId, sanitizeText, isValidEscalationTarget } from "./settings/security.js";
-
-// ─── Environment Configuration ───────────────────────────────────────────────
-
-const PROTONMAIL_USERNAME = process.env.PROTONMAIL_USERNAME;
-const PROTONMAIL_PASSWORD = process.env.PROTONMAIL_PASSWORD;
-const PROTONMAIL_SMTP_HOST = process.env.PROTONMAIL_SMTP_HOST || "smtp.protonmail.ch";
-const PROTONMAIL_SMTP_PORT = parseInt(process.env.PROTONMAIL_SMTP_PORT || "587", 10);
-const PROTONMAIL_IMAP_HOST = process.env.PROTONMAIL_IMAP_HOST || "localhost";
-const PROTONMAIL_IMAP_PORT = parseInt(process.env.PROTONMAIL_IMAP_PORT || "1143", 10);
-const PROTONMAIL_SMTP_TOKEN = process.env.PROTONMAIL_SMTP_TOKEN;
-const PROTONMAIL_BRIDGE_CERT = process.env.PROTONMAIL_BRIDGE_CERT;
-const DEBUG = process.env.DEBUG === "true";
-
-if (!PROTONMAIL_USERNAME || !PROTONMAIL_PASSWORD) {
-  console.error(
-    "[ProtonMail MCP] Missing required env vars: PROTONMAIL_USERNAME and PROTONMAIL_PASSWORD must be set"
-  );
-  process.exit(1);
-}
-
-function validatePort(value: number, name: string): void {
-  if (isNaN(value) || value < 1 || value > 65535) {
-    console.error(`[ProtonMail MCP] Invalid port for ${name}: ${value}. Must be 1-65535.`);
-    process.exit(1);
-  }
-}
-validatePort(PROTONMAIL_SMTP_PORT, "PROTONMAIL_SMTP_PORT");
-validatePort(PROTONMAIL_IMAP_PORT, "PROTONMAIL_IMAP_PORT");
-
-logger.setDebugMode(DEBUG);
+import { tracer } from "./utils/tracer.js";
 
 // ─── Service Initialization ───────────────────────────────────────────────────
+// All credentials and connection settings are loaded from ~/.protonmail-mcp.json
+// and the OS keychain in main(). No credentials are read from environment variables
+// to prevent accidental exposure to other processes.
 
 const config: ProtonMailConfig = {
   smtp: {
-    host: PROTONMAIL_SMTP_HOST,
-    port: PROTONMAIL_SMTP_PORT,
-    secure: PROTONMAIL_SMTP_PORT === 465,
-    username: PROTONMAIL_USERNAME,
-    password: PROTONMAIL_PASSWORD,
-    smtpToken: PROTONMAIL_SMTP_TOKEN,
-    bridgeCertPath: PROTONMAIL_BRIDGE_CERT,
+    host: "localhost",
+    port: 1025,
+    secure: false,
+    username: "",
+    password: "",
   },
   imap: {
-    host: PROTONMAIL_IMAP_HOST,
-    port: PROTONMAIL_IMAP_PORT,
+    host: "localhost",
+    port: 1143,
     secure: false,
-    username: PROTONMAIL_USERNAME,
-    password: PROTONMAIL_PASSWORD,
-    bridgeCertPath: PROTONMAIL_BRIDGE_CERT,
+    username: "",
+    password: "",
   },
-  debug: DEBUG,
-  cacheEnabled: true,
-  analyticsEnabled: true,
+  debug: false,
   autoSync: true,
   syncInterval: 5,
 };
@@ -102,6 +74,15 @@ const analyticsService = new AnalyticsService();
 const SCHEDULER_STORE = process.env.PROTONMAIL_SCHEDULER_STORE
   || `${process.env.HOME || process.env.USERPROFILE || "."}/.protonmail-mcp-scheduled.json`;
 const schedulerService = new SchedulerService(smtpService, SCHEDULER_STORE);
+
+// ─── Bridge Auto-Start State ──────────────────────────────────────────────────
+/** Set to true when this process launched Proton Bridge; triggers kill on shutdown. */
+let bridgeAutoStarted = false;
+/** Number of times the watchdog has attempted to revive Bridge. */
+let bridgeRestartAttempts = 0;
+const BRIDGE_MAX_RESTARTS = 3;
+/** Handle returned by setInterval for the bridge watchdog (null when inactive). */
+let bridgeWatchdogTimer: ReturnType<typeof setInterval> | null = null;
 
 // ─── SMTP Connection Status ───────────────────────────────────────────────────
 // Tracks the result of the last SMTP verify attempt so get_connection_status
@@ -134,8 +115,8 @@ async function getAnalyticsEmails(): Promise<{ inbox: EmailMessage[]; sent: Emai
         imapService.getEmails("INBOX", 200),
         imapService.getEmails("Sent", 100).catch(() => [] as EmailMessage[]),
       ]);
-      analyticsCache = { inbox, sent, fetchedAt: Date.now() };
-      analyticsService.updateEmails(inbox, sent);
+      analyticsCache = { inbox: trimForAnalytics(inbox), sent: trimForAnalytics(sent), fetchedAt: Date.now() };
+      analyticsService.updateEmails(trimForAnalytics(inbox), trimForAnalytics(sent));
       return { inbox, sent };
     } finally {
       analyticsCacheInflight = null;
@@ -216,6 +197,24 @@ function safeErrorMessage(error: unknown): string {
     return error.message;
   if (msg.includes("at least one recipient") || msg.includes("required")) return error.message;
   return "An error occurred";
+}
+
+/**
+ * Diagnostic error message — preserves error codes for internal status tracking
+ * (SMTP/IMAP connection status, debug logs).  NOT for client-facing tool error
+ * responses; use safeErrorMessage() for those.
+ */
+function diagnosticErrorMessage(error: unknown): string {
+  if (!(error instanceof Error)) return "Unknown error";
+  const parts: string[] = [];
+  const e = error as any;
+  if (e.code) parts.push(`code=${e.code}`);
+  if (e.command) parts.push(`command=${e.command}`);
+  if (e.responseCode) parts.push(`responseCode=${e.responseCode}`);
+  // First line of message, email addresses redacted to prevent leaking usernames.
+  const firstLine = error.message.split("\n")[0].replace(/[\w.-]+@[\w.-]+/g, "<redacted>");
+  parts.push(firstLine.substring(0, 200));
+  return parts.join("; ");
 }
 
 // ─── Prompt Body Truncation ───────────────────────────────────────────────────
@@ -347,7 +346,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         name: "forward_email",
         title: "Forward Email",
         description:
-          "Forward an existing email to a new recipient. Fetches the original, prepends an optional message, and sends with Fwd:-prefixed subject.",
+          "Forward an email to a new recipient. Original message is included as quoted content. Standard email headers (From, Date, Subject) are preserved in the forward body. Optionally prepend a message before the forwarded content.",
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
         inputSchema: {
           type: "object",
@@ -382,7 +381,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         name: "get_emails",
         title: "Get Emails",
         description:
-          "Fetch a page of emails from a folder. Returns summary fields (id, from, subject, date, isRead, bodyPreview). Use id with get_email_by_id for full content. Pass nextCursor from a previous response to get the next page.",
+          "Fetch a page of emails from a folder. Returns summary fields (id, from, subject, date, isRead, bodyPreview, isAnswered, isForwarded). Use id with get_email_by_id for full content including body and attachments. Pass nextCursor from a previous response to get the next page.",
         annotations: { readOnlyHint: true, openWorldHint: true },
         inputSchema: {
           type: "object",
@@ -421,7 +420,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         name: "get_email_by_id",
         title: "Get Email by ID",
         description:
-          "Fetch a single email's full content including body and attachment metadata (no binary content). Use the id returned by get_emails or search_emails.",
+          "Fetch a single email's full content including body, attachment metadata (no binary content), isAnswered, and isForwarded flags. Use the id returned by get_emails or search_emails.",
         annotations: { readOnlyHint: true, openWorldHint: true },
         inputSchema: {
           type: "object",
@@ -445,6 +444,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             isRead: { type: "boolean" },
             isStarred: { type: "boolean" },
             hasAttachment: { type: "boolean" },
+            isAnswered: { type: "boolean", description: "True if the email has been replied to (\\Answered IMAP flag)" },
+            isForwarded: { type: "boolean", description: "True if the email has been forwarded ($Forwarded IMAP flag)" },
             attachments: {
               type: "array",
               items: {
@@ -464,7 +465,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         name: "search_emails",
         title: "Search Emails",
         description:
-          "Search emails by sender, recipient, subject, date range, read/starred status, or attachment presence. Use `folder` for a single folder or `folders` for multiple (pass [\"*\"] to search all). Returns summary fields. Use get_email_by_id for full content.",
+          "Search emails by sender, recipient (To/CC/BCC), subject, body content, date range (received or sent), size, read/replied/starred/draft status, or attachment presence. Searches are server-side IMAP SEARCH except hasAttachment which filters locally. Use `folder` for a single folder or `folders` for multiple (pass [\"*\"] to search all). Returns summary fields. Use get_email_by_id for full content.",
         annotations: { readOnlyHint: true, openWorldHint: true },
         inputSchema: {
           type: "object",
@@ -481,9 +482,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             hasAttachment: { type: "boolean" },
             isRead: { type: "boolean" },
             isStarred: { type: "boolean" },
-            dateFrom: { type: "string", description: "ISO 8601 start date" },
-            dateTo: { type: "string", description: "ISO 8601 end date" },
+            dateFrom: { type: "string", description: "ISO 8601 start date (INTERNALDATE — when received by server)" },
+            dateTo: { type: "string", description: "ISO 8601 end date (INTERNALDATE — when received by server)" },
             limit: { type: "number", description: "Max results (1-200, default 50)", default: 50 },
+            body: { type: "string", description: "Search within email body content" },
+            text: { type: "string", description: "Search headers and body (full text)" },
+            bcc: { type: "string", description: "Filter by BCC recipient" },
+            answered: { type: "boolean", description: "Filter by whether email has been replied to" },
+            isDraft: { type: "boolean", description: "Filter by draft status" },
+            larger: { type: "number", description: "Minimum email size in bytes" },
+            smaller: { type: "number", description: "Maximum email size in bytes" },
+            sentBefore: { type: "string", format: "date-time", description: "Filter by Date: header before this date (ISO 8601)" },
+            sentSince: { type: "string", format: "date-time", description: "Filter by Date: header since this date (ISO 8601)" },
           },
         },
         outputSchema: {
@@ -600,7 +610,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: "sync_folders",
         title: "Sync Folders",
-        description: "Refresh the folder list from the IMAP server. Returns the updated count.",
+        description: "Refresh the folder list from IMAP (invalidates folder cache). Call this after creating/renaming/deleting folders in another client or if folder counts seem stale.",
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
         inputSchema: { type: "object", properties: {} },
         outputSchema: {
@@ -631,7 +641,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         name: "delete_folder",
         title: "Delete Folder",
         description:
-          "Delete an empty folder or label. Protected system folders (INBOX, Sent, Drafts, Trash, Spam, Archive) cannot be deleted.",
+          "Delete an empty folder or label. Protected system folders (INBOX, Sent, Drafts, Trash, Spam, Archive, All Mail, Starred) cannot be deleted.",
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
         inputSchema: {
           type: "object",
@@ -712,7 +722,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         name: "archive_email",
         title: "Archive Email",
         description:
-          "Move an email to the Archive folder. Convenience wrapper for move_email targeting Archive.",
+          "Move an email to the Archive folder. Convenience wrapper for move_email targeting Archive. Note: labels are lost when an email is moved — label copies in Labels/ folders are not preserved.",
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
         inputSchema: {
           type: "object",
@@ -725,7 +735,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         name: "move_to_trash",
         title: "Move Email to Trash",
         description:
-          "Move an email to the Trash folder. Convenience wrapper for move_email targeting Trash.",
+          "Move an email to the Trash folder. Convenience wrapper for move_email targeting Trash. Note: labels are lost when an email is moved — label copies in Labels/ folders are not preserved.",
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
         inputSchema: {
           type: "object",
@@ -822,7 +832,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         name: "move_to_label",
         title: "Move Email to Label",
         description:
-          "Move an email into a label folder (Labels/LabelName). ProtonMail Bridge represents labels as IMAP folders — the email is moved, not tagged. Create the label folder first with create_folder if it does not exist.",
+          "Apply a label to an email. The email remains in its original folder and also appears in Labels/{label}. Labels are additive — an email can have multiple labels simultaneously.",
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
         inputSchema: {
           type: "object",
@@ -841,7 +851,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         name: "bulk_move_to_label",
         title: "Bulk Move Emails to Label",
         description:
-          "Move multiple emails into a label folder. Emits progress notifications if a progressToken is provided in _meta.",
+          "Apply a label to multiple emails. Each email remains in its original folder and also appears in Labels/{label}. Progress notifications are sent for large batches.",
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
         inputSchema: {
           type: "object",
@@ -857,7 +867,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         name: "remove_label",
         title: "Remove Label from Email",
         description:
-          "Remove a label from an email by moving it back to INBOX (or a specified target folder).",
+          "Remove a label from an email. The email is removed from Labels/{label} but remains in its original folder (Inbox, etc.).",
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
         inputSchema: {
           type: "object",
@@ -874,7 +884,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         name: "bulk_remove_label",
         title: "Bulk Remove Label from Emails",
         description:
-          "Remove a label from multiple emails by moving them back to INBOX (or a specified folder). Emits progress notifications.",
+          "Remove a label from multiple emails. Emails are removed from Labels/{label} but remain in their original folders.",
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
         inputSchema: {
           type: "object",
@@ -1091,7 +1101,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: "get_volume_trends",
         title: "Get Volume Trends",
-        description: "Email volume per day (received and sent) over a time window. Default: last 30 days.",
+        description: "Get email send/receive volume per day over a time window. Returns daily counts of received and sent messages. Does not include unread counts — use get_unread_count for that.",
         annotations: { readOnlyHint: true, openWorldHint: true },
         inputSchema: {
           type: "object",
@@ -1123,7 +1133,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: "get_connection_status",
         title: "Get Connection Status",
-        description: "Check whether SMTP and IMAP connections are active.",
+        description: "Check whether SMTP and IMAP connections to Proton Bridge are healthy. Returns connection status, TLS security mode (secure/insecure), and host/port details. Use this to diagnose connection issues before performing other operations.",
         annotations: { readOnlyHint: true },
         inputSchema: { type: "object", properties: {} },
         outputSchema: {
@@ -1158,7 +1168,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: "sync_emails",
         title: "Sync Emails",
-        description: "Manually pull latest emails from the IMAP server into the local cache.",
+        description: "Fetch the latest emails from IMAP into the local cache. Use this to refresh the cache after Bridge syncs new messages. Returns emails fetched; use get_emails for paginated access.",
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
         inputSchema: {
           type: "object",
@@ -1180,7 +1190,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: "clear_cache",
         title: "Clear Cache",
-        description: "Clear the email and analytics caches. Use when data appears stale.",
+        description: "Clear all in-memory caches (email message cache, folder cache, analytics cache). Forces fresh IMAP fetches on next access. Use if you suspect stale data.",
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
         inputSchema: { type: "object", properties: {} },
         outputSchema: ACTION_RESULT_SCHEMA,
@@ -1258,7 +1268,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         name: "schedule_email",
         title: "Schedule Email",
         description:
-          "Queue an email for future delivery. The email will be sent automatically at send_at (ISO 8601). Must be at least 60 seconds in the future and no more than 30 days out. Returns a schedule ID.",
+          "Schedule an email for future delivery (minimum 60 seconds from now, maximum 30 days). Scheduled emails are retried up to 3 times on failure. Use list_scheduled_emails to view pending sends and cancel_scheduled_email to cancel before delivery.",
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
         inputSchema: {
           type: "object",
@@ -1314,6 +1324,23 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             count: { type: "number" },
           },
           required: ["scheduled", "count"],
+        },
+      },
+      {
+        name: "list_proton_scheduled",
+        title: "List Proton Scheduled Emails",
+        description: "List emails natively scheduled via Proton Mail web/mobile app (not MCP-scheduled emails). Reads the 'All Scheduled' IMAP folder exposed by Proton Bridge.",
+        inputSchema: { type: "object", properties: {}, required: [] },
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+        outputSchema: {
+          type: "object",
+          properties: {
+            emails: { type: "array", items: EMAIL_SUMMARY_SCHEMA },
+            count: { type: "number" },
+            folder: { type: "string" },
+            note: { type: "string" },
+          },
+          required: ["emails", "count"],
         },
       },
       {
@@ -1423,7 +1450,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 // ─── Tool Handlers ────────────────────────────────────────────────────────────
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args = {} } = request.params;
+  const name = request.params.name;
+  const args = request.params.arguments ?? {};
+
+  return tracer.span('mcp.tool_call', { tool: name, argCount: Object.keys(args).length }, async () => {
   const progressToken = request.params._meta?.progressToken;
 
   const { body: _b, attachments: _a, password: _p, ...safeArgs } = args as Record<string, unknown>;
@@ -1534,9 +1564,43 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     };
   }
 
+  // Response-size limits — hot-reloaded from config every 15 s.
+  const _limits = permissions.getResponseLimits();
+
   function ok(structured: Record<string, unknown>, text?: string) {
+    const jsonText = text ?? JSON.stringify(structured);
+    const byteLen = Buffer.byteLength(jsonText, "utf-8");
+
+    // Observability: always log size at debug level.
+    logger.debug(`Tool '${name}' response: ${byteLen} bytes (${Math.round(byteLen / 1024)} KB)`, "ResponseGuard");
+
+    if (_limits.warnOnLargeResponse && byteLen > _limits.maxResponseBytes * 0.8) {
+      logger.warn(
+        `Tool '${name}' response is ${Math.round(byteLen / 1024)} KB — approaching limit of ${Math.round(_limits.maxResponseBytes / 1024)} KB`,
+        "ResponseGuard",
+      );
+    }
+
+    if (byteLen > _limits.maxResponseBytes) {
+      logger.error(
+        `Tool '${name}' response exceeds limit: ${byteLen} bytes > ${_limits.maxResponseBytes} bytes`,
+        "ResponseGuard",
+      );
+      const errorStructured = {
+        success: false,
+        reason: `Response too large (${Math.round(byteLen / 1024)} KB). Reduce scope, use pagination, or increase the limit in Settings → Debug Logs → Response Limits.`,
+        sizeBytes: byteLen,
+        limitBytes: _limits.maxResponseBytes,
+      };
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(errorStructured) }],
+        structuredContent: errorStructured,
+        isError: true,
+      };
+    }
+
     return {
-      content: [{ type: "text" as const, text: text ?? JSON.stringify(structured) }],
+      content: [{ type: "text" as const, text: jsonText }],
       structuredContent: structured,
     };
   }
@@ -1719,6 +1783,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (!result.success) {
           return { content: [{ type: "text" as const, text: "Email delivery failed" }], isError: true, structuredContent: { success: false, reason: "Email delivery failed" } };
         }
+        if (result.success) {
+          await imapService.setFlag(emailId, '\\Answered').catch(() => {});
+        }
         return actionOk(result.messageId);
       }
 
@@ -1781,6 +1848,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (!fwdResult.success) {
           return { content: [{ type: "text" as const, text: "Forward failed" }], isError: true, structuredContent: { success: false, reason: "Email delivery failed" } };
         }
+        if (fwdResult.success) {
+          await imapService.setFlag(fwdId, '$Forwarded').catch(() => {});
+        }
         return actionOk(fwdResult.messageId);
       }
 
@@ -1821,7 +1891,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (args.limit !== undefined && typeof args.limit !== "number") {
           throw new McpError(ErrorCode.InvalidParams, "'limit' must be a number.");
         }
-        const limit = Math.min(Math.max(1, (args.limit as number) || 50), 200);
+        const limit = Math.min(Math.max(1, (args.limit as number) || 50), 200, _limits.maxEmailListResults);
 
         // Validate cursor type — a non-string value (e.g. a number) would be
         // silently cast and reach decodeCursor with a wrong type, producing a
@@ -1856,6 +1926,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const email = await imapService.getEmailById(rawEmailId);
         if (!email) {
           return { content: [{ type: "text" as const, text: "Email not found" }], isError: true, structuredContent: { success: false, reason: "Resource not found" } };
+        }
+        // Truncate oversized email bodies before serialization to avoid hitting the response limit.
+        if (email.body && email.body.length > _limits.maxEmailBodyChars) {
+          const originalLen = email.body.length;
+          email.body = email.body.substring(0, _limits.maxEmailBodyChars)
+            + `\n\n[...body truncated at ${_limits.maxEmailBodyChars.toLocaleString()} chars — original was ${originalLen.toLocaleString()} chars]`;
         }
         return ok(email as unknown as Record<string, unknown>);
       }
@@ -1939,6 +2015,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             throw new McpError(ErrorCode.InvalidParams, "'dateFrom' must not be later than 'dateTo'.");
           }
         }
+        const body     = typeof args.body === 'string' ? args.body : undefined;
+        const text     = typeof args.text === 'string' ? args.text : undefined;
+        const bcc      = typeof args.bcc === 'string' ? args.bcc : undefined;
+        const answered = typeof args.answered === 'boolean' ? args.answered : undefined;
+        const isDraft  = typeof args.isDraft === 'boolean' ? args.isDraft : undefined;
+        const larger   = typeof args.larger === 'number' ? args.larger : undefined;
+        const smaller  = typeof args.smaller === 'number' ? args.smaller : undefined;
+        const sentBefore = args.sentBefore ? new Date(args.sentBefore as string) : undefined;
+        const sentSince  = args.sentSince  ? new Date(args.sentSince  as string) : undefined;
+
         const results = await imapService.searchEmails({
           folder: folders ? undefined : folder,
           folders,
@@ -1950,7 +2036,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           isStarred: args.isStarred as boolean | undefined,
           dateFrom: args.dateFrom as string | undefined,
           dateTo: args.dateTo as string | undefined,
-          limit: Math.min(Math.max(1, (args.limit as number) || 50), 200),
+          limit: Math.min(Math.max(1, (args.limit as number) || 50), 200, _limits.maxEmailListResults),
+          body,
+          text,
+          bcc,
+          answered,
+          isDraft,
+          larger,
+          smaller,
+          sentBefore,
+          sentSince,
         });
         const searchedIn = folders ? folders.join(", ") : folder;
         return ok({ emails: results, count: results.length, folder: searchedIn });
@@ -1993,7 +2088,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (args.limit !== undefined && typeof args.limit !== "number") {
           throw new McpError(ErrorCode.InvalidParams, "'limit' must be a number.");
         }
-        const lblLimit = Math.min(Math.max((args.limit as number) || 50, 1), 200);
+        const lblLimit = Math.min(Math.max((args.limit as number) || 50, 1), 200, _limits.maxEmailListResults);
 
         // Validate cursor type — mirrors the guard added to get_emails (Cycle #29).
         if (args.cursor !== undefined && typeof args.cursor !== "string") {
@@ -2202,6 +2297,35 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return ok({ scheduled: summary, count: summary.length });
       }
 
+      case "list_proton_scheduled": {
+        // Try common Proton scheduled folder names — Bridge may expose as "All Scheduled" or "Scheduled"
+        const scheduledFolderCandidates = ['All Scheduled', 'Scheduled'];
+        let scheduledEmails: EmailMessage[] = [];
+        let foundFolder = '';
+
+        for (const candidate of scheduledFolderCandidates) {
+          try {
+            const emails = await imapService.getEmails(candidate, 50);
+            if (emails.length >= 0) { // folder exists (even if empty)
+              scheduledEmails = emails;
+              foundFolder = candidate;
+              break;
+            }
+          } catch {
+            // folder doesn't exist, try next
+          }
+        }
+
+        if (!foundFolder) {
+          return ok({
+            emails: [], count: 0,
+            note: "No Proton scheduled folder found. Scheduled emails may not be visible until a message is actually scheduled via Proton web/mobile."
+          });
+        }
+
+        return ok({ emails: scheduledEmails, count: scheduledEmails.length, folder: foundFolder });
+      }
+
       case "cancel_scheduled_email": {
         // Validate UUID format before calling into the scheduler to give callers
         // a clear InvalidParams error instead of a silent "not found".
@@ -2235,6 +2359,28 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const attResult = await imapService.downloadAttachment(rawAttEmailId, rawAttIdx);
         if (!attResult) {
           return { content: [{ type: "text" as const, text: "Attachment not found" }], isError: true, structuredContent: { success: false, reason: "Attachment not found" } };
+        }
+        // Guard: reject oversized attachments before they blow through the response limit.
+        const encodedLen = typeof attResult.content === "string" ? attResult.content.length : 0;
+        if (encodedLen > _limits.maxAttachmentBytes) {
+          logger.warn(
+            `Attachment "${attResult.filename}" too large: ${encodedLen} bytes encoded (limit ${_limits.maxAttachmentBytes})`,
+            "ResponseGuard",
+          );
+          const attError = {
+            success: false,
+            reason: "Attachment too large to return inline",
+            filename: attResult.filename,
+            contentType: attResult.contentType,
+            sizeBytes: attResult.size,
+            encodedSizeBytes: encodedLen,
+            limitBytes: _limits.maxAttachmentBytes,
+          };
+          return {
+            content: [{ type: "text" as const, text: `Attachment "${attResult.filename}" is too large (${attResult.size} bytes raw, ${encodedLen} bytes encoded). Limit: ${_limits.maxAttachmentBytes} bytes. Increase maxAttachmentBytes in Settings → Debug Logs → Response Limits to download larger files.` }],
+            structuredContent: attError,
+            isError: true,
+          };
         }
         return ok(attResult, `Attachment: ${attResult.filename} (${attResult.contentType}, ${attResult.size} bytes)`);
       }
@@ -2454,7 +2600,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // path traversal attacks such as Labels/../INBOX.
         const mtlValidErr = validateLabelName(label);
         if (mtlValidErr) throw new McpError(ErrorCode.InvalidParams, mtlValidErr);
-        await imapService.moveEmail(mtlEmailId, `Labels/${label}`);
+        await imapService.copyEmailToFolder(mtlEmailId, `Labels/${label}`);
         return actionOk();
       }
 
@@ -2483,7 +2629,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         for (let i = 0; i < emailIds2.length; i++) {
           try {
-            await imapService.moveEmail(emailIds2[i], labelFolder);
+            await imapService.copyEmailToFolder(emailIds2[i], labelFolder);
             results2.success++;
           } catch (e: any) {
             results2.failed++;
@@ -2498,13 +2644,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "remove_label": {
         const rlEmailId = requireNumericEmailId(args.emailId);
-        const rlRawTarget = args.targetFolder as string | undefined;
-        // Validate caller-supplied targetFolder before use as an IMAP path.
-        // Default to INBOX when omitted; reject control characters and path traversal.
-        const rlValidErr = validateTargetFolder(rlRawTarget);
-        if (rlValidErr) throw new McpError(ErrorCode.InvalidParams, rlValidErr);
-        const rlTarget = rlRawTarget || "INBOX";
-        await imapService.moveEmail(rlEmailId, rlTarget);
+        // Validate the label name
+        if (!args.label || typeof args.label !== "string") {
+          throw new McpError(ErrorCode.InvalidParams, "'label' is required and must be a string.");
+        }
+        const rlLabel = args.label as string;
+        const rlLabelValidErr = validateLabelName(rlLabel);
+        if (rlLabelValidErr) throw new McpError(ErrorCode.InvalidParams, rlLabelValidErr);
+        // Delete from the Labels/<name> folder (removes label without touching original folder)
+        await imapService.deleteFromFolder(rlEmailId, `Labels/${rlLabel}`);
         return actionOk();
       }
 
@@ -2516,17 +2664,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const brlEmailIds: string[] = brlIds
           .filter((id): id is string => typeof id === "string" && /^\d+$/.test(id))
           .slice(0, MAX_BULK_IDS);
-        const brlRawTarget = args.targetFolder as string | undefined;
-        // Validate caller-supplied targetFolder — same guards as remove_label.
-        const brlValidErr = validateTargetFolder(brlRawTarget);
-        if (brlValidErr) throw new McpError(ErrorCode.InvalidParams, brlValidErr);
-        const brlTarget = brlRawTarget || "INBOX";
+        // Validate label name
+        if (!args.label || typeof args.label !== "string") {
+          throw new McpError(ErrorCode.InvalidParams, "'label' is required and must be a string.");
+        }
+        const brlLabel = args.label as string;
+        const brlLabelValidErr = validateLabelName(brlLabel);
+        if (brlLabelValidErr) throw new McpError(ErrorCode.InvalidParams, brlLabelValidErr);
+        const brlLabelFolder = `Labels/${brlLabel}`;
         const brlTotal = brlEmailIds.length;
         const brlResults = { success: 0, failed: 0, errors: [] as string[] };
 
         for (let i = 0; i < brlEmailIds.length; i++) {
           try {
-            await imapService.moveEmail(brlEmailIds[i], brlTarget);
+            await imapService.deleteFromFolder(brlEmailIds[i], brlLabelFolder);
             brlResults.success++;
           } catch (e: any) {
             brlResults.failed++;
@@ -2594,7 +2745,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           throw new McpError(ErrorCode.InvalidParams, "'limit' must be a number.");
         }
         await getAnalyticsEmails();
-        const contacts = analyticsService.getContacts(args.limit as number | undefined);
+        const contactLimit = Math.min((args.limit as number) || 100, _limits.maxEmailListResults);
+        const contacts = analyticsService.getContacts(contactLimit);
         return ok({ contacts });
       }
 
@@ -2632,7 +2784,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           settingsConfigured: configExists(),
           settingsConfigPath: getConfigPath(),
         };
-        return ok(status);
+        const insecureTlsWarning = (smtpService.insecureTls || imapService.insecureTls)
+          ? "\n\u26a0 TLS certificate validation is DISABLED \u2014 configure Bridge Certificate Path in Settings."
+          : "";
+        return ok(status, JSON.stringify(status) + insecureTlsWarning);
       }
 
       case "sync_emails": {
@@ -2683,6 +2838,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       isError: true,
     };
   }
+  }); // end tracer.span('mcp.tool_call')
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -2730,6 +2886,7 @@ server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({
 }));
 
 server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+  return tracer.span('mcp.resource_read', { uri: request.params.uri }, async () => {
   const { uri } = request.params;
 
   // email://{folder}/{id}
@@ -2794,6 +2951,7 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
   }
 
   throw new McpError(ErrorCode.InvalidRequest, `Unsupported resource URI: ${uri}`);
+  }); // end tracer.span('mcp.resource_read')
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -3082,7 +3240,163 @@ Produce:
 // STARTUP & LIFECYCLE
 // ═════════════════════════════════════════════════════════════════════════════
 
+/** Test whether a TCP connection can be established to host:port within timeoutMs. */
+async function isBridgeReachable(host: string, port: number, timeoutMs = 1000): Promise<boolean> {
+  return new Promise(resolve => {
+    const sock = createConnection({ host, port });
+    const timer = setTimeout(() => { sock.destroy(); resolve(false); }, timeoutMs);
+    sock.on('connect', () => { clearTimeout(timer); sock.destroy(); resolve(true); });
+    sock.on('error', () => { clearTimeout(timer); resolve(false); });
+  });
+}
+
+/** Launch Proton Bridge using the platform-appropriate command, then wait up to 15 s for ports. */
+async function launchProtonBridge(): Promise<void> {
+  const platform = process.platform;
+  let cmd: string;
+  let args: string[];
+  if (platform === "win32") {
+    // "Proton Mail Bridge" is the Windows display name; fall back to known install paths
+    cmd = "cmd";
+    args = ["/c", "start", "", "Proton Mail Bridge"];
+  } else if (platform === "darwin") {
+    cmd = "open";
+    args = ["-a", "Proton Mail Bridge"];
+  } else {
+    cmd = "proton-bridge";
+    args = ["--no-window"];
+  }
+  try {
+    spawn(cmd, args, { stdio: "ignore", detached: true, shell: platform === "win32" }).unref();
+    logger.info("Proton Bridge launch command sent — waiting up to 15 s for ports to open…", "MCPServer");
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline) {
+      await new Promise<void>(r => setTimeout(r, 1500));
+      const [smtpOk, imapOk] = await Promise.all([
+        isBridgeReachable(config.smtp.host, config.smtp.port),
+        isBridgeReachable(config.imap.host, config.imap.port),
+      ]);
+      if (smtpOk && imapOk) {
+        logger.info("Proton Bridge is now reachable", "MCPServer");
+        bridgeAutoStarted = true;
+        bridgeRestartAttempts = 0;
+        return;
+      }
+    }
+    logger.warn("Proton Bridge did not become reachable within 15 s — continuing anyway", "MCPServer");
+  } catch (e) {
+    logger.warn("Failed to auto-start Proton Bridge", "MCPServer", e);
+  }
+}
+
+/** Terminate the Proton Bridge process launched by this server. */
+async function killProtonBridge(): Promise<void> {
+  const platform = process.platform;
+  try {
+    let killCmd: string;
+    let killArgs: string[];
+    if (platform === "win32") {
+      killCmd = "taskkill";
+      killArgs = ["/IM", "proton-bridge.exe", "/F"];
+    } else if (platform === "darwin") {
+      killCmd = "killall";
+      killArgs = ["Proton Mail Bridge"];
+    } else {
+      killCmd = "pkill";
+      killArgs = ["-f", "proton-bridge"];
+    }
+    await new Promise<void>((resolve) => {
+      const p = spawn(killCmd, killArgs, { stdio: "ignore" });
+      p.on("close", () => resolve());
+      p.on("error", () => resolve());
+    });
+    logger.info("Proton Bridge terminated", "MCPServer");
+  } catch (e) {
+    logger.debug("Could not terminate Proton Bridge", "MCPServer", e);
+  }
+}
+
+/**
+ * Background watchdog — runs every 30 s when autoStartBridge is enabled.
+ * If Bridge ports become unreachable it attempts up to BRIDGE_MAX_RESTARTS relaunches.
+ * After all attempts are exhausted it logs a critical alert and stops watching.
+ */
+function startBridgeWatchdog(): void {
+  if (bridgeWatchdogTimer) return;
+  bridgeWatchdogTimer = setInterval(async () => {
+    const [smtpOk, imapOk] = await Promise.all([
+      isBridgeReachable(config.smtp.host, config.smtp.port),
+      isBridgeReachable(config.imap.host, config.imap.port),
+    ]);
+    if (smtpOk && imapOk) {
+      // Bridge healthy — reset consecutive-failure counter
+      if (bridgeRestartAttempts > 0) {
+        logger.info("Proton Bridge is reachable again", "MCPServer");
+        bridgeRestartAttempts = 0;
+      }
+      return;
+    }
+
+    // Bridge is down
+    bridgeRestartAttempts++;
+    if (bridgeRestartAttempts > BRIDGE_MAX_RESTARTS) {
+      // Already gave up — don't spam logs
+      return;
+    }
+
+    logger.warn(
+      `Proton Bridge went away — restart attempt ${bridgeRestartAttempts}/${BRIDGE_MAX_RESTARTS}`,
+      "MCPServer"
+    );
+    await launchProtonBridge();
+
+    // Try to reconnect IMAP if Bridge came back
+    if (bridgeRestartAttempts === 0) {
+      // launchProtonBridge reset the counter → it succeeded
+      try {
+        await imapService.connect(
+          config.imap.host, config.imap.port,
+          config.imap.username, config.imap.password,
+          config.imap.bridgeCertPath, config.imap.secure
+        );
+        logger.info("IMAP reconnected after Bridge restart", "MCPServer");
+      } catch (e) {
+        logger.warn("IMAP reconnect failed after Bridge restart", "MCPServer", e);
+      }
+    }
+
+    if (bridgeRestartAttempts >= BRIDGE_MAX_RESTARTS) {
+      logger.error(
+        `Proton Bridge failed to recover after ${BRIDGE_MAX_RESTARTS} restart attempts. ` +
+        "Email tools will not work until Bridge is restarted manually. " +
+        "Stopping watchdog.",
+        "MCPServer"
+      );
+      process.stderr.write(
+        `[ProtonMail MCP] CRITICAL: Proton Bridge did not recover after ${BRIDGE_MAX_RESTARTS} restart attempts. ` +
+        "Start Bridge manually and restart the MCP server.\n"
+      );
+      if (bridgeWatchdogTimer) { clearInterval(bridgeWatchdogTimer); bridgeWatchdogTimer = null; }
+    }
+  }, 30_000).unref();
+}
+
+/**
+ * Strip body text and attachment binary content from emails before storing
+ * in the analytics cache. Prevents unbounded memory growth from large emails.
+ */
+function trimForAnalytics(emails: EmailMessage[]): EmailMessage[] {
+  return emails.map(e => ({
+    ...e,
+    body: undefined as unknown as string,
+    attachments: e.attachments?.map(a => ({ ...a, content: undefined })),
+  }));
+}
+
 async function main() {
+  // Clear log file from previous run so each session starts fresh
+  try { writeFileSync(getLogFilePath(), "", "utf8"); } catch { /* ignore */ }
+
   logger.info("Starting Proton Mail MCP Server v2.0.0", "MCPServer");
 
   // Migrate plaintext credentials to OS keychain if available
@@ -3095,35 +3409,142 @@ async function main() {
     logger.debug("Keychain migration skipped (not available or no credentials to migrate)", "MCPServer");
   }
 
+  // Load all connection settings and credentials from config file + OS keychain.
+  // Credentials are never read from environment variables.
   try {
-    logger.info("Verifying SMTP connection...", "MCPServer");
-    try {
-      await smtpService.verifyConnection();
-      smtpStatus = { connected: true, lastCheck: new Date() };
-      logger.info("SMTP connection verified", "MCPServer");
-    } catch (e: any) {
-      smtpStatus = { connected: false, lastCheck: new Date(), error: safeErrorMessage(e) };
-      logger.warn("SMTP connection failed — sending features limited", "MCPServer", e);
-      logger.info("Use your Proton Bridge password (not your ProtonMail account password)", "MCPServer");
-    }
+    const fileConfig = loadConfig();
+    if (fileConfig) {
+      const cn = fileConfig.connection;
+      config.smtp.host          = cn.smtpHost  || "localhost";
+      config.smtp.port          = cn.smtpPort  || 1025;
+      config.smtp.secure        = cn.tlsMode === 'ssl';
+      config.imap.host          = cn.imapHost  || "localhost";
+      config.imap.port          = cn.imapPort  || 1143;
+      config.imap.secure        = cn.tlsMode === 'ssl';
+      config.smtp.username      = cn.username  || "";
+      config.imap.username      = cn.username  || "";
+      config.smtp.bridgeCertPath = cn.bridgeCertPath || undefined;
+      config.imap.bridgeCertPath = cn.bridgeCertPath || undefined;
+      config.debug              = !!cn.debug;
+      config.autoStartBridge    = !!cn.autoStartBridge;
+      logger.setDebugMode(!!cn.debug);
+      tracer.setEnabled(!!cn.debug);
 
-    logger.info("Connecting to IMAP (Proton Bridge)...", "MCPServer");
-    try {
-      await imapService.connect(
+      // Password: keychain takes priority over config file plaintext
+      const keychainCreds = await loadCredentialsFromKeychain();
+      if (keychainCreds?.password) {
+        config.smtp.password = keychainCreds.password;
+        config.imap.password = keychainCreds.password;
+        logger.debug(`Bridge password loaded from ${keychainCreds.storage}`, "MCPServer");
+      } else if (cn.password) {
+        config.smtp.password = cn.password;
+        config.imap.password = cn.password;
+        logger.debug("Bridge password loaded from config file", "MCPServer");
+      }
+      if (keychainCreds?.smtpToken) {
+        config.smtp.smtpToken = keychainCreds.smtpToken;
+      } else if (cn.smtpToken) {
+        config.smtp.smtpToken = cn.smtpToken;
+      }
+    } else {
+      logger.warn("No config file found — run 'npm run settings' to configure", "MCPServer");
+    }
+  } catch (e) {
+    logger.warn("Failed to load config file", "MCPServer", e);
+  }
+
+  if (!config.smtp.username) {
+    logger.warn("No username configured — run 'npm run settings' to set up credentials", "MCPServer");
+  }
+  if (!config.smtp.password) {
+    logger.warn("No password configured — run 'npm run settings' to set up credentials", "MCPServer");
+  }
+
+  // Rebuild the SMTP transporter now that credentials and cert path are loaded.
+  // SMTPService is constructed at module load time (before config is read), so
+  // its initial transporter has an empty password and no Bridge cert.
+  smtpService.reinitialize();
+
+  // ── Bridge reachability probe + optional auto-start ───────────────────────
+  let [smtpReachable, imapReachable] = await Promise.all([
+    isBridgeReachable(config.smtp.host, config.smtp.port),
+    isBridgeReachable(config.imap.host, config.imap.port),
+  ]);
+
+  if (config.autoStartBridge) {
+    if (!smtpReachable || !imapReachable) {
+      logger.info("autoStartBridge enabled — Bridge not reachable, attempting to launch…", "MCPServer");
+      await launchProtonBridge();
+      // Re-probe after launch attempt so the connection step below reflects reality
+      [smtpReachable, imapReachable] = await Promise.all([
+        isBridgeReachable(config.smtp.host, config.smtp.port),
+        isBridgeReachable(config.imap.host, config.imap.port),
+      ]);
+    } else {
+      logger.debug("autoStartBridge enabled — Bridge already running", "MCPServer");
+    }
+    startBridgeWatchdog();
+  }
+
+  if (!smtpReachable || !imapReachable) {
+    logger.warn(
+      `Proton Bridge does not appear to be running — ${config.smtp.host}:${config.smtp.port} (SMTP) and/or ${config.imap.host}:${config.imap.port} (IMAP) are not reachable. Start Bridge and restart the MCP server.`,
+      'MCPServer'
+    );
+    // Don't exit — continue anyway so the server starts and tools can fail gracefully
+  }
+
+  try {
+    logger.info("Connecting to SMTP and IMAP…", "MCPServer");
+    await Promise.all([
+      smtpService.verifyConnection().then(() => {
+        smtpStatus = { connected: true, lastCheck: new Date() };
+        logger.info("SMTP connection verified", "MCPServer");
+      }).catch((e: any) => {
+        smtpStatus = { connected: false, lastCheck: new Date(), error: diagnosticErrorMessage(e) };
+        logger.warn("SMTP connection failed — sending features limited", "MCPServer", e);
+        logger.info("Use your Proton Bridge password (not your ProtonMail account password)", "MCPServer");
+      }),
+      imapService.connect(
         config.imap.host,
         config.imap.port,
         config.imap.username,
         config.imap.password,
-        config.imap.bridgeCertPath
-      );
-      logger.info("IMAP connection established", "MCPServer");
-    } catch (e) {
-      logger.warn("IMAP connection failed — reading features limited", "MCPServer", e);
-      logger.info("Ensure Proton Bridge is running on localhost:1143", "MCPServer");
+        config.imap.bridgeCertPath,
+        config.imap.secure
+      ).then(() => {
+        logger.info("IMAP connection established", "MCPServer");
+      }).catch((e: any) => {
+        logger.warn("IMAP connection failed — reading features limited", "MCPServer", e);
+        logger.info("Ensure Proton Bridge is running on localhost:1143", "MCPServer");
+      }),
+    ]);
+
+    // Start background IDLE for push cache invalidation
+    if (config.debug) {
+      logger.debug('Starting IMAP IDLE background watcher', 'MCPServer');
     }
+    imapService.startIdle().catch(err => logger.debug('IDLE startup failed', 'MCPServer', err));
 
     // Start the email scheduler (loads persisted pending emails, begins 60s poll)
     schedulerService.start();
+
+    // ── Background auto-sync ────────────────────────────────────────────────
+    if (config.autoSync && (config.syncInterval ?? 0) > 0) {
+      const intervalMs = (config.syncInterval as number) * 60 * 1000;
+      setInterval(async () => {
+        try {
+          if (imapService.isActive()) {
+            const inbox = await imapService.getEmails('INBOX', 50);
+            const sent  = await imapService.getEmails('Sent',  50);
+            analyticsService.updateEmails(trimForAnalytics(inbox), trimForAnalytics(sent));
+            logger.debug(`Background sync: ${inbox.length} inbox, ${sent.length} sent`, 'Scheduler');
+          }
+        } catch (e) {
+          logger.debug('Background sync failed', 'Scheduler', e);
+        }
+      }, intervalMs).unref(); // .unref() so the timer doesn't prevent clean exit
+    }
 
     const transport = new StdioServerTransport();
     await server.connect(transport);
@@ -3136,19 +3557,26 @@ async function main() {
 
 process.on("uncaughtException", (error) => {
   logger.error("Uncaught exception", "MCPServer", error);
-  process.exit(1);
+  // Attempt graceful shutdown (wipes credentials, stops bridge) before exit
+  gracefulShutdown("uncaughtException").catch(() => process.exit(1));
 });
 
 process.on("unhandledRejection", (reason) => {
   logger.error("Unhandled rejection", "MCPServer", reason);
-  process.exit(1);
+  gracefulShutdown("unhandledRejection").catch(() => process.exit(1));
 });
 
 async function gracefulShutdown(signal: string): Promise<void> {
   logger.info(`Received ${signal}, shutting down gracefully...`, "MCPServer");
   try {
+    // 0. Stop bridge watchdog
+    if (bridgeWatchdogTimer) { clearInterval(bridgeWatchdogTimer); bridgeWatchdogTimer = null; }
+
     // 1. Stop scheduler (persists pending items before close)
     schedulerService.stop();
+
+    // Stop IDLE background watcher
+    imapService.stopIdle();
 
     // 2. Disconnect services
     await imapService.disconnect();
@@ -3168,6 +3596,12 @@ async function gracefulShutdown(signal: string): Promise<void> {
     if (config?.imap) {
       config.imap.password = "";
       config.imap.username = "";
+    }
+
+    // Kill Proton Bridge if this process launched it
+    if (bridgeAutoStarted) {
+      logger.info("Terminating Proton Bridge (launched by this server)…", "MCPServer");
+      await killProtonBridge();
     }
 
     logger.info("Shutdown complete (memory scrubbed)", "MCPServer");

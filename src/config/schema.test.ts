@@ -3,11 +3,12 @@ import {
   ALL_TOOLS,
   TOOL_CATEGORIES,
   CONFIG_VERSION,
+  DEFAULT_RESPONSE_LIMITS,
 } from "./schema.js";
 
 describe("ALL_TOOLS", () => {
-  it("has exactly 45 entries", () => {
-    expect(ALL_TOOLS).toHaveLength(45);
+  it("has exactly 46 entries", () => {
+    expect(ALL_TOOLS).toHaveLength(46);
   });
 
   it("contains no duplicates", () => {
@@ -80,5 +81,35 @@ describe("TOOL_CATEGORIES", () => {
 describe("CONFIG_VERSION", () => {
   it("is 1", () => {
     expect(CONFIG_VERSION).toBe(1);
+  });
+});
+
+describe("DEFAULT_RESPONSE_LIMITS", () => {
+  it("has all required fields", () => {
+    expect(DEFAULT_RESPONSE_LIMITS).toHaveProperty("maxResponseBytes");
+    expect(DEFAULT_RESPONSE_LIMITS).toHaveProperty("maxEmailBodyChars");
+    expect(DEFAULT_RESPONSE_LIMITS).toHaveProperty("maxEmailListResults");
+    expect(DEFAULT_RESPONSE_LIMITS).toHaveProperty("maxAttachmentBytes");
+    expect(DEFAULT_RESPONSE_LIMITS).toHaveProperty("warnOnLargeResponse");
+  });
+
+  it("maxResponseBytes is below the 1 MB client limit", () => {
+    expect(DEFAULT_RESPONSE_LIMITS.maxResponseBytes).toBeLessThan(1_048_576);
+    expect(DEFAULT_RESPONSE_LIMITS.maxResponseBytes).toBeGreaterThan(0);
+  });
+
+  it("maxEmailListResults is within the pagination ceiling", () => {
+    expect(DEFAULT_RESPONSE_LIMITS.maxEmailListResults).toBeGreaterThanOrEqual(1);
+    expect(DEFAULT_RESPONSE_LIMITS.maxEmailListResults).toBeLessThanOrEqual(200);
+  });
+
+  it("maxAttachmentBytes stays under the response ceiling", () => {
+    expect(DEFAULT_RESPONSE_LIMITS.maxAttachmentBytes).toBeLessThanOrEqual(
+      DEFAULT_RESPONSE_LIMITS.maxResponseBytes,
+    );
+  });
+
+  it("warnOnLargeResponse defaults to true", () => {
+    expect(DEFAULT_RESPONSE_LIMITS.warnOnLargeResponse).toBe(true);
   });
 });

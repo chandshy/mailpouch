@@ -18,7 +18,7 @@ import http from "http";
 import https from "https";
 import os from "os";
 import nodePath from "path";
-import { readFileSync, writeFileSync, renameSync } from "fs";
+import { readFileSync, writeFileSync, renameSync, existsSync, statSync, openSync, readSync, closeSync } from "fs";
 import { spawn } from "child_process";
 import { Socket } from "net";
 import { randomBytes, timingSafeEqual } from "crypto";
@@ -62,6 +62,7 @@ import {
   type EscalationRecord,
   type AuditEntry,
 } from "../permissions/escalation.js";
+import { getLogFilePath } from "../utils/logger.js";
 
 // ─── TCP connectivity test ─────────────────────────────────────────────────────
 
@@ -109,6 +110,14 @@ function safeConfig(cfg: ServerConfig): unknown {
 function buildHtml(configPath: string, csrfToken: string): string {
   const toolsJson = JSON.stringify(ALL_TOOLS);
   const categoriesJson = JSON.stringify(TOOL_CATEGORIES);
+  const distIndexPath = JSON.stringify(nodePath.resolve(process.cwd(), "dist", "index.js"));
+
+  // Platform-specific Bridge cert hint — only show the relevant OS path
+  const certDefaultPath =
+    process.platform === "win32"  ? "%APPDATA%\\protonmail\\bridge-v3\\cert.pem" :
+    process.platform === "darwin" ? "~/Library/Application Support/protonmail/bridge-v3/cert.pem" :
+                                    "~/.config/protonmail/bridge-v3/cert.pem";
+  const certPlatformHint = `Default location: <code style="background:var(--surface3);padding:1px 5px;border-radius:3px;font-size:11px">${certDefaultPath}</code>`;
   // configPath comes from process.env.PROTONMAIL_MCP_CONFIG and is injected
   // directly into two <code> elements via template-literal interpolation.
   // A path like `/home/u/<script>alert(1)</script>.json` (set by a malicious
@@ -215,6 +224,14 @@ header {
 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex-shrink: 0; }
 .dot.ok  { background: var(--success); box-shadow: 0 0 0 3px var(--success-bg); }
 .dot.err { background: var(--danger);  box-shadow: 0 0 0 3px var(--danger-bg); }
+.btn-shutdown {
+  padding: 5px 13px; border-radius: 20px; border: 1px solid var(--danger);
+  background: var(--danger-bg); color: var(--danger);
+  font-size: 12px; font-weight: 500; cursor: pointer; transition: all .15s;
+  white-space: nowrap;
+}
+.btn-shutdown:hover:not(:disabled) { background: var(--danger); color: #fff; }
+.btn-shutdown:disabled { opacity: .5; cursor: not-allowed; }
 
 /* Settings tab nav (post-setup view) */
 nav {
@@ -808,6 +825,7 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
     <div class="dot" id="config-dot"></div>
     <span id="config-status-text">Loading…</span>
   </div>
+  <button class="btn-shutdown" id="shutdown-btn" onclick="shutdownServer()" title="Stop the settings server">⏹ Shutdown</button>
 </header>
 
 <!-- ══ POST-SETUP NAV (hidden until config saved) ══ -->
@@ -815,6 +833,7 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
   <button class="active" onclick="showTab('setup',this)">Setup</button>
   <button onclick="showTab('permissions',this)">Permissions</button>
   <button onclick="showTab('status',this)">Status</button>
+  <button id="logs-tab-btn" style="display:none" onclick="showTab('logs',this)">Logs</button>
 </nav>
 
 <!-- ══ ESCALATION BANNER (shown on all views when pending) ══ -->
@@ -824,6 +843,11 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
     <span>AI Permission Escalation Request — Human Approval Required</span>
   </div>
   <div id="escalation-cards"></div>
+</div>
+
+<!-- TLS warning banner -->
+<div id="tls-warning" style="display:none;background:#ff6b00;color:white;padding:8px 16px;font-size:0.9em">
+  &#9888; TLS certificate validation is disabled. Configure the Bridge Certificate Path in Settings &rarr; Connection to secure your connection.
 </div>
 
 <!-- ═══════════════════════════════════════════════
@@ -973,10 +997,23 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
 
         <div style="margin-bottom:20px">
           <div class="field">
-            <label>Bridge TLS certificate path <span style="color:var(--muted);font-weight:400">(optional)</span></label>
-            <input type="text" id="wiz-cert-path" placeholder="/path/to/bridge-cert.crt"
-              aria-label="Bridge TLS certificate path">
-            <div class="hint">Export from Bridge → Settings → Export TLS certificates. Enables proper TLS trust.</div>
+            <label>Path to the exported cert.pem file <span style="color:var(--muted);font-weight:400">(optional)</span></label>
+            <input type="text" id="wiz-cert-path" placeholder="/path/to/cert.pem"
+              aria-label="Path to the exported cert.pem file">
+            <div class="hint">
+              Export from Bridge → Help → Export TLS Certificate, then enter the path to <code style="background:var(--surface3);padding:1px 5px;border-radius:3px;font-size:11px">cert.pem</code>.<br>
+              ${certPlatformHint}
+            </div>
+          </div>
+        </div>
+
+        <div class="field" style="margin-bottom:20px">
+          <label class="toggle-wrap" style="width:fit-content">
+            <span class="toggle"><input type="checkbox" id="wiz-auto-start-bridge"><span class="slider"></span></span>
+            <span>Auto-start Proton Bridge on MCP server launch</span>
+          </label>
+          <div class="hint" style="margin-top:6px">
+            When enabled, the MCP server will automatically launch Proton Bridge if it is not already running.
           </div>
         </div>
 
@@ -1005,6 +1042,11 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
           <input type="email" id="wiz-username" placeholder="you@proton.me"
             autocomplete="username" aria-required="true"
             oninput="wizClearError('wiz-username')">
+          <div class="hint">Use your full Proton address (e.g. user@proton.me or user@protonmail.com). The @proton.me and @protonmail.com forms are not interchangeable — use the exact primary address shown in your Proton account.</div>
+          <div class="hint" style="margin-top:4px">
+            &#9432; Bridge runs in <strong>combined mode</strong> — all your Proton addresses share one inbox and one set of credentials.
+            Split mode (separate credentials per address) is not currently supported.
+          </div>
           <div class="err-msg" id="err-wiz-username">Please enter your email address.</div>
         </div>
 
@@ -1173,24 +1215,35 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
         <div class="done-hero">
           <div class="done-check">✓</div>
           <h2>You're all set!</h2>
-          <p>ProtonMail MCP is configured. The last step is letting Claude Desktop know about it.</p>
+          <p>ProtonMail MCP is configured. The last step is registering it with your MCP host.</p>
         </div>
 
         <div id="done-write-section">
           <div class="done-step-row">
             <div class="done-step-num">1</div>
             <div class="done-step-body">
-              <div class="done-step-title">Add to Claude Desktop</div>
-              <div class="done-step-desc">Writes one entry to your Claude Desktop config file. Won't affect any other MCP servers you have set up.</div>
+              <div class="done-step-title">Add to your MCP host</div>
+              <div class="done-step-desc">Copy this snippet into your MCP host's config under <code>mcpServers</code>.</div>
+              <pre class="code-block" id="done-snippet" style="margin-top:10px;font-size:12px">Loading…</pre>
+              <button class="btn btn-ghost btn-sm" style="margin-top:6px" onclick="wizCopySnippet()" aria-label="Copy MCP config snippet">Copy</button>
+              <div id="copy-result" style="display:none"></div>
+            </div>
+          </div>
+
+          <div class="done-step-row" id="claude-write-row" style="display:none">
+            <div class="done-step-num">2</div>
+            <div class="done-step-body">
+              <div class="done-step-title">Claude Desktop detected</div>
+              <div class="done-step-desc">Claude Desktop was found on this machine. You can write the config directly — won't affect any other MCP servers.</div>
               <button class="btn btn-primary" id="btn-write-claude" onclick="wizWriteClaudeDesktop()" aria-label="Write Claude Desktop config">
-                Write Config →
+                Write to Claude Desktop →
               </button>
               <div id="write-result" style="display:none"></div>
             </div>
           </div>
 
-          <div class="done-step-row" id="restart-row" style="opacity:0.4;pointer-events:none">
-            <div class="done-step-num">2</div>
+          <div class="done-step-row" id="restart-row" style="display:none">
+            <div class="done-step-num" id="restart-step-num">3</div>
             <div class="done-step-body">
               <div class="done-step-title">Restart Claude Desktop</div>
               <div class="done-step-desc">Claude Desktop loads MCP servers at startup. A restart picks up the new config.</div>
@@ -1236,8 +1289,7 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
 
   <div class="alert alert-info">
     <span>ℹ</span>
-    <span>Credentials are saved to <code id="config-path-setup">${safeConfigPath}</code> (mode 0600).
-    The MCP server reads this file every 15 s — env vars still override these values when both are set.</span>
+    <span>Settings are saved to <code id="config-path-setup">${safeConfigPath}</code>. Credentials are stored in the OS keychain.</span>
   </div>
 
   <div class="card">
@@ -1257,11 +1309,16 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
           <div class="field">
             <label for="username">ProtonMail username / email</label>
             <input type="email" id="username" placeholder="user@proton.me" autocomplete="username">
+            <div class="hint">Use your full Proton address (e.g. user@proton.me or user@protonmail.com). The @proton.me and @protonmail.com forms are not interchangeable — use the exact primary address shown in your Proton account.</div>
+            <div class="hint" style="margin-top:4px">
+              &#9432; Bridge runs in <strong>combined mode</strong> — all your Proton addresses share one inbox and one set of credentials.
+              Split mode (separate credentials per address) is not currently supported.
+            </div>
           </div>
           <div class="field">
             <label for="password">Bridge password <span style="color:var(--muted);font-weight:400">(from Bridge app)</span></label>
             <div class="pw-wrap">
-              <input type="password" id="password" placeholder="••••••••" autocomplete="current-password">
+              <input type="password" id="password" placeholder="Enter new password" autocomplete="current-password">
               <button class="pw-toggle" onclick="togglePw('password',this)" type="button" aria-label="Show/hide password">👁</button>
             </div>
             <div class="hint">Leave blank to keep the saved value.</div>
@@ -1276,24 +1333,30 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
         <div class="row-3">
           <div class="field">
             <label for="smtp-host">Host</label>
-            <input type="text" id="smtp-host" placeholder="localhost">
+            <input type="text" id="smtp-host" placeholder="localhost" oninput="updateSmtpTokenVisibility()">
           </div>
           <div class="field">
-            <label for="smtp-port">Port</label>
+            <label for="smtp-port" style="display:flex;justify-content:space-between;align-items:center">SMTP Port <a href="#" style="font-size:0.75em;font-weight:normal;color:var(--accent)" onclick="event.preventDefault();document.getElementById('smtp-port').value='1025'">Reset to 1025</a></label>
             <input type="number" id="smtp-port" min="1" max="65535" placeholder="1025">
           </div>
-          <div class="field">
-            <label>TLS mode</label>
-            <input type="text" id="smtp-tls" readonly style="color:var(--muted)">
-          </div>
         </div>
-        <div class="field" id="setup-smtp-token-field" style="display:none">
-          <label for="smtp-token">SMTP token <span style="color:var(--muted);font-weight:400">(required for direct)</span></label>
-          <div class="pw-wrap">
-            <input type="password" id="smtp-token" placeholder="Generated in Bridge Settings → IMAP/SMTP">
-            <button class="pw-toggle" onclick="togglePw('smtp-token',this)" type="button" aria-label="Show/hide SMTP token">👁</button>
+        <div class="field">
+          <label for="tls-mode">TLS Mode</label>
+          <select id="tls-mode" style="width:100%;padding:10px 14px;background:var(--surface2);border:1.5px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-size:14px;outline:none">
+            <option value="starttls">STARTTLS (default — Proton Bridge)</option>
+            <option value="ssl">SSL / Implicit TLS (port 993 / 465)</option>
+          </select>
+          <div class="hint">Use STARTTLS with Proton Bridge. Switch to SSL only if you changed Bridge's TLS settings.</div>
+        </div>
+        <div id="smtp-token-row">
+          <div class="field" id="setup-smtp-token-field" style="display:none">
+            <label for="smtp-token">SMTP token <span style="color:var(--muted);font-weight:400">(required for direct)</span></label>
+            <div class="pw-wrap">
+              <input type="password" id="smtp-token" placeholder="Generated in Bridge Settings → IMAP/SMTP">
+              <button class="pw-toggle" onclick="togglePw('smtp-token',this)" type="button" aria-label="Show/hide SMTP token">👁</button>
+            </div>
+            <div class="hint">Leave blank to keep the saved value.</div>
           </div>
-          <div class="hint">Leave blank to keep the saved value.</div>
         </div>
       </fieldset>
     </div>
@@ -1307,7 +1370,7 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
             <input type="text" id="imap-host" placeholder="localhost">
           </div>
           <div class="field">
-            <label for="imap-port">Port</label>
+            <label for="imap-port" style="display:flex;justify-content:space-between;align-items:center">IMAP Port <a href="#" style="font-size:0.75em;font-weight:normal;color:var(--accent)" onclick="event.preventDefault();document.getElementById('imap-port').value='1143'">Reset to 1143</a></label>
             <input type="number" id="imap-port" min="1" max="65535" placeholder="1143">
           </div>
           <div class="field"></div>
@@ -1319,15 +1382,30 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
       <fieldset>
         <legend>Bridge TLS Certificate (optional but recommended)</legend>
         <div class="field">
-          <label for="bridge-cert">Path to exported .crt file</label>
-          <input type="text" id="bridge-cert" placeholder="/path/to/bridge-cert.crt">
-          <div class="hint">Export from Bridge → Settings → Export TLS certificates.</div>
+          <label for="bridge-cert">Path to the exported cert.pem file</label>
+          <input type="text" id="bridge-cert" placeholder="/path/to/cert.pem">
+          <div class="hint">
+            Export from Bridge → Help → Export TLS Certificate, then enter the path to <code>cert.pem</code>.<br>
+            ${certPlatformHint}
+          </div>
         </div>
         <div class="field" style="margin-top:6px">
           <label class="toggle-wrap" style="width:fit-content">
             <span class="toggle"><input type="checkbox" id="debug-mode"><span class="slider"></span></span>
             <span>Enable debug logging</span>
           </label>
+        </div>
+        <div class="field" style="margin-top:6px">
+          <label class="toggle-wrap" style="width:fit-content">
+            <span class="toggle"><input type="checkbox" id="auto-start-bridge"><span class="slider"></span></span>
+            <span>Auto-start Proton Bridge on MCP server launch</span>
+          </label>
+          <div class="hint" style="margin-top:4px">Automatically launches Bridge if it is not reachable when the MCP server starts.</div>
+        </div>
+        <div class="field" style="margin-top:14px">
+          <label for="settings-port">Settings UI port</label>
+          <input type="number" id="settings-port" min="1" max="65535" placeholder="8765" style="width:120px">
+          <div class="hint">Port the settings web UI listens on. Takes effect on the next launch. Default: 8765.</div>
         </div>
       </fieldset>
     </div>
@@ -1383,12 +1461,13 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
       <tr><td>Active preset</td><td id="info-preset">—</td></tr>
       <tr><td>Disabled tools</td><td id="info-disabled">—</td></tr>
       <tr><td>Rate-limited tools</td><td id="info-rate-limited">—</td></tr>
+      <tr><td>Credential storage</td><td id="info-credential-storage">—</td></tr>
     </table>
   </div>
 
   <div class="card">
-    <div class="card-title">Claude Desktop Integration</div>
-    <div class="card-desc">Paste this into your <code>claude_desktop_config.json</code> under <code>mcpServers</code>.</div>
+    <div class="card-title">MCP Config Snippet</div>
+    <div class="card-desc">Paste this into your MCP host's config under <code>mcpServers</code>.</div>
     <pre class="code-block" id="claude-snippet">Loading…</pre>
     <div class="copy-row">
       <button class="btn btn-ghost btn-sm" onclick="copySnippet()">Copy</button>
@@ -1418,7 +1497,7 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
 
   <div class="card">
     <div class="card-title">Reset</div>
-    <div class="card-desc">Delete the config file and revert to env-var-only mode.</div>
+    <div class="card-desc">Delete the config file and clear all saved settings.</div>
     <div class="actions" style="margin-top:0">
       <button class="btn btn-danger" onclick="resetConfig()">Reset to Defaults</button>
     </div>
@@ -1440,6 +1519,70 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
   </div>
 
 </section>
+
+<!-- ══ LOGS TAB ══ -->
+<section id="logs">
+  <div class="section-heading">Debug Logs</div>
+  <div class="section-subheading">Live log output from the MCP server process. Only visible when debug mode is on.</div>
+
+  <div class="card" style="padding:0;overflow:hidden">
+    <!-- toolbar -->
+    <div style="display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--border);flex-wrap:wrap">
+      <span style="font-size:12px;color:var(--muted)" id="log-page-info">—</span>
+      <div style="flex:1"></div>
+      <button class="btn btn-ghost btn-sm" id="log-btn-first"  onclick="logGoFirst()"  title="First page">«</button>
+      <button class="btn btn-ghost btn-sm" id="log-btn-prev"   onclick="logGoPrev()"   title="Previous page">‹</button>
+      <button class="btn btn-ghost btn-sm" id="log-btn-next"   onclick="logGoNext()"   title="Next page">›</button>
+      <button class="btn btn-ghost btn-sm" id="log-btn-last"   onclick="logGoLast()"   title="Last page — follow">»</button>
+      <button class="btn btn-ghost btn-sm" id="log-btn-follow" onclick="logToggleFollow()" title="Auto-follow latest" style="min-width:80px">Follow ●</button>
+      <button class="btn btn-ghost btn-sm" onclick="logClear()" title="Clear log file">Clear</button>
+    </div>
+    <!-- output -->
+    <pre id="log-output" style="margin:0;padding:14px;font-size:11px;line-height:1.55;min-height:300px;max-height:60vh;overflow-y:auto;background:var(--bg);border-radius:0;white-space:pre-wrap;word-break:break-all">Loading…</pre>
+  </div>
+
+  <!-- ── Response Limits ── -->
+  <div class="section-heading" style="margin-top:24px">Response Limits</div>
+  <div class="section-subheading">
+    Claude's MCP client enforces a 1 MB hard limit on tool results.
+    These settings let you tune how the server pre-truncates responses to stay within that boundary.
+  </div>
+  <div class="card">
+    <div class="field">
+      <label for="rl-max-response">Max response size (KB)</label>
+      <input type="number" id="rl-max-response" min="100" max="1024" step="10" value="900" style="width:120px">
+      <span style="font-size:11px;color:var(--muted);margin-left:8px">100–1024 KB (Claude limit is 1024 KB)</span>
+    </div>
+    <div class="field">
+      <label for="rl-max-body">Max email body (chars)</label>
+      <input type="number" id="rl-max-body" min="1000" max="10000000" step="10000" value="500000" style="width:120px">
+      <span style="font-size:11px;color:var(--muted);margin-left:8px">Truncates get_email_by_id body field</span>
+    </div>
+    <div class="field">
+      <label for="rl-max-list">Max email list results</label>
+      <input type="number" id="rl-max-list" min="1" max="200" step="1" value="50" style="width:120px">
+      <span style="font-size:11px;color:var(--muted);margin-left:8px">Caps get_emails / search_emails / get_contacts</span>
+    </div>
+    <div class="field">
+      <label for="rl-max-attach">Max attachment download (KB)</label>
+      <input type="number" id="rl-max-attach" min="0" max="1024" step="10" value="586" style="width:120px">
+      <span style="font-size:11px;color:var(--muted);margin-left:8px">0 = disable inline attachment downloads</span>
+    </div>
+    <div class="field">
+      <label class="toggle-wrap">
+        <input type="checkbox" id="rl-warn-large" checked>
+        <div class="toggle"><div class="slider"></div></div>
+        Warn when response exceeds 80% of limit
+      </label>
+    </div>
+    <div style="margin-top:12px;display:flex;gap:8px">
+      <button class="btn btn-ghost btn-sm" onclick="rlResetDefaults()">Reset Defaults</button>
+      <button class="btn btn-primary btn-sm" onclick="rlSave()">Save Limits</button>
+    </div>
+    <div id="rl-status" style="font-size:12px;margin-top:8px;color:var(--muted)"></div>
+  </div>
+</section>
+
 </main>
 </div><!-- /#settings-view -->
 
@@ -1450,6 +1593,7 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
   // ── Constants ─────────────────────────────────────────────────────────────
   const ALL_TOOLS  = ${toolsJson};
   const CATEGORIES = ${categoriesJson};
+  window.__distIndexPath = ${distIndexPath};
 
   // ── State ─────────────────────────────────────────────────────────────────
   let cfg         = null;
@@ -1496,6 +1640,7 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
       populateSetup(cfg);
       populatePermissions(cfg);
       populateStatus(cfg);
+      populateResponseLimits(cfg);
       updateHeaderStatus(true);
     } catch {
       updateHeaderStatus(false);
@@ -1516,6 +1661,8 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
     document.getElementById(id).classList.add('active');
     btn.classList.add('active');
     if (id === 'status') { populateStatus(cfg); loadAuditLog(); }
+    if (id === 'logs')   { logInit(); }
+    else                 { logStopFollow(); }
   };
 
   // ── Header status ─────────────────────────────────────────────────────────
@@ -1640,9 +1787,10 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
             password,
             smtpHost: W.smtpHost, smtpPort: W.smtpPort,
             imapHost: W.imapHost, imapPort: W.imapPort,
-            bridgeCertPath: W.certPath,
+            bridgeCertPath:  W.certPath,
             smtpToken,
             debug,
+            autoStartBridge: document.getElementById('wiz-auto-start-bridge')?.checked || false,
           },
         }),
       });
@@ -1735,16 +1883,46 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
   };
 
   // ── Step 6: Done ──────────────────────────────────────────────────────────
-  window.wizBuildSnippet = function() {
-    // reset state when navigating to this step
+  window.wizBuildSnippet = async function() {
+    // Reset state
     document.getElementById('write-result').style.display = 'none';
     document.getElementById('restart-result').style.display = 'none';
+    document.getElementById('copy-result').style.display = 'none';
     document.getElementById('done-complete').style.display = 'none';
     document.getElementById('done-write-section').style.display = '';
-    document.getElementById('restart-row').style.opacity = '0.4';
-    document.getElementById('restart-row').style.pointerEvents = 'none';
-    const btn = document.getElementById('btn-write-claude');
-    if (btn) { btn.disabled = false; btn.textContent = 'Write Config →'; }
+    document.getElementById('claude-write-row').style.display = 'none';
+    document.getElementById('restart-row').style.display = 'none';
+    const writeBtn = document.getElementById('btn-write-claude');
+    if (writeBtn) { writeBtn.disabled = false; writeBtn.textContent = 'Write to Claude Desktop →'; }
+
+    // Build snippet from wizard state
+    const snippet = {
+      protonmail: {
+        command: 'node',
+        args: [window.__distIndexPath || '/path/to/protonmail-mcp-server/dist/index.js'],
+      },
+    };
+    document.getElementById('done-snippet').textContent = JSON.stringify(snippet, null, 2);
+
+    // Detect Claude Desktop
+    try {
+      const r = await fetch('/api/claude-desktop-status');
+      const data = await r.json();
+      if (data.found) {
+        document.getElementById('claude-write-row').style.display = '';
+        document.getElementById('restart-row').style.display = '';
+      }
+    } catch { /* ignore — Claude Desktop section stays hidden */ }
+  };
+
+  window.wizCopySnippet = function() {
+    const text = document.getElementById('done-snippet').textContent;
+    const resultEl = document.getElementById('copy-result');
+    navigator.clipboard.writeText(text).then(() => {
+      resultEl.style.display = 'block';
+      resultEl.innerHTML = '<div class="hint" style="color:var(--success);margin-top:6px">✓ Copied to clipboard</div>';
+      setTimeout(() => { resultEl.style.display = 'none'; }, 2500);
+    });
   };
 
   window.wizWriteClaudeDesktop = async function() {
@@ -1765,18 +1943,15 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
         btn.className = 'btn btn-success';
         resultEl.style.display = 'block';
         resultEl.innerHTML = '<div class="hint" style="color:var(--success);margin-top:8px">✓ Saved to <code>' + escHtml(data.configPath) + '</code></div>';
-        // unlock step 2
-        document.getElementById('restart-row').style.opacity = '';
-        document.getElementById('restart-row').style.pointerEvents = '';
       } else {
         btn.disabled = false;
-        btn.textContent = 'Write Config →';
+        btn.textContent = 'Write to Claude Desktop →';
         resultEl.style.display = 'block';
         resultEl.innerHTML = '<div class="hint" style="color:var(--danger);margin-top:8px">✗ ' + escHtml(data.error || 'Failed') + '</div>';
       }
     } catch(e) {
       btn.disabled = false;
-      btn.textContent = 'Write Config →';
+      btn.textContent = 'Write to Claude Desktop →';
       resultEl.style.display = 'block';
       resultEl.innerHTML = '<div class="hint" style="color:var(--danger);margin-top:8px">✗ Network error</div>';
     }
@@ -1788,12 +1963,11 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner"></span> Restarting…';
     try {
-      const r = await fetch('/api/restart-claude-desktop', {
+      await fetch('/api/restart-claude-desktop', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
         body: JSON.stringify({})
       });
-      const data = await r.json();
       document.getElementById('done-write-section').style.display = 'none';
       document.getElementById('done-complete').style.display = 'flex';
     } catch(e) {
@@ -1809,6 +1983,20 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
     document.getElementById('done-complete').style.display = 'flex';
     document.getElementById('done-complete').querySelector('strong').textContent = 'Done!';
     document.getElementById('done-complete').querySelector('strong').nextSibling.textContent = ' Restart Claude Desktop when you\\'re ready — ProtonMail will be available after it loads.';
+  };
+
+  // ── Shutdown server ───────────────────────────────────────────────────────
+  window.shutdownServer = async function() {
+    if (!confirm('Stop the settings server? The browser tab will no longer work after this.')) return;
+    const btn = document.getElementById('shutdown-btn');
+    btn.disabled = true;
+    btn.textContent = 'Shutting down…';
+    try {
+      await fetch('/api/shutdown', { method: 'POST', headers: { 'X-CSRF-Token': CSRF } });
+    } catch { /* expected — server closes the connection */ }
+    btn.textContent = '✓ Stopped';
+    toast('Settings server stopped.', 'ok');
+    setTimeout(() => { document.body.innerHTML = '<div style="font-family:sans-serif;color:#ccc;background:#0f0e1a;min-height:100vh;display:flex;align-items:center;justify-content:center;font-size:18px">Server stopped. Close this tab.</div>'; }, 1500);
   };
 
   // ── Shared: show/hide password ────────────────────────────────────────────
@@ -1833,9 +2021,28 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
     set('imap-port',   cn.imapPort || 1143);
     set('bridge-cert', cn.bridgeCertPath || '');
     document.getElementById('debug-mode').checked = !!cn.debug;
+    document.getElementById('auto-start-bridge').checked = !!cn.autoStartBridge;
+    set('settings-port', c.settingsPort || 8765);
+    const logsTabBtn = document.getElementById('logs-tab-btn'); if (logsTabBtn) logsTabBtn.style.display = cn.debug ? '' : 'none';
     const isDirect = (cn.smtpHost || '').includes('protonmail');
     setMode(isDirect ? 'direct' : 'bridge');
-    updateTlsLabel();
+
+    // TLS mode select
+    var tlsModeEl = document.getElementById('tls-mode');
+    if (tlsModeEl) tlsModeEl.value = cn.tlsMode || 'starttls';
+
+    // SMTP token visibility
+    updateSmtpTokenVisibility();
+
+    // TLS warning banner
+    var tlsWarn = document.getElementById('tls-warning');
+    if (tlsWarn) tlsWarn.style.display = (!cn.bridgeCertPath) ? '' : 'none';
+
+    // Credential storage row in status tab
+    var credStorageEl = document.getElementById('info-credential-storage');
+    if (credStorageEl) {
+      credStorageEl.textContent = c.credentialStorage === 'keychain' ? 'OS keychain' : 'Config file';
+    }
   }
 
   window.setMode = function(mode) {
@@ -1849,24 +2056,23 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
     } else {
       set('smtp-host', 'smtp.protonmail.ch'); set('smtp-port', 587);
     }
-    updateTlsLabel();
+    updateSmtpTokenVisibility();
   };
 
-  function updateTlsLabel() {
-    const port = parseInt(get('smtp-port'), 10);
-    document.getElementById('smtp-tls').value =
-      port === 465 ? 'SSL/TLS (port 465)' :
-      port === 587 ? 'STARTTLS (port 587)' :
-      'None / Bridge';
-  }
-  document.addEventListener('input', e => {
-    if (e.target.id === 'smtp-port') updateTlsLabel();
-  });
+
+  window.updateSmtpTokenVisibility = function() {
+    var smtpHost = get('smtp-host').trim().toLowerCase();
+    var isBridge = (smtpHost === 'localhost' || smtpHost === '127.0.0.1');
+    var tokenRow = document.getElementById('smtp-token-row');
+    if (tokenRow) tokenRow.style.display = isBridge ? 'none' : '';
+  };
 
   window.saveSetup = async function() {
     const btn = document.getElementById('save-btn');
     btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Saving…';
     try {
+      var tlsModeEl = document.getElementById('tls-mode');
+      var tlsModeVal = tlsModeEl ? tlsModeEl.value : 'starttls';
       const body = {
         connection: {
           username:       get('username'),
@@ -1877,8 +2083,11 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
           imapPort:       parseInt(get('imap-port'), 10),
           smtpToken:      get('smtp-token'),
           bridgeCertPath: get('bridge-cert'),
-          debug:          document.getElementById('debug-mode').checked,
+          tlsMode:          tlsModeVal,
+          debug:            document.getElementById('debug-mode').checked,
+          autoStartBridge:  document.getElementById('auto-start-bridge').checked,
         },
+        settingsPort: parseInt(get('settings-port'), 10) || 8765,
       };
       const r = await fetch('/api/config', {
         method: 'POST',
@@ -2073,6 +2282,10 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
     const limited = ALL_TOOLS.filter(t => tools[t] && tools[t].rateLimit != null);
     document.getElementById('info-rate-limited').textContent =
       limited.length ? limited.map(t => t + ' (' + tools[t].rateLimit + '/hr)').join(', ') : 'None';
+    var credStorageEl = document.getElementById('info-credential-storage');
+    if (credStorageEl) {
+      credStorageEl.textContent = c.credentialStorage === 'keychain' ? 'OS keychain' : 'Config file';
+    }
     buildClaudeSnippet(c.connection || {});
   }
 
@@ -2080,17 +2293,7 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
     const snippet = {
       protonmail: {
         command: 'node',
-        args: ['/path/to/protonmail-mcp-server/dist/index.js'],
-        env: {
-          PROTONMAIL_USERNAME: cn.username || 'your@proton.me',
-          PROTONMAIL_PASSWORD: '(your Bridge password)',
-          PROTONMAIL_SMTP_HOST: cn.smtpHost || 'localhost',
-          PROTONMAIL_SMTP_PORT: String(cn.smtpPort || 1025),
-          PROTONMAIL_IMAP_HOST: cn.imapHost || 'localhost',
-          PROTONMAIL_IMAP_PORT: String(cn.imapPort || 1143),
-          ...(cn.bridgeCertPath ? { PROTONMAIL_BRIDGE_CERT: cn.bridgeCertPath } : {}),
-          ...(cn.smtpToken      ? { PROTONMAIL_SMTP_TOKEN:  '(your SMTP token)' } : {}),
-        },
+        args: [window.__distIndexPath || '/path/to/protonmail-mcp-server/dist/index.js'],
       },
     };
     document.getElementById('claude-snippet').textContent = JSON.stringify(snippet, null, 2);
@@ -2099,6 +2302,151 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
   window.copySnippet = function() {
     const text = document.getElementById('claude-snippet').textContent;
     navigator.clipboard.writeText(text).then(() => toast('Copied to clipboard.', 'ok'));
+  };
+
+  // ══ LOGS TAB ══════════════════════════════════════════════════════════════
+
+  const LOG = {
+    page: 1,
+    pages: 1,
+    total: 0,
+    following: false,
+    pollTimer: null,
+  };
+
+  function logInit() {
+    logGoLast();
+  }
+
+  async function logFetch(page) {
+    try {
+      const r    = await fetch('/api/logs?page=' + page);
+      const data = await r.json();
+      LOG.page  = data.page;
+      LOG.pages = data.pages;
+      LOG.total = data.total;
+      logRender(data.lines);
+      logUpdateToolbar();
+    } catch(e) {
+      const outEl = document.getElementById('log-output'); if (outEl) outEl.textContent = 'Error loading logs: ' + (e && e.message ? e.message : String(e));
+    }
+  }
+
+  function logRender(lines) {
+    const out = document.getElementById('log-output');
+    if (!out) return;
+    if (lines.length === 0) { out.textContent = '(no log entries on this page)'; return; }
+    out.innerHTML = lines.map(function(l) {
+      const ts  = l.timestamp ? new Date(l.timestamp).toLocaleTimeString() : '';
+      const lvl = (l.level || 'info').toUpperCase().padEnd(5);
+      const ctx = (l.context || '').padEnd(12);
+      const msg = escHtml(l.message || '');
+      const cls = l.level === 'error' ? 'color:#f87171' :
+                  l.level === 'warn'  ? 'color:#fbbf24' :
+                  l.level === 'debug' ? 'color:#94a3b8' : 'color:var(--text)';
+      return '<span style="' + cls + '">' +
+        '<span style="color:var(--muted)">' + escHtml(ts) + ' </span>' +
+        '<b>' + escHtml(lvl) + '</b> ' +
+        '<span style="color:var(--muted)">[' + escHtml(ctx.trim()) + ']</span> ' +
+        msg + '</span>';
+    }).join('\\n');
+    if (LOG.following) out.scrollTop = out.scrollHeight;
+  }
+
+  function logUpdateToolbar() {
+    const info = document.getElementById('log-page-info');
+    if (info) info.textContent = 'Page ' + LOG.page + ' of ' + LOG.pages + '  (' + LOG.total + ' lines)';
+    const btnFirst = document.getElementById('log-btn-first'); if (btnFirst) btnFirst.disabled = LOG.page <= 1;
+    const btnPrev  = document.getElementById('log-btn-prev');  if (btnPrev)  btnPrev.disabled  = LOG.page <= 1;
+    const btnNext  = document.getElementById('log-btn-next');  if (btnNext)  btnNext.disabled  = LOG.page >= LOG.pages;
+    const btnLast  = document.getElementById('log-btn-last');  if (btnLast)  btnLast.disabled  = LOG.page >= LOG.pages;
+    const followBtn = document.getElementById('log-btn-follow');
+    if (followBtn) { followBtn.textContent = LOG.following ? 'Following ●' : 'Follow ○'; followBtn.style.color = LOG.following ? 'var(--success)' : ''; }
+  }
+
+  function logStartFollow() {
+    if (LOG.pollTimer) return;
+    LOG.following = true;
+    LOG.pollTimer = setInterval(async () => {
+      // Re-fetch only if still on logs tab
+      const logsSection = document.getElementById('logs'); if (!logsSection || !logsSection.classList.contains('active')) return;
+      await logFetch(LOG.pages); // always fetch the current last page
+    }, 2000);
+    logUpdateToolbar();
+  }
+
+  function logStopFollow() {
+    LOG.following = false;
+    if (LOG.pollTimer) { clearInterval(LOG.pollTimer); LOG.pollTimer = null; }
+    logUpdateToolbar();
+  }
+
+  window.logGoFirst = function() { logStopFollow(); logFetch(1); };
+  window.logGoPrev  = function() { logStopFollow(); logFetch(Math.max(1, LOG.page - 1)); };
+  window.logGoNext  = function() { logStopFollow(); logFetch(Math.min(LOG.pages, LOG.page + 1)); };
+  window.logGoLast  = async function() {
+    // Fetch without follow first to get page count, then start following
+    await logFetch(9999); // server clamps to last page
+    logStartFollow();
+  };
+  window.logToggleFollow = function() {
+    if (LOG.following) { logStopFollow(); } else { window.logGoLast(); }
+  };
+  window.logClear = async function() {
+    if (!confirm('Clear the log file?')) return;
+    await fetch('/api/logs/clear', { method: 'POST', headers: { 'X-CSRF-Token': CSRF } });
+    LOG.page = 1; LOG.pages = 1; LOG.total = 0;
+    logFetch(1);
+  };
+
+  // ── Response Limits ───────────────────────────────────────────────────────
+  const RL_DEFAULTS = { maxResponseBytes: 921600, maxEmailBodyChars: 500000, maxEmailListResults: 50, maxAttachmentBytes: 600000, warnOnLargeResponse: true };
+
+  function populateResponseLimits(c) {
+    const rl = (c && c.responseLimits) || RL_DEFAULTS;
+    document.getElementById('rl-max-response').value = Math.round((rl.maxResponseBytes || RL_DEFAULTS.maxResponseBytes) / 1024);
+    document.getElementById('rl-max-body').value     = rl.maxEmailBodyChars  || RL_DEFAULTS.maxEmailBodyChars;
+    document.getElementById('rl-max-list').value      = rl.maxEmailListResults || RL_DEFAULTS.maxEmailListResults;
+    document.getElementById('rl-max-attach').value    = Math.round((rl.maxAttachmentBytes || RL_DEFAULTS.maxAttachmentBytes) / 1024);
+    document.getElementById('rl-warn-large').checked  = rl.warnOnLargeResponse !== false;
+  }
+
+  function gatherResponseLimits() {
+    return {
+      maxResponseBytes:    parseInt(document.getElementById('rl-max-response').value, 10) * 1024,
+      maxEmailBodyChars:   parseInt(document.getElementById('rl-max-body').value, 10),
+      maxEmailListResults: parseInt(document.getElementById('rl-max-list').value, 10),
+      maxAttachmentBytes:  parseInt(document.getElementById('rl-max-attach').value, 10) * 1024,
+      warnOnLargeResponse: document.getElementById('rl-warn-large').checked,
+    };
+  }
+
+  window.rlResetDefaults = function() {
+    populateResponseLimits({ responseLimits: RL_DEFAULTS });
+    document.getElementById('rl-status').textContent = 'Reset to defaults (not saved yet).';
+  };
+
+  window.rlSave = async function() {
+    const statusEl = document.getElementById('rl-status');
+    statusEl.textContent = 'Saving…';
+    try {
+      const r = await fetch('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
+        body: JSON.stringify({ responseLimits: gatherResponseLimits() }),
+      });
+      if (r.ok) {
+        statusEl.textContent = 'Saved. Changes take effect within 15 seconds.';
+        statusEl.style.color = 'var(--success)';
+      } else {
+        const err = await r.json();
+        statusEl.textContent = 'Error: ' + (err.error || 'Unknown');
+        statusEl.style.color = 'var(--danger)';
+      }
+    } catch(e) {
+      statusEl.textContent = 'Network error.';
+      statusEl.style.color = 'var(--danger)';
+    }
   };
 
   window.runStatusCheck = async function() {
@@ -2475,12 +2823,19 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
             imapHost:       validHost(c.imapHost) ? c.imapHost : current.connection.imapHost,
             imapPort:       c.imapPort       ?? current.connection.imapPort,
             username:       typeof c.username === "string" ? c.username : current.connection.username,
-            bridgeCertPath: typeof c.bridgeCertPath === "string" ? c.bridgeCertPath : current.connection.bridgeCertPath,
-            debug:          typeof c.debug === "boolean" ? c.debug : current.connection.debug,
+            bridgeCertPath:  typeof c.bridgeCertPath === "string" ? c.bridgeCertPath : current.connection.bridgeCertPath,
+            debug:           typeof c.debug === "boolean" ? c.debug : current.connection.debug,
+            autoStartBridge: typeof c.autoStartBridge === "boolean" ? c.autoStartBridge : current.connection.autoStartBridge,
             // Only overwrite credentials if a non-empty, non-placeholder value was sent
             ...(c.password  && c.password !== "••••••••"  ? { password:  c.password  } : {}),
             ...(c.smtpToken && c.smtpToken !== "••••••••" ? { smtpToken: c.smtpToken } : {}),
           };
+        }
+
+        // Merge settingsPort
+        if (typeof body.settingsPort === "number") {
+          const sp = Math.round(body.settingsPort);
+          if (sp >= 1 && sp <= 65535) current.settingsPort = sp;
         }
 
         // Merge permissions
@@ -2488,6 +2843,24 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
           current.permissions = {
             preset: body.permissions.preset ?? current.permissions.preset,
             tools:  { ...current.permissions.tools, ...(body.permissions.tools ?? {}) },
+          };
+        }
+
+        // Merge response limits
+        if (body.responseLimits) {
+          const rl = body.responseLimits;
+          const validNum = (v: unknown, min: number, max: number): number | undefined =>
+            typeof v === "number" && Number.isFinite(v) && v >= min && v <= max ? Math.round(v) : undefined;
+          const cur = current.responseLimits ?? {
+            maxResponseBytes: 900 * 1024, maxEmailBodyChars: 500_000,
+            maxEmailListResults: 50, maxAttachmentBytes: 600_000, warnOnLargeResponse: true,
+          };
+          current.responseLimits = {
+            maxResponseBytes:    validNum(rl.maxResponseBytes,    100_000, 1_048_576) ?? cur.maxResponseBytes,
+            maxEmailBodyChars:   validNum(rl.maxEmailBodyChars,   1_000,   10_000_000) ?? cur.maxEmailBodyChars,
+            maxEmailListResults: validNum(rl.maxEmailListResults, 1,       200)        ?? cur.maxEmailListResults,
+            maxAttachmentBytes:  validNum(rl.maxAttachmentBytes,  0,       1_048_576)  ?? cur.maxAttachmentBytes,
+            warnOnLargeResponse: typeof rl.warnOnLargeResponse === "boolean" ? rl.warnOnLargeResponse : cur.warnOnLargeResponse,
           };
         }
 
@@ -2636,6 +3009,61 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
         return;
       }
 
+      // ── GET /api/logs ─────────────────────────────────────────────────────
+      if (method === "GET" && path === "/api/logs") {
+        const PAGE_SIZE = 200; // lines per page
+        const page  = Math.max(1, parseInt(url.searchParams.get("page")  ?? "1", 10));
+        const logPath = getLogFilePath();
+        if (!existsSync(logPath)) {
+          json(res, 200, { lines: [], page: 1, pages: 1, total: 0 });
+          return;
+        }
+        try {
+          const raw   = readFileSync(logPath, "utf8");
+          const all   = raw.split("\n").filter(l => l.trim() !== "");
+          const total = all.length;
+          const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+          const safePage = Math.min(page, pages);
+          const start = (safePage - 1) * PAGE_SIZE;
+          const slice = all.slice(start, start + PAGE_SIZE).map(l => {
+            try { return JSON.parse(l); } catch { return { level: "info", message: l, context: "raw", timestamp: null }; }
+          });
+          json(res, 200, { lines: slice, page: safePage, pages, total });
+        } catch (e: any) {
+          json(res, 500, { error: String(e?.message ?? e) });
+        }
+        return;
+      }
+
+      // ── POST /api/logs/clear ───────────────────────────────────────────────
+      if (method === "POST" && path === "/api/logs/clear") {
+        if (!requireCsrf(req, res)) return;
+        try {
+          const logPath = getLogFilePath();
+          if (existsSync(logPath)) writeFileSync(logPath, "", "utf8");
+          json(res, 200, { ok: true });
+        } catch (e: any) {
+          json(res, 500, { error: String(e?.message ?? e) });
+        }
+        return;
+      }
+
+      // ── GET /api/claude-desktop-status ────────────────────────────────────
+      if (method === "GET" && path === "/api/claude-desktop-status") {
+        const platform = process.platform;
+        let cdConfigPath: string;
+        if (platform === "win32") {
+          cdConfigPath = nodePath.join(process.env.APPDATA ?? "", "Claude", "claude_desktop_config.json");
+        } else if (platform === "darwin") {
+          cdConfigPath = nodePath.join(os.homedir(), "Library", "Application Support", "Claude", "claude_desktop_config.json");
+        } else {
+          cdConfigPath = nodePath.join(os.homedir(), ".config", "Claude", "claude_desktop_config.json");
+        }
+        const found = existsSync(cdConfigPath);
+        json(res, 200, { found, configPath: cdConfigPath });
+        return;
+      }
+
       // ── POST /api/write-claude-desktop ────────────────────────────────────
       if (method === "POST" && path === "/api/write-claude-desktop") {
         if (!requireCsrf(req, res)) return;
@@ -2722,13 +3150,22 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
           } else if (platform === "darwin") {
             spawn("open", ["-a", "Claude"], { stdio: "ignore", detached: true }).unref();
           } else {
-            spawn("Claude", [], { stdio: "ignore", detached: true, shell: true }).unref();
+            spawn("Claude", [], { stdio: "ignore", detached: true }).unref();
           }
 
           json(res, 200, { ok: true });
         } catch (e: any) {
           json(res, 200, { ok: true }); // Still return ok — kill may fail if not running
         }
+        return;
+      }
+
+      // ── POST /api/shutdown ────────────────────────────────────────────────
+      if (method === "POST" && path === "/api/shutdown") {
+        if (!requireCsrf(req, res)) return;
+        json(res, 200, { ok: true });
+        // Allow the response to flush before exiting
+        setTimeout(() => process.exit(0), 300);
         return;
       }
 

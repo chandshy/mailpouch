@@ -6,11 +6,13 @@
   "main": "dist/index.js",
   "bin": {
     "protonmail-agentic-mcp": "dist/index.js",
-    "protonmail-agentic-mcp-settings": "dist/settings-main.js"
+    "protonmail-agentic-mcp-settings": "dist/settings-main.js",
+    "protonmail-agentic-mcp-tray": "dist/tray.js"
   },
   "scripts": {
     "build": "tsc",
     "settings": "node dist/settings-main.js",
+    "tray": "node dist/tray.js",
     "build:clean": "npm run clean && npm run build",
     "dev": "tsc --watch",
     "start": "node dist/index.js",
@@ -74,7 +76,8 @@
     "nodemailer": "~8.0.2"
   },
   "optionalDependencies": {
-    "@napi-rs/keyring": "~1.2.0"
+    "@napi-rs/keyring": "~1.2.0",
+    "systray2": "~2.1.4"
   },
   "devDependencies": {
     "@types/node": "^25.5.0",

@@ -32,6 +32,7 @@ import {
   printNonInteractive,
 } from "./settings/tui.js";
 import { startSettingsServer } from "./settings/server.js";
+import { loadConfig } from "./config/loader.js";
 
 // ─── Parse CLI flags ──────────────────────────────────────────────────────────
 
@@ -67,8 +68,21 @@ if (hasFlag("--version") || hasFlag("-v")) {
   process.exit(0);
 }
 
+// Read settingsPort from config file (lowest priority — CLI and env override it)
+let configPort = 8765;
+try {
+  const cfg = loadConfig();
+  if (cfg?.settingsPort && cfg.settingsPort >= 1 && cfg.settingsPort <= 65535) {
+    configPort = cfg.settingsPort;
+  }
+} catch { /* ignore — config may not exist yet */ }
+
 const portArg = flagIndex("--port");
-const port = portArg !== -1 ? parseInt(args[portArg + 1], 10) : 8765;
+const port = portArg !== -1
+  ? parseInt(args[portArg + 1], 10)
+  : process.env.PORT
+    ? parseInt(process.env.PORT, 10)
+    : configPort;
 
 if (isNaN(port) || port < 1 || port > 65535) {
   process.stderr.write("Invalid port. Usage: protonmail-mcp-settings [--port <1-65535>]\n");

@@ -65,15 +65,34 @@ The Bridge setting to switch: **Bridge Settings → Connection method → STARTT
 
 ---
 
-## Environment Variables for This Project
+## Configuration for This Project
 
+Connection settings and credentials are stored in `~/.protonmail-mcp.json` (mode 0600).
+**No environment variables are used for credentials** — this prevents accidental exposure to
+other processes and shell history. Run `npm run settings` to open the settings UI and configure.
+
+```json
+{
+  "configVersion": 1,
+  "connection": {
+    "smtpHost": "127.0.0.1",
+    "smtpPort": 1025,
+    "imapHost": "127.0.0.1",
+    "imapPort": 1143,
+    "username": "your@proton.me",
+    "password": "<Bridge password>",
+    "smtpToken": "",
+    "bridgeCertPath": "/path/to/exported/cert.pem",
+    "tlsMode": "starttls",
+    "debug": false
+  }
+}
 ```
-PROTONMAIL_USERNAME=your@custom.domain        # or @proton.me for Bridge mode
-PROTONMAIL_PASSWORD=<Bridge password>          # from Bridge app, NOT your account password
-PROTONMAIL_SMTP_HOST=127.0.0.1                # use smtp.protonmail.ch for direct
-PROTONMAIL_SMTP_PORT=1025                      # 587 for direct, 465 for direct SSL
-PROTONMAIL_IMAP_HOST=127.0.0.1
-PROTONMAIL_IMAP_PORT=1143
-PROTONMAIL_BRIDGE_CERT=/path/to/bridge.crt     # NEW: exported Bridge cert for proper TLS
-DEBUG=false
-```
+
+**Field notes:**
+- `password` — Bridge password (from Bridge app), **not** your Proton account password. Credentials are migrated to the OS keychain on first run when available.
+- `smtpToken` — only for direct `smtp.protonmail.ch` submission (paid plans with custom domain). Leave empty for Bridge connections.
+- `bridgeCertPath` — path to the TLS certificate exported from Bridge → Settings → Export TLS certificates. Leave empty to skip cert validation (not recommended).
+- `tlsMode` — `"starttls"` (default, correct for Bridge on ports 1025/1143) or `"ssl"` (implicit TLS, for ports 465/993 if Bridge is configured for SSL mode).
+
+The config file path can be overridden with the `PROTONMAIL_MCP_CONFIG` environment variable (must point to a path within the home directory).

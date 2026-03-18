@@ -10,7 +10,7 @@ The MCP protocol has four first-class primitives. This server uses **three of fo
 
 | Primitive | Control | Purpose | This server |
 |---|---|---|---|
-| **Tools** | Model-controlled | Actions & queries | ✅ 40 tools with structured output, annotations, and permission gating |
+| **Tools** | Model-controlled | Actions & queries | ✅ 46 tools (+ 2 always-available escalation meta-tools) with structured output, annotations, and permission gating |
 | **Resources** | App-driven | Addressable data via URI | ✅ `email://` and `folder://` URI schemes |
 | **Prompts** | User-controlled | Workflow templates / slash commands | ✅ 3 prompts (compose_reply, thread_summary, find_subscriptions) |
 | **Sampling** | Server-initiated | Server requests LLM completions | ❌ Not implemented (low priority — no current use case) |
@@ -48,7 +48,7 @@ MCP server reloads every 15s → takes effect immediately
 | **Read-Only** | Reading, analytics, system tools only | Safe default — no writes |
 | **Supervised** | All tools; deletion ≤5/hr, sending ≤20/hr | Day-to-day agent use |
 | **Send-Only** | Reading + sending only | Drafting and sending without destructive access |
-| **Full Access** | All 40 tools, no rate limits | Trusted workflows with full autonomy |
+| **Full Access** | All 46 tools, no rate limits | Trusted workflows with full autonomy |
 
 ### Security Layers (10 total)
 1. Permission gate — every tool checked against config (15s refresh)
@@ -83,7 +83,8 @@ MCP server reloads every 15s → takes effect immediately
 | **Cache/Sync** | `sync_emails`, `sync_folders`, `clear_cache` | false | false | true |
 | **Flags** | `mark_email_read`, `star_email` | false | false | true |
 | **Sending** | `send_email`, `reply_to_email`, `send_test_email` | false | false | false |
-| **Organization** | `move_email`, `bulk_move_emails`, `archive_email`, `move_to_label`, `bulk_move_to_label`, `create_folder`, `rename_folder` | false | false | false |
+| **Organization** | `move_email`, `bulk_move_emails`, `archive_email`, `create_folder`, `rename_folder` | false | false | false |
+| **Labeling** | `move_to_label`, `bulk_move_to_label`, `remove_label`, `bulk_remove_label` (COPY semantics — email stays in original folder, copy appears in Labels/) | false | false | false |
 | **Deletion** | `delete_email`, `bulk_delete_emails`, `delete_folder` | false | **true** | false |
 | **Escalation** | `request_permission_escalation`, `check_escalation_status` | false | false | true |
 

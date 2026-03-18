@@ -3,10 +3,12 @@
  */
 
 import nodemailer from "nodemailer";
-import { readFileSync } from "fs";
+import { readFileSync, statSync } from "fs";
+import { join as pathJoin } from "path";
 import { ProtonMailConfig, SendEmailOptions } from "../types/index.js";
 import { logger } from "../utils/logger.js";
 import { parseEmails, isValidEmail } from "../utils/helpers.js";
+import { tracer } from "../utils/tracer.js";
 
 /**
  * Strip CRLF and null bytes from a header-like string value to prevent
@@ -62,15 +64,27 @@ export class SMTPService {
     if (isLocalhost) {
       const certPath = this.config.smtp.bridgeCertPath;
       if (certPath) {
+        // If a directory was given, look for cert.pem inside it
+        let resolvedCertPath = certPath;
+        try {
+          if (statSync(certPath).isDirectory()) {
+            resolvedCertPath = pathJoin(certPath, "cert.pem");
+            logger.info(`SMTP: Directory given for cert path — resolved to ${resolvedCertPath}`, "SMTPService");
+          }
+        } catch { /* stat failed — let readFileSync produce the real error below */ }
         // Load the exported Bridge certificate — proper trust without disabling validation
         try {
-          const bridgeCert = readFileSync(certPath);
-          tlsOptions = { ca: [bridgeCert], minVersion: "TLSv1.2" };
-          logger.info("SMTP: Using exported Bridge certificate for TLS trust", "SMTPService");
+          const bridgeCert = readFileSync(resolvedCertPath);
+          tlsOptions = {
+            ca: [bridgeCert],
+            minVersion: "TLSv1.2",
+            checkServerIdentity: () => undefined,
+          };
+          logger.info(`SMTP: Using exported Bridge certificate for TLS trust (${resolvedCertPath})`, "SMTPService");
         } catch (err) {
           logger.error(
-            "SMTP: Failed to load Bridge cert — TLS certificate validation DISABLED. " +
-            "Fix the PROTONMAIL_BRIDGE_CERT path to secure this connection.",
+            `SMTP: Failed to load Bridge cert at "${resolvedCertPath}" — TLS certificate validation DISABLED. ` +
+            "Update the Bridge Certificate Path in Settings → Connection to secure this connection.",
             "SMTPService",
             err
           );
@@ -78,11 +92,16 @@ export class SMTPService {
           this.insecureTls = true;
         }
       } else {
-        logger.error(
-          "SMTP: PROTONMAIL_BRIDGE_CERT not set — TLS certificate validation DISABLED for localhost. " +
-          "Export the cert from Bridge → Help → Export TLS Certificate and set this env var.",
-          "SMTPService"
-        );
+        // Only warn after credentials have been loaded (i.e. not during the pre-config constructor call)
+        if (this.config.smtp.username) {
+          logger.warn(
+            "SMTP: No Bridge certificate configured — TLS certificate validation DISABLED for localhost. " +
+            "Export the cert from Bridge → Help → Export TLS Certificate, then set the path in Settings → Connection.",
+            "SMTPService"
+          );
+        } else {
+          logger.debug("SMTP: transporter pre-initialized (no config loaded yet — reinitialize() will be called after config loads)", "SMTPService");
+        }
         tlsOptions = { rejectUnauthorized: false, minVersion: "TLSv1.2" };
         this.insecureTls = true;
       }
@@ -106,8 +125,18 @@ export class SMTPService {
     logger.info("SMTP transporter initialized", "SMTPService");
   }
 
+  /**
+   * Rebuild the transporter using the current config values.
+   * Call this after credentials or cert path have been loaded into config
+   * (i.e. after main() has populated smtp.password and smtp.bridgeCertPath).
+   */
+  reinitialize(): void {
+    this.initializeTransporter();
+  }
+
   /** Verify the SMTP transporter can authenticate with the Bridge. Returns true on success. */
   async verifyConnection(): Promise<boolean> {
+    return tracer.span('smtp.verifyConnection', {}, async () => {
     logger.debug("Verifying SMTP connection", "SMTPService");
 
     if (!this.transporter) {
@@ -122,6 +151,7 @@ export class SMTPService {
       logger.error("SMTP connection verification failed", "SMTPService", error);
       throw error;
     }
+    }); // end tracer.span('smtp.verifyConnection')
   }
 
   /**
@@ -132,6 +162,14 @@ export class SMTPService {
   async sendEmail(
     options: SendEmailOptions
   ): Promise<{ success: boolean; messageId?: string; error?: string }> {
+    return tracer.span('smtp.sendEmail', {
+      recipientCount: Array.isArray(options.to) ? options.to.length : (parseEmails(options.to as string)).length,
+      hasCC: !!(options.cc?.length),
+      hasBCC: !!(options.bcc?.length),
+      hasAttachments: !!(options.attachments?.length),
+      attachmentCount: options.attachments?.length || 0,
+      estimatedBodyBytes: (options.body || '').length,
+    }, async () => {
     logger.debug("Sending email", "SMTPService", {
       to: options.to,
       subject: options.subject,
@@ -322,6 +360,7 @@ export class SMTPService {
         error: error.message,
       };
     }
+    }); // end tracer.span('smtp.sendEmail')
   }
 
   /**
@@ -358,12 +397,14 @@ export class SMTPService {
 
   /** Close and release the SMTP transporter connection pool. */
   async close(): Promise<void> {
+    return tracer.span('smtp.close', {}, async () => {
     if (this.transporter) {
       logger.debug("Closing SMTP transporter", "SMTPService");
       this.transporter.close();
       this.transporter = null;
       logger.info("SMTP transporter closed", "SMTPService");
     }
+    }); // end tracer.span('smtp.close')
   }
 
   /** Securely wipe credential strings from memory. */

@@ -5,6 +5,7 @@
 import { EmailMessage, EmailStats, EmailAnalytics, Contact } from '../types/index.js';
 import { logger } from '../utils/logger.js';
 import { extractEmailAddress, bytesToMB } from '../utils/helpers.js';
+import { tracer } from '../utils/tracer.js';
 
 /** Maximum unique contacts tracked — prevents unbounded Map growth. */
 const MAX_CONTACTS = 10_000;
@@ -25,6 +26,7 @@ export class AnalyticsService {
    * differs from what is already stored, preventing spurious invalidation.
    */
   updateEmails(inbox: EmailMessage[], sent: EmailMessage[] = []): void {
+    tracer.spanSync('analytics.updateEmails', { inboxCount: inbox.length, sentCount: sent.length }, () => {
     logger.debug(
       `Updating analytics with ${inbox.length} inbox / ${sent.length} sent emails`,
       'AnalyticsService'
@@ -33,6 +35,7 @@ export class AnalyticsService {
     this.sentEmails = sent;
     this.invalidateCache();
     this.processContacts();
+    }); // end tracer.spanSync('analytics.updateEmails')
   }
 
   /** @deprecated Use updateEmails(inbox, sent) — kept for backward compatibility */
@@ -111,8 +114,10 @@ export class AnalyticsService {
   }
 
   getEmailStats(): EmailStats {
-    if (this.statsCache && this.isCacheValid()) {
-      return this.statsCache;
+    const cached = !!(this.statsCache && this.isCacheValid());
+    return tracer.spanSync('analytics.getEmailStats', { cached }, () => {
+    if (cached) {
+      return this.statsCache!;
     }
 
     logger.debug('Calculating email statistics', 'AnalyticsService');
@@ -184,9 +189,11 @@ export class AnalyticsService {
     this.statsCache = stats;
     this.lastCacheUpdate = new Date();
     return stats;
+    }); // end tracer.spanSync('analytics.getEmailStats')
   }
 
   getEmailAnalytics(): EmailAnalytics {
+    return tracer.spanSync('analytics.getEmailAnalytics', {}, () => {
     if (this.analyticsCache && this.isCacheValid()) {
       return this.analyticsCache;
     }
@@ -223,6 +230,7 @@ export class AnalyticsService {
     this.analyticsCache = analytics;
     this.lastCacheUpdate = new Date();
     return analytics;
+    }); // end tracer.spanSync('analytics.getEmailAnalytics')
   }
 
   /**
@@ -346,23 +354,30 @@ export class AnalyticsService {
   }
 
   getContacts(limit: number = 100): Contact[] {
+    const tags = { limit } as { limit: number; resultCount?: number };
+    return tracer.spanSync('analytics.getContacts', tags, () => {
     // Clamp: minimum 1, maximum 500.  Prevents accidental or malicious
     // requests that would serialize thousands of contact records into MCP output.
     const safeLimit = Math.min(Math.max(1, Math.trunc(limit) || 100), 500);
-    return Array.from(this.contacts.values())
+    const result = Array.from(this.contacts.values())
       .sort((a, b) => {
         const aTotal = a.emailsSent + a.emailsReceived;
         const bTotal = b.emailsSent + b.emailsReceived;
         return bTotal - aTotal;
       })
       .slice(0, safeLimit);
+    tags.resultCount = result.length;
+    return result;
+    }); // end tracer.spanSync('analytics.getContacts')
   }
 
   getVolumeTrends(days: number = 30): EmailAnalytics['volumeTrends'] {
+    return tracer.spanSync('analytics.getVolumeTrends', { days }, () => {
     // Clamp 1–365.  An unchecked caller could request 10000 days, creating
     // a 10000-entry map/array and burning proportional CPU allocating it.
     const safeDays = Math.min(Math.max(1, Math.trunc(days) || 30), 365);
     return this.calculateVolumeTrends(safeDays);
+    }); // end tracer.spanSync('analytics.getVolumeTrends')
   }
 
   clearCache(): void {

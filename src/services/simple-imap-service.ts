@@ -3,13 +3,14 @@
  */
 
 import { ImapFlow } from 'imapflow';
-import { readFileSync } from 'fs';
+import { readFileSync, statSync } from 'fs';
+import { join as pathJoin } from 'path';
 import type { ParsedMail, Attachment } from 'mailparser';
 import { simpleParser } from 'mailparser';
 import nodemailer from 'nodemailer';
 import { EmailMessage, EmailFolder, SearchEmailOptions, SaveDraftOptions } from '../types/index.js';
 import { logger } from '../utils/logger.js';
-import { extractEmailAddress, extractName, generateId } from '../utils/helpers.js';
+import { tracer, type SpanTags } from '../utils/tracer.js';
 
 /** imapflow's append() return value includes uid at runtime but it is omitted from the type declaration. */
 interface AppendResult { uid?: number }
@@ -51,23 +52,91 @@ const MAX_EMAIL_CACHE_SIZE = 500;
 export class SimpleIMAPService {
   private client: ImapFlow | null = null;
   private isConnected: boolean = false;
-  private emailCache: Map<string, EmailMessage> = new Map();
+  private emailCache: Map<string, { email: EmailMessage; cachedAt: number }> = new Map();
   private folderCache: Map<string, EmailFolder> = new Map();
-  private connectionConfig: { host: string; port: number; username?: string; password?: string; bridgeCertPath?: string } | null = null;
+  private connectionConfig: { host: string; port: number; username?: string; password?: string; bridgeCertPath?: string; secure?: boolean } | null = null;
+  /** Tracks UIDVALIDITY per folder path to detect server-side mailbox rebuilds. */
+  private uidValidityMap: Map<string, number> = new Map();
   /** True when TLS certificate validation is disabled (no Bridge cert configured). */
   insecureTls = false;
 
   /**
    * Write an entry to emailCache, evicting the oldest entry (FIFO) when the
-   * cap is reached.  Map iteration order in V8 is insertion order, so
-   * `keys().next()` reliably gives the oldest key.
+   * cap is reached.  Attachment binary content is stripped before caching to
+   * avoid multi-MB buffers accumulating in memory (GAP 7.5).
    */
   private setCacheEntry(id: string, email: EmailMessage): void {
     if (!this.emailCache.has(id) && this.emailCache.size >= MAX_EMAIL_CACHE_SIZE) {
       const oldest = this.emailCache.keys().next().value;
       if (oldest !== undefined) this.emailCache.delete(oldest);
     }
-    this.emailCache.set(id, email);
+    // Strip attachment binary content before caching — content is re-fetched on demand
+    const toCache: EmailMessage = {
+      ...email,
+      attachments: email.attachments?.map(a => ({ ...a, content: undefined })),
+    };
+    this.emailCache.set(id, { email: toCache, cachedAt: Date.now() });
+  }
+
+  /**
+   * Check if the UIDVALIDITY for a folder has changed since we last opened it.
+   * If it has, the cached UIDs for that folder are stale — clear the email cache
+   * and update the stored value (GAP 7.4).
+   */
+  private checkAndUpdateUidValidity(folder: string): void {
+    try {
+      const mailbox = this.client?.mailbox;
+      if (!mailbox || typeof mailbox === 'boolean') return;
+      const currentValidity = (mailbox as any).uidValidity as number | undefined;
+      if (currentValidity === undefined) return;
+
+      const stored = this.uidValidityMap.get(folder);
+      if (stored !== undefined && stored !== currentValidity) {
+        logger.warn(
+          `UIDVALIDITY changed for folder "${folder}" (was ${stored}, now ${currentValidity}) — invalidating email cache`,
+          'IMAPService'
+        );
+        // Safe fallback: clear the entire email cache
+        this.emailCache.clear();
+      }
+      this.uidValidityMap.set(folder, currentValidity);
+    } catch {
+      // Silently ignore — UIDVALIDITY tracking is best-effort
+    }
+  }
+
+  /**
+   * Walk an imapflow bodyStructure tree and count attachment parts.
+   * A part is considered an attachment if its disposition is 'attachment'
+   * or if its type is neither 'text' nor 'multipart' (GAP 2.4).
+   */
+  private countAttachments(structure: any): number {
+    if (!structure) return 0;
+    // Multipart node — recurse into childNodes
+    if (structure.childNodes && Array.isArray(structure.childNodes)) {
+      return structure.childNodes.reduce(
+        (sum: number, child: any) => sum + this.countAttachments(child),
+        0
+      );
+    }
+    // Leaf node
+    const disp = (structure.disposition ?? '').toLowerCase();
+    const type = (structure.type ?? '').toLowerCase();
+    if (disp === 'attachment') return 1;
+    if (type !== 'text' && type !== 'multipart' && type !== '') return 1;
+    return 0;
+  }
+
+  private static readonly CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+  private getCacheEntry(id: string): EmailMessage | undefined {
+    const entry = this.emailCache.get(id);
+    if (!entry) return undefined;
+    if (Date.now() - entry.cachedAt > SimpleIMAPService.CACHE_TTL_MS) {
+      this.emailCache.delete(id);
+      return undefined;
+    }
+    return entry.email;
   }
 
   /** Validate that an email ID is a numeric UID string (prevents IMAP injection) */
@@ -105,19 +174,55 @@ export class SimpleIMAPService {
   }
 
   /**
+   * Walk an imapflow bodyStructure tree and extract attachment metadata
+   * (filename, contentType, size, contentId) without downloading binary content.
+   * Used by getEmails() list view (GAP 2.4).
+   */
+  private extractAttachmentMeta(structure: any): Array<{ filename: string; contentType: string; size: number; contentId?: string }> {
+    const results: Array<{ filename: string; contentType: string; size: number; contentId?: string }> = [];
+    if (!structure) return results;
+
+    if (structure.childNodes && Array.isArray(structure.childNodes)) {
+      for (const child of structure.childNodes) {
+        results.push(...this.extractAttachmentMeta(child));
+      }
+      return results;
+    }
+
+    const disp = (structure.disposition ?? '').toLowerCase();
+    const type = (structure.type ?? '').toLowerCase();
+    const isAttachment = disp === 'attachment' ||
+      (type !== 'text' && type !== 'multipart' && type !== '');
+    if (isAttachment) {
+      const params = structure.dispositionParameters ?? structure.parameters ?? {};
+      results.push({
+        filename: params.filename ?? params.name ?? 'unnamed',
+        contentType: structure.type
+          ? `${structure.type}/${structure.subtype ?? '*'}`
+          : 'application/octet-stream',
+        size: structure.size ?? 0,
+        contentId: structure.id,
+      });
+    }
+    return results;
+  }
+
+  /**
    * Establish an authenticated IMAP connection to the Proton Bridge.
    * @param host Bridge hostname (default: localhost)
    * @param port Bridge IMAP port (default: 1143)
    * @param username Bridge login username
    * @param password Bridge login password
    * @param bridgeCertPath Optional path to a Bridge TLS certificate for localhost trust
+   * @param secure Whether to use implicit TLS (true) or STARTTLS (false, default for Bridge)
    */
-  async connect(host: string = 'localhost', port: number = 1143, username?: string, password?: string, bridgeCertPath?: string): Promise<void> {
+  async connect(host: string = 'localhost', port: number = 1143, username?: string, password?: string, bridgeCertPath?: string, secure?: boolean): Promise<void> {
+    return tracer.span('imap.connect', { host, port, hasCert: !!bridgeCertPath }, async () => {
     logger.debug('Connecting to IMAP server', 'IMAPService', { host, port });
 
     try {
       // Store connection config for reconnection
-      this.connectionConfig = { host, port, username, password, bridgeCertPath };
+      this.connectionConfig = { host, port, username, password, bridgeCertPath, secure };
 
       // Check if using localhost (Proton Bridge)
       const isLocalhost = host === 'localhost' || host === '127.0.0.1';
@@ -126,14 +231,28 @@ export class SimpleIMAPService {
       let tlsOptions: Record<string, unknown> | undefined;
       if (isLocalhost) {
         if (bridgeCertPath) {
+          // If a directory was given, look for cert.pem inside it
+          let resolvedCertPath = bridgeCertPath;
           try {
-            const bridgeCert = readFileSync(bridgeCertPath);
-            tlsOptions = { ca: [bridgeCert], minVersion: 'TLSv1.2' };
-            logger.info('IMAP: Using exported Bridge certificate for TLS trust', 'IMAPService');
+            if (statSync(bridgeCertPath).isDirectory()) {
+              resolvedCertPath = pathJoin(bridgeCertPath, 'cert.pem');
+              logger.info(`IMAP: Directory given for cert path — resolved to ${resolvedCertPath}`, 'IMAPService');
+            }
+          } catch { /* stat failed — let readFileSync produce the real error below */ }
+          try {
+            const bridgeCert = readFileSync(resolvedCertPath);
+            // Bridge certs use CN=127.0.0.1 but we may connect via "localhost",
+            // so skip hostname verification when the CA is explicitly trusted.
+            tlsOptions = {
+              ca: [bridgeCert],
+              minVersion: 'TLSv1.2',
+              checkServerIdentity: () => undefined,
+            };
+            logger.info(`IMAP: Using exported Bridge certificate for TLS trust (${resolvedCertPath})`, 'IMAPService');
           } catch (err) {
             logger.error(
-              `IMAP: Failed to load Bridge cert at "${bridgeCertPath}" — TLS certificate validation DISABLED. ` +
-              `Fix the PROTONMAIL_BRIDGE_CERT path to secure this connection.`,
+              `IMAP: Failed to load Bridge cert at "${resolvedCertPath}" — TLS certificate validation DISABLED. ` +
+              `Update the Bridge Certificate Path in Settings → Connection to secure this connection.`,
               'IMAPService',
               err
             );
@@ -141,9 +260,9 @@ export class SimpleIMAPService {
             this.insecureTls = true;
           }
         } else {
-          logger.error(
-            'IMAP: PROTONMAIL_BRIDGE_CERT not set — TLS certificate validation DISABLED for localhost. ' +
-            'Export the cert from Bridge → Help → Export TLS Certificate and set this env var.',
+          logger.warn(
+            'IMAP: No Bridge certificate configured — TLS certificate validation DISABLED for localhost. ' +
+            'Export the cert from Bridge → Help → Export TLS Certificate, then set the path in Settings → Connection.',
             'IMAPService'
           );
           tlsOptions = { rejectUnauthorized: false, minVersion: 'TLSv1.2' };
@@ -154,16 +273,21 @@ export class SimpleIMAPService {
         tlsOptions = { minVersion: 'TLSv1.2' };
       }
 
+      // Use caller-supplied secure flag if provided; otherwise default to false for
+      // localhost (Bridge uses STARTTLS on 1143) and true for non-localhost connections.
+      const useSecure = secure !== undefined ? secure : !isLocalhost;
+
       this.client = new ImapFlow({
         host,
         port,
-        secure: !isLocalhost, // Use implicit TLS for non-Bridge connections; Bridge uses STARTTLS
+        secure: useSecure,
         auth: username && password ? {
           user: username,
           pass: password
         } : undefined,
         logger: false,
-        tls: tlsOptions
+        tls: tlsOptions,
+        connectionTimeout: 30000,
       });
 
       // Setup connection event handlers (only if client has event emitter methods)
@@ -188,10 +312,12 @@ export class SimpleIMAPService {
       logger.error('IMAP connection failed', 'IMAPService', error);
       throw error;
     }
+    }); // end tracer.span('imap.connect')
   }
 
   /** Log out and close the IMAP connection gracefully. */
   async disconnect(): Promise<void> {
+    return tracer.span('imap.disconnect', {}, async () => {
     if (this.client && this.isConnected) {
       logger.debug('Disconnecting from IMAP server', 'IMAPService');
       await this.client.logout();
@@ -199,6 +325,7 @@ export class SimpleIMAPService {
       this.isConnected = false;
       logger.info('IMAP disconnected', 'IMAPService');
     }
+    }); // end tracer.span('imap.disconnect')
   }
 
   /**
@@ -211,8 +338,8 @@ export class SimpleIMAPService {
 
     logger.info('Attempting to reconnect to IMAP server', 'IMAPService');
 
-    const { host, port, username, password, bridgeCertPath } = this.connectionConfig;
-    await this.connect(host, port, username, password, bridgeCertPath);
+    const { host, port, username, password, bridgeCertPath, secure } = this.connectionConfig;
+    await this.connect(host, port, username, password, bridgeCertPath, secure);
   }
 
   /**
@@ -241,6 +368,8 @@ export class SimpleIMAPService {
    *   Never throws — failures are caught and returned as `false`.
    */
   async healthCheck(): Promise<boolean> {
+    const wasConnected = this.isConnected;
+    return tracer.span('imap.healthCheck', { wasConnected }, async () => {
     if (!this.client || !this.isConnected) {
       return false;
     }
@@ -250,49 +379,70 @@ export class SimpleIMAPService {
     } catch {
       return false;
     }
+    }); // end tracer.span('imap.healthCheck')
   }
 
   /** Fetch all IMAP folders with message and unseen counts. Results are cached. */
   async getFolders(): Promise<EmailFolder[]> {
+    const tags: SpanTags = {};
+    return tracer.span('imap.getFolders', tags, async () => {
     logger.debug('Fetching folders', 'IMAPService');
 
     try {
       await this.ensureConnection();
     } catch (error) {
       logger.warn('IMAP not connected, returning cached folders', 'IMAPService');
-      return Array.from(this.folderCache.values());
+      const cached = Array.from(this.folderCache.values());
+      tags.resultCount = cached.length;
+      return cached;
     }
 
     if (!this.client) {
       logger.warn('IMAP client not available, returning cached folders', 'IMAPService');
-      return Array.from(this.folderCache.values());
+      const cached = Array.from(this.folderCache.values());
+      tags.resultCount = cached.length;
+      return cached;
     }
 
     try {
       const folders = await this.client.list();
       const result: EmailFolder[] = [];
 
+      const SYSTEM_PATHS = new Set(['inbox','sent','drafts','trash','spam','archive','all mail','starred']);
+
       for (const folder of folders) {
         const status = await this.client.status(folder.path, { messages: true, unseen: true });
+
+        let folderType: 'system' | 'user-folder' | 'label';
+        if (folder.path.startsWith('Labels/')) {
+          folderType = 'label';
+        } else if (folder.specialUse || SYSTEM_PATHS.has(folder.path.toLowerCase())) {
+          folderType = 'system';
+        } else {
+          folderType = 'user-folder';
+        }
 
         const emailFolder: EmailFolder = {
           name: folder.name,
           path: folder.path,
           totalMessages: status.messages || 0,
           unreadMessages: status.unseen || 0,
-          specialUse: folder.specialUse
+          specialUse: folder.specialUse,
+          folderType,
         };
 
         result.push(emailFolder);
         this.folderCache.set(folder.path, emailFolder);
       }
 
+      tags.resultCount = result.length;
       logger.info(`Retrieved ${result.length} folders`, 'IMAPService');
       return result;
     } catch (error) {
       logger.error('Failed to fetch folders', 'IMAPService', error);
       throw error;
     }
+    }); // end tracer.span('imap.getFolders')
   }
 
   /**
@@ -306,6 +456,8 @@ export class SimpleIMAPService {
     this.validateFolderName(folder);
     limit = Math.min(Math.max(1, limit ?? 50), 200);
     offset = Math.max(0, offset ?? 0);
+    const tags: SpanTags = { folder, limit, offset };
+    return tracer.span('imap.getEmails', tags, async () => {
     logger.debug('Fetching emails', 'IMAPService', { folder, limit, offset });
 
     try {
@@ -324,6 +476,9 @@ export class SimpleIMAPService {
       const lock = await this.client.getMailboxLock(folder);
 
       try {
+        // GAP 7.4: check for UIDVALIDITY changes after opening the mailbox
+        this.checkAndUpdateUidValidity(folder);
+
         const mailbox = this.client.mailbox;
         const total = (mailbox && typeof mailbox !== 'boolean' ? mailbox.exists : 0) || 0;
         const start = Math.max(1, total - offset - limit + 1);
@@ -335,75 +490,74 @@ export class SimpleIMAPService {
 
         const messages: EmailMessage[] = [];
 
+        // GAP 2.4 / 5.1: fetch envelope + bodyStructure + text preview only.
+        // Do NOT fetch source: true here — that downloads the full RFC 2822 message
+        // including all attachment binaries just to render a 300-char preview.
         for await (const message of this.client.fetch(`${start}:${end}`, {
+          uid: true,
+          flags: true,
           envelope: true,
           bodyStructure: true,
-          flags: true,
-          uid: true,
-          source: true
+          bodyParts: ['1'],   // TEXT part only (part 1 of multipart, whole body for simple)
         })) {
           try {
-            if (!message.source) continue;
-            const parsed = await simpleParser(message.source);
+            const env = message.envelope;
+            if (!env) continue;
 
-            const fullBody = parsed.text || parsed.html || '';
+            // Decode the text preview from bodyPart '1'
+            const rawPart = message.bodyParts?.get('1');
+            const bodyText = rawPart ? rawPart.toString('utf-8') : '';
+            const bodyPreview = truncateBody(bodyText);
 
-            // Store full body in cache for later retrieval
-            const cachedEmail: EmailMessage = {
-              id: message.uid.toString(),
-              from: parsed.from?.text || '',
-              to: parsed.to?.text ? [parsed.to.text] : [],
-              cc: parsed.cc?.text ? [parsed.cc.text] : [],
-              subject: parsed.subject || '(No Subject)',
-              body: fullBody, // Full body stored in cache
-              bodyPreview: truncateBody(fullBody),
-              isHtml: !!parsed.html,
-              date: parsed.date || new Date(),
-              folder,
-              isRead: message.flags?.has('\\Seen') || false,
-              isStarred: message.flags?.has('\\Flagged') || false,
-              hasAttachment: (parsed.attachments?.length || 0) > 0,
-              attachments: parsed.attachments?.map((att: Attachment) => ({
-                filename: att.filename || 'unnamed',
-                contentType: att.contentType,
-                size: att.size,
-                content: att.content,
-                contentId: att.cid
-              })),
-              headers: parsed.headers
-                ? Object.fromEntries(
-                    Array.from(parsed.headers.entries()).map(([k, v]) => [
-                      k,
-                      Array.isArray(v) ? v.join(', ') : String(v),
-                    ])
-                  )
-                : undefined,
-              inReplyTo: parsed.inReplyTo,
-              references: parsed.references,
-            };
+            // Determine attachment count from bodyStructure without downloading content
+            const attachmentCount = this.countAttachments(message.bodyStructure);
 
-            this.setCacheEntry(cachedEmail.id, cachedEmail);
+            // Build address strings from envelope
+            const fromAddr = env.from?.[0]
+              ? (env.from[0].name
+                  ? `${env.from[0].name} <${env.from[0].address ?? ''}>`
+                  : (env.from[0].address ?? ''))
+              : '';
+            const toAddrs = (env.to ?? []).map((a: any) =>
+              a.name ? `${a.name} <${a.address ?? ''}>` : (a.address ?? '')
+            );
+            const ccAddrs = (env.cc ?? []).map((a: any) =>
+              a.name ? `${a.name} <${a.address ?? ''}>` : (a.address ?? '')
+            );
 
-            // Return truncated body for list view, without attachment content
+            // Build stub attachment metadata from bodyStructure (no content buffers)
+            const attachmentMeta = attachmentCount > 0
+              ? this.extractAttachmentMeta(message.bodyStructure)
+              : undefined;
+
             const listEmail: EmailMessage = {
-              ...cachedEmail,
-              body: truncateBody(fullBody),
-              // Remove attachment content from list view to reduce payload size
-              attachments: cachedEmail.attachments?.map(att => ({
-                filename: att.filename,
-                contentType: att.contentType,
-                size: att.size,
-                contentId: att.contentId
-                // content is intentionally omitted
-              }))
+              id: message.uid.toString(),
+              from: fromAddr,
+              to: toAddrs,
+              cc: ccAddrs,
+              subject: env.subject || '(No Subject)',
+              body: bodyPreview,
+              bodyPreview,
+              isHtml: false,  // envelope fetch doesn't tell us; full fetch via getEmailById will
+              date: env.date ?? new Date(),
+              folder,
+              isRead: message.flags?.has('\\Seen') ?? false,
+              isStarred: message.flags?.has('\\Flagged') ?? false,
+              hasAttachment: attachmentCount > 0,
+              attachments: attachmentMeta,
+              isAnswered: message.flags?.has('\\Answered') ?? false,
+              isForwarded: message.flags?.has('\\Forward') ?? false,
             };
 
+            // GAP 2.4: do NOT cache list-view emails — they only have a preview body
+            // and stub attachment metadata.  getEmailById() populates the full cache.
             messages.push(listEmail);
           } catch (parseError) {
             logger.warn('Failed to parse email', 'IMAPService', parseError);
           }
         }
 
+        tags.resultCount = messages.length;
         logger.info(`Retrieved ${messages.length} emails from ${folder}`, 'IMAPService');
         return messages.reverse(); // Most recent first
       } finally {
@@ -413,6 +567,7 @@ export class SimpleIMAPService {
       logger.error('Failed to fetch emails', 'IMAPService', error);
       throw error;
     }
+    }); // end tracer.span('imap.getEmails')
   }
 
   /**
@@ -422,11 +577,16 @@ export class SimpleIMAPService {
    */
   async getEmailById(emailId: string): Promise<EmailMessage | null> {
     this.validateEmailId(emailId);
+    const tags: SpanTags = { emailId };
+    return tracer.span('imap.getEmailById', tags, async () => {
     logger.debug('Fetching email by ID', 'IMAPService', { emailId });
 
     // Check cache first
-    if (this.emailCache.has(emailId)) {
-      return this.emailCache.get(emailId) || null;
+    const cachedEntry = this.getCacheEntry(emailId);
+    if (cachedEntry) {
+      tags.hasAttachments = !!(cachedEntry.attachments?.length);
+      tags.attachmentCount = cachedEntry.attachments?.length ?? 0;
+      return cachedEntry;
     }
 
     if (!this.client || !this.isConnected) {
@@ -442,6 +602,9 @@ export class SimpleIMAPService {
         const lock = await this.client.getMailboxLock(folder.path);
 
         try {
+          // GAP 7.4: check for UIDVALIDITY changes after opening the mailbox
+          this.checkAndUpdateUidValidity(folder.path);
+
           for await (const message of this.client.fetch(emailId, {
             envelope: true,
             bodyStructure: true,
@@ -453,6 +616,14 @@ export class SimpleIMAPService {
             const parsed = await simpleParser(message.source);
 
             const fullBody = parsed.text || parsed.html || '';
+
+            // Extract content-type for PGP detection
+            const contentType = parsed.headers?.get('content-type');
+            const ctStr = typeof contentType === 'string' ? contentType : ((contentType as any)?.value ?? '');
+
+            // Extract X-Pm-Internal-Id for stable Proton message ID
+            const pmId = parsed.headers?.get('x-pm-internal-id');
+
             const emailMessage: EmailMessage = {
               id: message.uid.toString(),
               from: parsed.from?.text || '',
@@ -484,10 +655,21 @@ export class SimpleIMAPService {
                 : undefined,
               inReplyTo: parsed.inReplyTo,
               references: parsed.references,
+              // IMAP flags
+              isAnswered: message.flags?.has('\\Answered') ?? false,
+              isForwarded: message.flags?.has('\\Forward') ?? false,
+              // MIME-level PGP detection
+              isSignedPGP: ctStr.includes('multipart/signed') && ctStr.includes('application/pgp-signature'),
+              isEncryptedPGP: ctStr.includes('multipart/encrypted') && ctStr.includes('application/pgp-encrypted'),
+              // Proton-specific stable ID
+              protonId: typeof pmId === 'string' ? pmId.trim() : undefined,
             };
 
-            // Cache the full version (including binary content) for internal use
+            // GAP 7.5: setCacheEntry strips attachment binary content before storing
             this.setCacheEntry(emailMessage.id, emailMessage);
+
+            tags.hasAttachments = emailMessage.hasAttachment;
+            tags.attachmentCount = emailMessage.attachments?.length ?? 0;
 
             // Return without binary attachment content to caller
             return {
@@ -511,6 +693,7 @@ export class SimpleIMAPService {
       logger.error('Failed to fetch email by ID', 'IMAPService', error);
       throw error;
     }
+    }); // end tracer.span('imap.getEmailById')
   }
 
   /**
@@ -555,6 +738,28 @@ export class SimpleIMAPService {
         }
       }
 
+      // Body/text search
+      if (options.body) searchCriteria.body = sanitizeImapStr(options.body);
+      if (options.text) searchCriteria.text = sanitizeImapStr(options.text);
+
+      // Additional header fields
+      if (options.bcc) searchCriteria.bcc = sanitizeImapStr(options.bcc);
+      if (options.header) searchCriteria.header = [options.header.field, options.header.value];
+
+      // Flag criteria
+      if (options.answered === true)  searchCriteria.answered = true;
+      if (options.answered === false) searchCriteria.unanswered = true;
+      if (options.isDraft === true)   searchCriteria.draft = true;
+      if (options.isDraft === false)  searchCriteria.undraft = true;
+
+      // Size criteria
+      if (options.larger !== undefined)  searchCriteria.larger = options.larger;
+      if (options.smaller !== undefined) searchCriteria.smaller = options.smaller;
+
+      // Sent-date criteria (Date: header vs INTERNALDATE)
+      if (options.sentBefore) searchCriteria.sentBefore = options.sentBefore;
+      if (options.sentSince)  searchCriteria.sentSince  = options.sentSince;
+
       const uids = await this.client.search(searchCriteria, { uid: true });
       const results: EmailMessage[] = [];
 
@@ -588,6 +793,16 @@ export class SimpleIMAPService {
    * @returns Array of matching EmailMessage objects, up to the configured per-folder limit
    */
   async searchEmails(options: SearchEmailOptions): Promise<EmailMessage[]> {
+    const tags: SpanTags = {
+      folder: options.folder || 'INBOX',
+      hasSubjectFilter: !!options.subject,
+      hasFromFilter: !!options.from,
+      hasBodyFilter: !!options.body || !!options.text,
+      hasDateFilter: !!(options.dateFrom || options.dateTo),
+      hasAnsweredFilter: options.answered !== undefined,
+      limit: options.limit || 50,
+    };
+    return tracer.span('imap.searchEmails', tags, async () => {
     logger.debug('Searching emails', 'IMAPService', options);
 
     try {
@@ -632,6 +847,7 @@ export class SimpleIMAPService {
         const filtered = options.hasAttachment !== undefined
           ? results.filter(e => e.hasAttachment === options.hasAttachment)
           : results;
+        tags.resultCount = filtered.length;
         logger.info(`Search found ${filtered.length} emails`, 'IMAPService');
         return filtered;
       }
@@ -653,12 +869,14 @@ export class SimpleIMAPService {
         ? limited.filter(e => e.hasAttachment === options.hasAttachment)
         : limited;
 
+      tags.resultCount = filtered.length;
       logger.info(`Multi-folder search found ${filtered.length} emails across ${foldersToSearch.length} folders`, 'IMAPService');
       return filtered;
     } catch (error) {
       logger.error('Failed to search emails', 'IMAPService', error);
       throw error;
     }
+    }); // end tracer.span('imap.searchEmails')
   }
 
   /**
@@ -677,15 +895,16 @@ export class SimpleIMAPService {
     encoding: "base64";
   } | null> {
     this.validateEmailId(emailId);
+    const tags: SpanTags = { emailId, attachmentIndex };
+    return tracer.span('imap.downloadAttachment', tags, async () => {
     logger.debug('Downloading attachment', 'IMAPService', { emailId, attachmentIndex });
 
-    // Ensure the email (with attachment content) is in cache
-    if (!this.emailCache.has(emailId)) {
-      // getEmailById populates the cache with full content
+    // Ensure the email metadata is in cache (getCacheEntry returns stripped version)
+    if (!this.getCacheEntry(emailId)) {
       await this.getEmailById(emailId);
     }
 
-    const cached = this.emailCache.get(emailId);
+    const cached = this.getCacheEntry(emailId);
     if (!cached || !cached.attachments || cached.attachments.length === 0) {
       return null;
     }
@@ -695,10 +914,18 @@ export class SimpleIMAPService {
       return null;
     }
 
-    const att = cached.attachments[idx];
+    let att = cached.attachments[idx];
+
+    // GAP 7.5: attachment content is stripped from cache — re-fetch full source on demand
     if (!att.content) {
-      // Content not available (e.g., attachment was fetched without content)
-      return null;
+      logger.debug('Attachment content not in cache, re-fetching full email source', 'IMAPService', { emailId, attachmentIndex });
+      const fresh = await this.fetchEmailFullSource(emailId);
+      const freshAtt = fresh?.attachments?.[idx];
+      if (!freshAtt?.content) {
+        logger.warn('Attachment content unavailable after re-fetch', 'IMAPService', { emailId, attachmentIndex });
+        return null;
+      }
+      att = freshAtt;
     }
 
     let content: string;
@@ -706,9 +933,10 @@ export class SimpleIMAPService {
       content = att.content.toString('base64');
     } else {
       // Already a base64 string
-      content = att.content;
+      content = att.content as string;
     }
 
+    tags.sizeBytes = att.size;
     return {
       filename: att.filename,
       contentType: att.contentType,
@@ -716,6 +944,60 @@ export class SimpleIMAPService {
       content,
       encoding: "base64",
     };
+    }); // end tracer.span('imap.downloadAttachment')
+  }
+
+  /**
+   * Fetch a single email's full RFC 2822 source WITHOUT caching the result.
+   * Used by downloadAttachment() to retrieve attachment binary content on demand
+   * when the cache entry has had its attachment content stripped (GAP 7.5).
+   */
+  private async fetchEmailFullSource(emailId: string): Promise<EmailMessage | null> {
+    if (!this.client || !this.isConnected) return null;
+    try {
+      const folders = await this.getFolders();
+      for (const folder of folders) {
+        const lock = await this.client.getMailboxLock(folder.path);
+        try {
+          for await (const message of this.client.fetch(emailId, {
+            uid: true,
+            flags: true,
+            source: true,
+          }, { uid: true })) {
+            if (!message.source) continue;
+            const parsed = await simpleParser(message.source);
+            const fullBody = parsed.text || parsed.html || '';
+            return {
+              id: message.uid.toString(),
+              from: parsed.from?.text || '',
+              to: parsed.to?.text ? [parsed.to.text] : [],
+              cc: parsed.cc?.text ? [parsed.cc.text] : [],
+              subject: parsed.subject || '(No Subject)',
+              body: fullBody,
+              bodyPreview: truncateBody(fullBody),
+              isHtml: !!parsed.html,
+              date: parsed.date || new Date(),
+              folder: folder.path,
+              isRead: message.flags?.has('\\Seen') || false,
+              isStarred: message.flags?.has('\\Flagged') || false,
+              hasAttachment: (parsed.attachments?.length || 0) > 0,
+              attachments: parsed.attachments?.map((att: Attachment) => ({
+                filename: att.filename || 'unnamed',
+                contentType: att.contentType,
+                size: att.size,
+                content: att.content,
+                contentId: att.cid,
+              })),
+            };
+          }
+        } finally {
+          lock.release();
+        }
+      }
+    } catch (error) {
+      logger.error('Failed to fetch full email source for attachment download', 'IMAPService', error);
+    }
+    return null;
   }
 
   /**
@@ -765,6 +1047,7 @@ export class SimpleIMAPService {
    * not report one.
    */
   async saveDraft(options: SaveDraftOptions): Promise<{ success: boolean; uid?: number; error?: string }> {
+    return tracer.span('imap.saveDraft', { hasAttachments: !!(options.attachments?.length), attachmentCount: options.attachments?.length || 0 }, async () => {
     logger.debug('Saving draft', 'IMAPService', { subject: options.subject });
 
     if (!this.client || !this.isConnected) {
@@ -839,6 +1122,7 @@ export class SimpleIMAPService {
       logger.error('Failed to save draft', 'IMAPService', error);
       return { success: false, error: error.message };
     }
+    }); // end tracer.span('imap.saveDraft')
   }
 
   /**
@@ -849,6 +1133,7 @@ export class SimpleIMAPService {
    */
   async markEmailRead(emailId: string, isRead: boolean = true): Promise<boolean> {
     this.validateEmailId(emailId);
+    return tracer.span('imap.markEmailRead', { emailId, isRead }, async () => {
     logger.debug('Marking email read status', 'IMAPService', { emailId, isRead });
 
     if (!this.client || !this.isConnected) {
@@ -872,9 +1157,9 @@ export class SimpleIMAPService {
         }
 
         // Update cache
-        if (this.emailCache.has(emailId)) {
-          const cachedEmail = this.emailCache.get(emailId)!;
-          cachedEmail.isRead = isRead;
+        const cachedForRead = this.getCacheEntry(emailId);
+        if (cachedForRead) {
+          cachedForRead.isRead = isRead;
         }
 
         logger.info(`Email ${emailId} marked as ${isRead ? 'read' : 'unread'}`, 'IMAPService');
@@ -886,6 +1171,7 @@ export class SimpleIMAPService {
       logger.error('Failed to mark email read', 'IMAPService', error);
       throw error;
     }
+    }); // end tracer.span('imap.markEmailRead')
   }
 
   /**
@@ -896,6 +1182,7 @@ export class SimpleIMAPService {
    */
   async starEmail(emailId: string, isStarred: boolean = true): Promise<boolean> {
     this.validateEmailId(emailId);
+    return tracer.span('imap.starEmail', { emailId, isStarred }, async () => {
     logger.debug('Starring email', 'IMAPService', { emailId, isStarred });
 
     if (!this.client || !this.isConnected) {
@@ -919,9 +1206,9 @@ export class SimpleIMAPService {
         }
 
         // Update cache
-        if (this.emailCache.has(emailId)) {
-          const cachedEmail = this.emailCache.get(emailId)!;
-          cachedEmail.isStarred = isStarred;
+        const cachedForStar = this.getCacheEntry(emailId);
+        if (cachedForStar) {
+          cachedForStar.isStarred = isStarred;
         }
 
         logger.info(`Email ${emailId} ${isStarred ? 'starred' : 'unstarred'}`, 'IMAPService');
@@ -933,6 +1220,7 @@ export class SimpleIMAPService {
       logger.error('Failed to star email', 'IMAPService', error);
       throw error;
     }
+    }); // end tracer.span('imap.starEmail')
   }
 
   /**
@@ -944,6 +1232,7 @@ export class SimpleIMAPService {
   async moveEmail(emailId: string, targetFolder: string): Promise<boolean> {
     this.validateEmailId(emailId);
     this.validateFolderName(targetFolder);
+    return tracer.span('imap.moveEmail', { emailId, targetFolder }, async () => {
     logger.debug('Moving email', 'IMAPService', { emailId, targetFolder });
 
     if (!this.client || !this.isConnected) {
@@ -963,9 +1252,9 @@ export class SimpleIMAPService {
         await this.client.messageMove(emailId, targetFolder, { uid: true });
 
         // Update cache
-        if (this.emailCache.has(emailId)) {
-          const cachedEmail = this.emailCache.get(emailId)!;
-          cachedEmail.folder = targetFolder;
+        const cachedForMove = this.getCacheEntry(emailId);
+        if (cachedForMove) {
+          cachedForMove.folder = targetFolder;
         }
 
         logger.info(`Email ${emailId} moved to ${targetFolder}`, 'IMAPService');
@@ -977,10 +1266,152 @@ export class SimpleIMAPService {
       logger.error('Failed to move email', 'IMAPService', error);
       throw error;
     }
+    }); // end tracer.span('imap.moveEmail')
+  }
+
+  /**
+   * Copy an email to a target folder using IMAP COPY (message stays in original folder).
+   * Use this for label operations in Proton Bridge's label model.
+   * @param emailId Numeric UID string of the email to copy
+   * @param targetFolder Destination folder path (e.g. "Labels/Work")
+   * @returns true on success, false if not connected or email not found
+   */
+  async copyEmailToFolder(emailId: string, targetFolder: string): Promise<boolean> {
+    this.validateEmailId(emailId);
+    this.validateFolderName(targetFolder);
+    return tracer.span('imap.copyEmailToFolder', { emailId, targetFolder }, async () => {
+    logger.debug('Copying email to folder', 'IMAPService', { emailId, targetFolder });
+
+    if (!this.client || !this.isConnected) {
+      logger.warn('IMAP not connected', 'IMAPService');
+      return false;
+    }
+
+    try {
+      const email = await this.getEmailById(emailId);
+      if (!email) {
+        throw new Error(`Email ${emailId} not found`);
+      }
+
+      const lock = await this.client.getMailboxLock(email.folder);
+
+      try {
+        await this.client.messageCopy(emailId, targetFolder, { uid: true });
+        logger.info(`Email ${emailId} copied to ${targetFolder}`, 'IMAPService');
+        return true;
+      } finally {
+        lock.release();
+      }
+    } catch (error) {
+      logger.error('Failed to copy email to folder', 'IMAPService', error);
+      throw error;
+    }
+    }); // end tracer.span('imap.copyEmailToFolder')
+  }
+
+  /**
+   * Delete an email from a specific folder (used for label removal).
+   * Opens a lock on the given folder and deletes the message there.
+   * @param emailId Numeric UID string
+   * @param folder The folder from which to delete (e.g. "Labels/Work")
+   * @returns true on success, false if not connected
+   */
+  async deleteFromFolder(emailId: string, folder: string): Promise<boolean> {
+    this.validateEmailId(emailId);
+    this.validateFolderName(folder);
+    return tracer.span('imap.deleteFromFolder', { emailId, folder }, async () => {
+    logger.debug('Deleting email from folder', 'IMAPService', { emailId, folder });
+
+    if (!this.client || !this.isConnected) {
+      logger.warn('IMAP not connected', 'IMAPService');
+      return false;
+    }
+
+    try {
+      const lock = await this.client.getMailboxLock(folder);
+
+      try {
+        await this.client.messageDelete(emailId, { uid: true });
+        // Remove from cache if present
+        this.emailCache.delete(emailId);
+        logger.info(`Email ${emailId} deleted from ${folder}`, 'IMAPService');
+        return true;
+      } finally {
+        lock.release();
+      }
+    } catch (error) {
+      logger.error('Failed to delete email from folder', 'IMAPService', error);
+      throw error;
+    }
+    }); // end tracer.span('imap.deleteFromFolder')
+  }
+
+  /**
+   * Set or clear an IMAP flag on an email.
+   * @param emailId Numeric UID string of the email
+   * @param flag The IMAP flag to set/clear (e.g. '\\Answered', '$Forwarded')
+   * @param set true to add the flag, false to remove it (default: true)
+   * @returns true on success, false/throws on failure
+   */
+  async setFlag(emailId: string, flag: string, set: boolean = true): Promise<boolean> {
+    this.validateEmailId(emailId);
+    return tracer.span('imap.setFlag', { emailId, flag, set }, async () => {
+    logger.debug('Setting flag on email', 'IMAPService', { emailId, flag, set });
+
+    if (!this.client || !this.isConnected) {
+      logger.warn('IMAP not connected', 'IMAPService');
+      return false;
+    }
+
+    try {
+      // Find folder from cache first, then scan
+      let folder: string | undefined;
+      const cached = this.getCacheEntry(emailId);
+      if (cached) {
+        folder = cached.folder;
+      } else {
+        const folders = await this.getFolders();
+        for (const f of folders) {
+          const lock = await this.client.getMailboxLock(f.path);
+          try {
+            let found = false;
+            for await (const msg of this.client.fetch(emailId, { uid: true }, { uid: true })) {
+              if (msg.uid.toString() === emailId) { found = true; break; }
+            }
+            if (found) { folder = f.path; break; }
+          } catch { /* not in this folder */ } finally {
+            lock.release();
+          }
+        }
+      }
+
+      if (!folder) {
+        throw new Error(`Email ${emailId} not found in any folder`);
+      }
+
+      const lock = await this.client.getMailboxLock(folder);
+      try {
+        if (set) {
+          await this.client.messageFlagsAdd(emailId, [flag], { uid: true });
+        } else {
+          await this.client.messageFlagsRemove(emailId, [flag], { uid: true });
+        }
+        logger.info(`Flag ${flag} ${set ? 'set' : 'cleared'} on email ${emailId}`, 'IMAPService');
+        return true;
+      } finally {
+        lock.release();
+      }
+    } catch (error) {
+      logger.error('Failed to set flag on email', 'IMAPService', error);
+      throw error;
+    }
+    }); // end tracer.span('imap.setFlag')
   }
 
   async bulkMoveEmails(emailIds: string[], targetFolder: string): Promise<{ success: number; failed: number; errors: string[] }> {
     this.validateFolderName(targetFolder);
+    const tags: SpanTags = { count: emailIds.length, targetFolder };
+    return tracer.span('imap.bulkMoveEmails', tags, async () => {
     logger.debug('Bulk moving emails', 'IMAPService', { count: emailIds.length, targetFolder });
 
     if (!this.client || !this.isConnected) {
@@ -994,50 +1425,49 @@ export class SimpleIMAPService {
       errors: [] as string[]
     };
 
-    // Group emails by their source folder for efficient bulk operations
+    // Group emails by their source folder (use cache for known folders; fall back to INBOX)
     const emailsByFolder = new Map<string, string[]>();
 
-    // First, fetch all emails to determine their folders
     for (const emailId of emailIds) {
       try {
-        const email = await this.getEmailById(emailId);
-        if (!email) {
-          results.failed++;
-          results.errors.push(`Email ${emailId} not found`);
-          continue;
-        }
-
-        if (!emailsByFolder.has(email.folder)) {
-          emailsByFolder.set(email.folder, []);
-        }
-        emailsByFolder.get(email.folder)!.push(emailId);
+        this.validateEmailId(emailId);
+        const cached = this.getCacheEntry(emailId);
+        const folder = cached?.folder ?? 'INBOX';
+        if (!emailsByFolder.has(folder)) emailsByFolder.set(folder, []);
+        emailsByFolder.get(folder)!.push(emailId);
       } catch (error: any) {
         results.failed++;
-        results.errors.push(`Error fetching email ${emailId}: ${error.message}`);
+        results.errors.push(`Invalid email ID ${emailId}: ${error.message}`);
       }
     }
 
-    // Now move emails folder by folder
+    // For each group, open the folder lock once and batch-move all UIDs
     for (const [sourceFolder, ids] of emailsByFolder.entries()) {
       const lock = await this.client.getMailboxLock(sourceFolder);
-
       try {
-        // Move each email in this folder
-        for (const emailId of ids) {
-          try {
-            await this.client.messageMove(emailId, targetFolder, { uid: true });
-
-            // Update cache
-            if (this.emailCache.has(emailId)) {
-              const cachedEmail = this.emailCache.get(emailId)!;
-              cachedEmail.folder = targetFolder;
-            }
-
+        const uidSet = ids.join(',');
+        try {
+          await this.client.messageMove(uidSet, targetFolder, { uid: true });
+          // Update cache and count successes
+          for (const emailId of ids) {
+            const cachedForBulkMove = this.getCacheEntry(emailId);
+            if (cachedForBulkMove) cachedForBulkMove.folder = targetFolder;
             results.success++;
-          } catch (error: any) {
-            results.failed++;
-            results.errors.push(`Failed to move email ${emailId}: ${error.message}`);
-            logger.warn(`Failed to move email ${emailId}`, 'IMAPService', error);
+          }
+        } catch (batchError: any) {
+          // Batch failed — fall back to per-email
+          logger.warn(`Batch move failed for folder ${sourceFolder}, falling back to per-email`, 'IMAPService', batchError);
+          for (const emailId of ids) {
+            try {
+              await this.client.messageMove(emailId, targetFolder, { uid: true });
+              const cachedForBulkMove = this.getCacheEntry(emailId);
+              if (cachedForBulkMove) cachedForBulkMove.folder = targetFolder;
+              results.success++;
+            } catch (error: any) {
+              results.failed++;
+              results.errors.push(`Failed to move email ${emailId}: ${error.message}`);
+              logger.warn(`Failed to move email ${emailId}`, 'IMAPService', error);
+            }
           }
         }
       } finally {
@@ -1045,12 +1475,16 @@ export class SimpleIMAPService {
       }
     }
 
+    tags.successCount = results.success;
+    tags.failCount = results.failed;
     logger.info(`Bulk move completed: ${results.success} succeeded, ${results.failed} failed`, 'IMAPService');
     return results;
+    }); // end tracer.span('imap.bulkMoveEmails')
   }
 
   async deleteEmail(emailId: string): Promise<boolean> {
     this.validateEmailId(emailId);
+    return tracer.span('imap.deleteEmail', { emailId }, async () => {
     logger.debug('Deleting email', 'IMAPService', { emailId });
 
     if (!this.client || !this.isConnected) {
@@ -1081,9 +1515,12 @@ export class SimpleIMAPService {
       logger.error('Failed to delete email', 'IMAPService', error);
       throw error;
     }
+    }); // end tracer.span('imap.deleteEmail')
   }
 
   async bulkDeleteEmails(emailIds: string[]): Promise<{ success: number; failed: number; errors: string[] }> {
+    const tags: SpanTags = { count: emailIds.length };
+    return tracer.span('imap.bulkDeleteEmails', tags, async () => {
     logger.debug('Bulk deleting emails', 'IMAPService', { count: emailIds.length });
 
     if (!this.client || !this.isConnected) {
@@ -1097,47 +1534,46 @@ export class SimpleIMAPService {
       errors: [] as string[]
     };
 
-    // Group emails by their folder for efficient bulk operations
-    const emailsByFolder = new Map<string, string[]>();
+    // Group emails by their folder (use cache for known folders; fall back to INBOX)
+    const emailsByFolder2 = new Map<string, string[]>();
 
-    // First, fetch all emails to determine their folders
     for (const emailId of emailIds) {
       try {
-        const email = await this.getEmailById(emailId);
-        if (!email) {
-          results.failed++;
-          results.errors.push(`Email ${emailId} not found`);
-          continue;
-        }
-
-        if (!emailsByFolder.has(email.folder)) {
-          emailsByFolder.set(email.folder, []);
-        }
-        emailsByFolder.get(email.folder)!.push(emailId);
+        this.validateEmailId(emailId);
+        const cached = this.getCacheEntry(emailId);
+        const folder = cached?.folder ?? 'INBOX';
+        if (!emailsByFolder2.has(folder)) emailsByFolder2.set(folder, []);
+        emailsByFolder2.get(folder)!.push(emailId);
       } catch (error: any) {
         results.failed++;
-        results.errors.push(`Error fetching email ${emailId}: ${error.message}`);
+        results.errors.push(`Invalid email ID ${emailId}: ${error.message}`);
       }
     }
 
-    // Now delete emails folder by folder
-    for (const [folder, ids] of emailsByFolder.entries()) {
+    // For each group, open the folder lock once and batch-delete all UIDs
+    for (const [folder, ids] of emailsByFolder2.entries()) {
       const lock = await this.client.getMailboxLock(folder);
-
       try {
-        // Delete each email in this folder
-        for (const emailId of ids) {
-          try {
-            await this.client.messageDelete(emailId, { uid: true });
-
-            // Remove from cache
+        const uidSet = ids.join(',');
+        try {
+          await this.client.messageDelete(uidSet, { uid: true });
+          for (const emailId of ids) {
             this.emailCache.delete(emailId);
-
             results.success++;
-          } catch (error: any) {
-            results.failed++;
-            results.errors.push(`Failed to delete email ${emailId}: ${error.message}`);
-            logger.warn(`Failed to delete email ${emailId}`, 'IMAPService', error);
+          }
+        } catch (batchError: any) {
+          // Batch failed — fall back to per-email
+          logger.warn(`Batch delete failed for folder ${folder}, falling back to per-email`, 'IMAPService', batchError);
+          for (const emailId of ids) {
+            try {
+              await this.client.messageDelete(emailId, { uid: true });
+              this.emailCache.delete(emailId);
+              results.success++;
+            } catch (error: any) {
+              results.failed++;
+              results.errors.push(`Failed to delete email ${emailId}: ${error.message}`);
+              logger.warn(`Failed to delete email ${emailId}`, 'IMAPService', error);
+            }
           }
         }
       } finally {
@@ -1145,8 +1581,11 @@ export class SimpleIMAPService {
       }
     }
 
+    tags.successCount = results.success;
+    tags.failCount = results.failed;
     logger.info(`Bulk delete completed: ${results.success} succeeded, ${results.failed} failed`, 'IMAPService');
     return results;
+    }); // end tracer.span('imap.bulkDeleteEmails')
   }
 
   /**
@@ -1154,6 +1593,7 @@ export class SimpleIMAPService {
    */
   async createFolder(folderName: string): Promise<boolean> {
     this.validateFolderName(folderName);
+    return tracer.span('imap.createFolder', { folderName }, async () => {
     if (!this.isConnected || !this.client) {
       throw new Error('IMAP client not connected');
     }
@@ -1177,6 +1617,7 @@ export class SimpleIMAPService {
       logger.error('Failed to create folder', 'IMAPService', error);
       throw error;
     }
+    }); // end tracer.span('imap.createFolder')
   }
 
   /**
@@ -1184,12 +1625,13 @@ export class SimpleIMAPService {
    */
   async deleteFolder(folderName: string): Promise<boolean> {
     this.validateFolderName(folderName);
+    return tracer.span('imap.deleteFolder', { folderName }, async () => {
     if (!this.isConnected || !this.client) {
       throw new Error('IMAP client not connected');
     }
 
     // Prevent deletion of system folders
-    const protectedFolders = ['INBOX', 'Sent', 'Drafts', 'Trash', 'Spam', 'Archive', 'All Mail'];
+    const protectedFolders = ['INBOX', 'Sent', 'Drafts', 'Trash', 'Spam', 'Archive', 'All Mail', 'Starred'];
     if (protectedFolders.some(f => folderName.toLowerCase() === f.toLowerCase())) {
       throw new Error(`Cannot delete protected folder: ${folderName}`);
     }
@@ -1214,6 +1656,7 @@ export class SimpleIMAPService {
       logger.error('Failed to delete folder', 'IMAPService', error);
       throw error;
     }
+    }); // end tracer.span('imap.deleteFolder')
   }
 
   /**
@@ -1222,12 +1665,13 @@ export class SimpleIMAPService {
   async renameFolder(oldName: string, newName: string): Promise<boolean> {
     this.validateFolderName(oldName);
     this.validateFolderName(newName);
+    return tracer.span('imap.renameFolder', { oldName, newName }, async () => {
     if (!this.isConnected || !this.client) {
       throw new Error('IMAP client not connected');
     }
 
     // Prevent renaming of system folders
-    const protectedFolders = ['INBOX', 'Sent', 'Drafts', 'Trash', 'Spam', 'Archive', 'All Mail'];
+    const protectedFolders = ['INBOX', 'Sent', 'Drafts', 'Trash', 'Spam', 'Archive', 'All Mail', 'Starred'];
     if (protectedFolders.some(f => oldName.toLowerCase() === f.toLowerCase())) {
       throw new Error(`Cannot rename protected folder: ${oldName}`);
     }
@@ -1252,19 +1696,127 @@ export class SimpleIMAPService {
       logger.error('Failed to rename folder', 'IMAPService', error);
       throw error;
     }
+    }); // end tracer.span('imap.renameFolder')
+  }
+
+  private idleClient: ImapFlow | null = null;
+  private idleActive: boolean = false;
+
+  /** Start a background IMAP IDLE connection on INBOX to receive push invalidations. */
+  async startIdle(): Promise<void> {
+    if (this.idleActive || !this.connectionConfig) return;
+    this.idleActive = true;
+
+    // Run in background — don't await
+    this.runIdleLoop().catch(err => {
+      logger.debug('IDLE loop exited', 'IMAPService', err);
+      this.idleActive = false;
+    });
+  }
+
+  private async runIdleLoop(): Promise<void> {
+    const cfg = this.connectionConfig;
+    if (!cfg) return;
+
+    const isLocalhost = cfg.host === 'localhost' || cfg.host === '127.0.0.1';
+    let tlsOptions: Record<string, unknown> | undefined;
+
+    if (isLocalhost) {
+      if (cfg.bridgeCertPath) {
+        try {
+          let certPath = cfg.bridgeCertPath;
+          try { if (statSync(certPath).isDirectory()) certPath = pathJoin(certPath, 'cert.pem'); } catch {}
+          const cert = readFileSync(certPath);
+          tlsOptions = {
+            ca: [cert],
+            minVersion: 'TLSv1.2',
+            checkServerIdentity: () => undefined,
+          };
+        } catch {
+          tlsOptions = { rejectUnauthorized: false, minVersion: 'TLSv1.2' };
+        }
+      } else {
+        tlsOptions = { rejectUnauthorized: false, minVersion: 'TLSv1.2' };
+      }
+    } else {
+      tlsOptions = { minVersion: 'TLSv1.2' };
+    }
+
+    while (this.idleActive) {
+      try {
+        this.idleClient = new ImapFlow({
+          host: cfg.host,
+          port: cfg.port,
+          secure: cfg.secure !== undefined ? cfg.secure : !isLocalhost,
+          auth: cfg.username && cfg.password ? { user: cfg.username, pass: cfg.password } : undefined,
+          logger: false,
+          tls: tlsOptions,
+          connectionTimeout: 30000,
+        });
+
+        await this.idleClient.connect();
+        const lock = await this.idleClient.getMailboxLock('INBOX');
+
+        try {
+          logger.debug('IDLE: watching INBOX for changes', 'IMAPService');
+
+          // Listen for new messages (EXISTS) or deletions (EXPUNGE)
+          this.idleClient.on('exists', (data: any) => {
+            logger.debug('IDLE: new messages detected, invalidating cache', 'IMAPService', { count: data.count });
+            // Invalidate only INBOX email cache entries (not all folders)
+            for (const [id, entry] of this.emailCache) {
+              if (entry.email.folder === 'INBOX') this.emailCache.delete(id);
+            }
+          });
+
+          this.idleClient.on('expunge', () => {
+            logger.debug('IDLE: expunge detected, invalidating INBOX cache', 'IMAPService');
+            for (const [id, entry] of this.emailCache) {
+              if (entry.email.folder === 'INBOX') this.emailCache.delete(id);
+            }
+          });
+
+          // Start IDLE — this blocks until the server sends a response or timeout
+          await this.idleClient.idle();
+        } finally {
+          lock.release();
+        }
+      } catch (err) {
+        logger.debug('IDLE connection dropped, will retry in 30s', 'IMAPService', err);
+      }
+
+      if (this.idleActive) {
+        // Wait 30s before reconnecting
+        await new Promise(resolve => setTimeout(resolve, 30_000));
+      }
+    }
+
+    try { this.idleClient?.logout().catch(() => {}); } catch {}
+    this.idleClient = null;
+  }
+
+  /** Stop the background IDLE connection. */
+  stopIdle(): void {
+    this.idleActive = false;
+    this.idleClient?.logout().catch(() => {});
+    this.idleClient = null;
   }
 
   /** Clear all in-memory email and folder caches, forcing fresh IMAP fetches on next access. */
   clearCache(): void {
+    tracer.spanSync('imap.clearCache', {}, () => {
     this.emailCache.clear();
     this.folderCache.clear();
     logger.info('IMAP cache cleared', 'IMAPService');
+    }); // end tracer.spanSync('imap.clearCache')
   }
 
   /** Securely wipe all cached data and stored credentials from memory. */
   wipeCache(): void {
+    tracer.spanSync('imap.wipeCache', {}, () => {
     // Overwrite email bodies/subjects before clearing
-    for (const [, email] of this.emailCache) {
+    for (const [, entry] of this.emailCache) {
+      const email = entry.email;
       if (email.body) email.body = "";
       if (email.subject) email.subject = "";
       if (email.from) email.from = "";
@@ -1287,5 +1839,6 @@ export class SimpleIMAPService {
       this.connectionConfig = null;
     }
     logger.info("IMAP cache and credentials wiped", "IMAPService");
+    }); // end tracer.spanSync('imap.wipeCache')
   }
 }

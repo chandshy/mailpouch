@@ -9,7 +9,7 @@ export const ALL_TOOLS = [
   // Sending
   "send_email", "reply_to_email", "forward_email", "send_test_email",
   // Drafts & scheduling
-  "save_draft", "schedule_email", "list_scheduled_emails", "cancel_scheduled_email",
+  "save_draft", "schedule_email", "list_scheduled_emails", "cancel_scheduled_email", "list_proton_scheduled",
   // Reading
   "get_emails", "get_email_by_id", "search_emails", "get_unread_count",
   "list_labels", "get_emails_by_label", "download_attachment",
@@ -51,7 +51,7 @@ export const TOOL_CATEGORIES: Record<string, ToolCategory> = {
   drafts: {
     label: "Drafts & Scheduling",
     description: "Save drafts and schedule emails for future delivery",
-    tools: ["save_draft", "schedule_email", "list_scheduled_emails", "cancel_scheduled_email"],
+    tools: ["save_draft", "schedule_email", "list_scheduled_emails", "cancel_scheduled_email", "list_proton_scheduled"],
     risk: "moderate",
   },
   reading: {
@@ -129,8 +129,47 @@ export interface ConnectionSettings {
   smtpToken: string;
   /** Path to exported Proton Bridge TLS certificate */
   bridgeCertPath: string;
+  /**
+   * TLS mode for SMTP/IMAP connections.
+   * 'starttls' (default) — use STARTTLS upgrade; correct for Proton Bridge.
+   * 'ssl'               — implicit TLS (ports 465/993); only for non-Bridge setups.
+   */
+  tlsMode?: 'starttls' | 'ssl';
+  /** Automatically launch Proton Bridge if it is not reachable on MCP server start. */
+  autoStartBridge?: boolean;
   debug: boolean;
 }
+
+// ─── Response Limits ──────────────────────────────────────────────────────────
+
+/**
+ * Configurable size guards for MCP tool responses.
+ *
+ * Claude's MCP client enforces a hard 1 MB limit on tool results and silently
+ * drops oversized payloads.  These limits let the server truncate or reject
+ * responses *before* they hit that wall, and give operators a knob to tune
+ * the trade-off between completeness and reliability.
+ */
+export interface ResponseLimits {
+  /** Hard ceiling in bytes for any single tool response (default 900 KB — 100 KB margin below Claude's 1 MB). */
+  maxResponseBytes: number;
+  /** Max email body length (chars) returned by get_email_by_id before truncation (default 500 000). */
+  maxEmailBodyChars: number;
+  /** Max email summaries returned by get_emails / search_emails per call (default 50). */
+  maxEmailListResults: number;
+  /** Max base64-encoded attachment size in bytes for download_attachment (default 600 000). */
+  maxAttachmentBytes: number;
+  /** Log a warning when a response exceeds 80 % of maxResponseBytes (default true). */
+  warnOnLargeResponse: boolean;
+}
+
+export const DEFAULT_RESPONSE_LIMITS: ResponseLimits = {
+  maxResponseBytes:    900 * 1024,   // 900 KB
+  maxEmailBodyChars:   500_000,
+  maxEmailListResults: 50,
+  maxAttachmentBytes:  600_000,      // ~440 KB raw → ~600 KB base64
+  warnOnLargeResponse: true,
+};
 
 // ─── Top-Level Config ──────────────────────────────────────────────────────────
 
@@ -142,4 +181,8 @@ export interface ServerConfig {
   permissions: ServerPermissions;
   /** Where credentials are stored: "keychain" (OS keychain) or "config" (JSON file). */
   credentialStorage?: "keychain" | "config";
+  /** Tuneable response-size guards — see ResponseLimits. */
+  responseLimits?: ResponseLimits;
+  /** Port the settings UI server listens on (default 8765). */
+  settingsPort?: number;
 }

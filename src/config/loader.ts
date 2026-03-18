@@ -17,10 +17,12 @@ import {
   TOOL_CATEGORIES,
   CONFIG_VERSION,
   PERMISSION_PRESETS,
+  DEFAULT_RESPONSE_LIMITS,
   type ServerConfig,
   type ToolPermission,
   type PermissionPreset,
   type ToolName,
+  type ResponseLimits,
 } from "./schema.js";
 import {
   isKeychainAvailable,
@@ -28,6 +30,13 @@ import {
   saveCredentials as saveKeychainCredentials,
   migrateFromConfig,
 } from "../security/keychain.js";
+import { tracer } from "../utils/tracer.js";
+
+/** Clamp a numeric value to [min, max], falling back to min for non-finite input. */
+function clamp(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) return min;
+  return Math.max(min, Math.min(max, Math.round(value)));
+}
 
 // ─── Config path ───────────────────────────────────────────────────────────────
 
@@ -87,6 +96,10 @@ export function buildPermissions(preset: PermissionPreset): ServerConfig["permis
     for (const tool of TOOL_CATEGORIES.actions.tools) {
       if (tool.startsWith("bulk_")) tools[tool].rateLimit = 10;
     }
+    // Rate limits for read-heavy tools to prevent excessive IMAP load
+    tools["get_emails"].rateLimit = 60;
+    tools["search_emails"].rateLimit = 30;
+    tools["get_email_by_id"].rateLimit = 200;
   } else if (preset === "send_only") {
     const allowed = new Set<string>([
       ...TOOL_CATEGORIES.sending.tools,
@@ -121,6 +134,7 @@ export function defaultConfig(): ServerConfig {
     // Safe default: read-only. Users must explicitly grant write/send/delete
     // access via the settings UI (npm run settings).
     permissions: buildPermissions("read_only"),
+    responseLimits: { ...DEFAULT_RESPONSE_LIMITS },
   };
 }
 
@@ -131,8 +145,13 @@ export function configExists(): boolean {
 }
 
 export function loadConfig(): ServerConfig | null {
+  const tags: { found?: boolean } = {};
+  return tracer.spanSync('config.load', tags, () => {
   const path = getConfigPath();
-  if (!existsSync(path)) return null;
+  if (!existsSync(path)) {
+    tags.found = false;
+    return null;
+  }
   try {
     const raw = readFileSync(path, "utf-8");
     const parsed = JSON.parse(raw) as Partial<ServerConfig>;
@@ -160,7 +179,17 @@ export function loadConfig(): ServerConfig | null {
       }
     }
 
-    return {
+    // Merge and clamp response limits — prevents invalid values from disk.
+    const mergedLimits: ResponseLimits = {
+      ...base.responseLimits!,
+      ...(parsed.responseLimits ?? {}),
+    };
+    mergedLimits.maxResponseBytes    = clamp(mergedLimits.maxResponseBytes,    100_000, 1_048_576);
+    mergedLimits.maxEmailBodyChars   = clamp(mergedLimits.maxEmailBodyChars,   1_000,   10_000_000);
+    mergedLimits.maxEmailListResults = clamp(mergedLimits.maxEmailListResults, 1,       200);
+    mergedLimits.maxAttachmentBytes  = clamp(mergedLimits.maxAttachmentBytes,  0,       1_048_576);
+
+    const result: ServerConfig = {
       configVersion: parsed.configVersion ?? base.configVersion,
       connection: { ...base.connection, ...(parsed.connection ?? {}) },
       permissions: {
@@ -169,13 +198,19 @@ export function loadConfig(): ServerConfig | null {
         preset: safePreset,
         tools: { ...base.permissions.tools, ...filteredTools },
       },
+      responseLimits: mergedLimits,
     };
+    tags.found = true;
+    return result;
   } catch {
+    tags.found = false;
     return null;
   }
+  }); // end tracer.spanSync('config.load')
 }
 
 export function saveConfig(config: ServerConfig): void {
+  tracer.spanSync('config.save', {}, () => {
   const dest    = getConfigPath();
   const payload = JSON.stringify(config, null, 2);
   // Atomic write: write to a temp file then rename into place.
@@ -186,6 +221,7 @@ export function saveConfig(config: ServerConfig): void {
   const tmp = join(tmpdir(), `protonmcp-cfg-${randomBytes(8).toString("hex")}.json.tmp`);
   writeFileSync(tmp, payload, { encoding: "utf-8", mode: 0o600 });
   renameSync(tmp, dest);
+  }); // end tracer.spanSync('config.save')
 }
 
 // ─── Keychain-aware credential helpers ──────────────────────────────────────
@@ -199,23 +235,34 @@ export async function loadCredentialsFromKeychain(): Promise<{
   smtpToken: string;
   storage: "keychain" | "config";
 } | null> {
+  const tags: { hasPassword?: boolean; hasSmtpToken?: boolean; storage?: string } = {};
+  return tracer.span('config.loadKeychain', tags, async () => {
   // Try keychain first
   const keychainCreds = await loadKeychainCredentials();
   if (keychainCreds && (keychainCreds.password || keychainCreds.smtpToken)) {
-    return { ...keychainCreds, storage: "keychain" };
+    tags.hasPassword = !!keychainCreds.password;
+    tags.hasSmtpToken = !!keychainCreds.smtpToken;
+    tags.storage = "keychain";
+    return { ...keychainCreds, storage: "keychain" as const };
   }
 
   // Fall back to config file
   const config = loadConfig();
   if (config && (config.connection.password || config.connection.smtpToken)) {
+    tags.hasPassword = !!config.connection.password;
+    tags.hasSmtpToken = !!config.connection.smtpToken;
+    tags.storage = "config";
     return {
       password: config.connection.password,
       smtpToken: config.connection.smtpToken,
-      storage: "config",
+      storage: "config" as const,
     };
   }
 
+  tags.hasPassword = false;
+  tags.hasSmtpToken = false;
   return null;
+  }); // end tracer.span('config.loadKeychain')
 }
 
 /**
@@ -248,7 +295,15 @@ export async function saveConfigWithCredentials(config: ServerConfig): Promise<"
  * Idempotent — safe to call on every startup.
  */
 export async function migrateCredentials(): Promise<boolean> {
+  const tags: { migrated?: boolean } = {};
+  return tracer.span('config.migrateCredentials', tags, async () => {
   const config = loadConfig();
-  if (!config) return false;
-  return migrateFromConfig(config, saveConfig);
+  if (!config) {
+    tags.migrated = false;
+    return false;
+  }
+  const migrated = await migrateFromConfig(config, saveConfig);
+  tags.migrated = migrated;
+  return migrated;
+  }); // end tracer.span('config.migrateCredentials')
 }

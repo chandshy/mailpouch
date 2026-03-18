@@ -28,10 +28,9 @@ export interface ProtonMailConfig {
   smtp: SMTPConfig;
   imap: IMAPConfig;
   debug?: boolean;
-  cacheEnabled?: boolean;
-  analyticsEnabled?: boolean;
   autoSync?: boolean;
   syncInterval?: number;
+  autoStartBridge?: boolean;
 }
 
 export interface EmailMessage {
@@ -53,6 +52,17 @@ export interface EmailMessage {
   headers?: Record<string, string | string[]>;
   inReplyTo?: string;
   references?: string[];
+
+  // IMAP flags
+  isAnswered?: boolean;      // \Answered flag — has been replied to
+  isForwarded?: boolean;     // \Forward flag (Bridge custom flag) — has been forwarded
+
+  // MIME-level encryption/signature detection (parsed from content-type)
+  isSignedPGP?: boolean;     // multipart/signed with protocol="application/pgp-signature"
+  isEncryptedPGP?: boolean;  // multipart/encrypted with protocol="application/pgp-encrypted"
+
+  // Proton-specific
+  protonId?: string;         // X-Pm-Internal-Id header — stable Proton message ID (survives folder moves)
 }
 
 export interface EmailAttachment {
@@ -69,6 +79,8 @@ export interface EmailFolder {
   totalMessages: number;
   unreadMessages: number;
   specialUse?: string;
+  /** Proton Bridge folder classification */
+  folderType?: 'system' | 'user-folder' | 'label';
 }
 
 export interface EmailStats {
@@ -149,6 +161,7 @@ export interface SendEmailOptions {
 }
 
 export interface SearchEmailOptions {
+  /** @deprecated Use body or text for full-text search instead. */
   query?: string;
   folder?: string;
   /** Search across multiple folders. Use ["*"] to search all folders (capped at 20). */
@@ -162,6 +175,26 @@ export interface SearchEmailOptions {
   dateFrom?: string;
   dateTo?: string;
   limit?: number;
+
+  // Full-text search (Bridge does decrypt messages locally, BODY search works)
+  body?: string;        // IMAP BODY <string> — searches message body content
+  text?: string;        // IMAP TEXT <string> — searches headers + body
+
+  // Additional header filters
+  bcc?: string;         // IMAP BCC <string>
+  header?: { field: string; value: string };  // IMAP HEADER <field> <value>
+
+  // Flag filters
+  answered?: boolean;   // IMAP ANSWERED / UNANSWERED
+  isDraft?: boolean;    // IMAP DRAFT / UNDRAFT
+
+  // Size filters
+  larger?: number;      // IMAP LARGER <n> (bytes)
+  smaller?: number;     // IMAP SMALLER <n> (bytes)
+
+  // Sent-date filters (Date: header, not internal date)
+  sentBefore?: Date;    // IMAP SENTBEFORE <date>
+  sentSince?: Date;     // IMAP SENTSINCE <date>
 }
 
 /** Options for saving an email as a draft (all fields optional — drafts can be incomplete). */
