@@ -1,8 +1,9 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import {
   parseEmails,
   formatDate,
+  parseDate,
   truncate,
   isValidEmail,
   extractEmailAddress,
@@ -15,6 +16,9 @@ import {
   validateTargetFolder,
   requireNumericEmailId,
   validateAttachments,
+  generateId,
+  retry,
+  sleep,
 } from './helpers.js';
 
 describe('helpers', () => {
@@ -95,6 +99,24 @@ describe('helpers', () => {
 
     it('should reject email with spaces', () => {
       expect(isValidEmail('test @example.com')).toBe(false);
+    });
+
+    it('rejects email exceeding 320 total characters (RFC 5321)', () => {
+      // 64 chars local + @ + 253 chars domain = 318, +3 more = 321 total
+      const local = 'a'.repeat(64);
+      const domain = 'b'.repeat(253) + '.com'; // 257 chars (still > 253)
+      expect(isValidEmail(`${local}@${'x'.repeat(254)}.com`)).toBe(false);
+    });
+
+    it('rejects email with domain exceeding 253 characters (RFC 5321)', () => {
+      const local = 'user';
+      const domain = 'x'.repeat(250) + '.com'; // 254 chars
+      expect(isValidEmail(`${local}@${domain}`)).toBe(false);
+    });
+
+    it('rejects email with control characters', () => {
+      expect(isValidEmail('test\x00@example.com')).toBe(false);
+      expect(isValidEmail('test\n@example.com')).toBe(false);
     });
   });
 
@@ -288,6 +310,14 @@ describe('helpers', () => {
 
     it('returns null for a targetFolder exactly 1000 characters long', () => {
       expect(validateTargetFolder('c'.repeat(1000))).toBeNull();
+    });
+
+    it('returns an error when targetFolder is a non-string (e.g. number)', () => {
+      expect(validateTargetFolder(42)).toMatch(/must be a string/i);
+    });
+
+    it('returns an error when targetFolder is an object', () => {
+      expect(validateTargetFolder({ folder: 'INBOX' })).toMatch(/must be a string/i);
     });
   });
 
@@ -3522,6 +3552,104 @@ describe('helpers', () => {
 
     it('array triggers guard', () => {
       expect(labelGuardError(["Work"])).toBe("invalid label");
+    });
+  });
+
+  // ─── parseDate ──────────────────────────────────────────────────────────────
+
+  describe('parseDate', () => {
+    it('parses a valid ISO date string', () => {
+      const d = parseDate('2024-01-15T10:30:00.000Z');
+      expect(d).toBeInstanceOf(Date);
+      expect(d.toISOString()).toBe('2024-01-15T10:30:00.000Z');
+    });
+
+    it('parses a date-only string', () => {
+      const d = parseDate('2024-06-01');
+      expect(d).toBeInstanceOf(Date);
+      expect(isNaN(d.getTime())).toBe(false);
+    });
+
+    it('returns an invalid Date for a bad string (consistent with new Date())', () => {
+      const d = parseDate('not-a-date');
+      expect(isNaN(d.getTime())).toBe(true);
+    });
+  });
+
+  // ─── generateId ─────────────────────────────────────────────────────────────
+
+  describe('generateId', () => {
+    it('returns a non-empty string', () => {
+      const id = generateId();
+      expect(typeof id).toBe('string');
+      expect(id.length).toBeGreaterThan(0);
+    });
+
+    it('returns a UUID v4 format string', () => {
+      const id = generateId();
+      // UUID v4 pattern: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx
+      expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+    });
+
+    it('generates unique ids', () => {
+      const ids = new Set(Array.from({ length: 20 }, generateId));
+      expect(ids.size).toBe(20);
+    });
+  });
+
+  // ─── sleep ──────────────────────────────────────────────────────────────────
+
+  describe('sleep', () => {
+    it('resolves to undefined after the specified delay (0ms)', async () => {
+      await expect(sleep(0)).resolves.toBeUndefined();
+    });
+
+    it('returns a Promise', () => {
+      const p = sleep(0);
+      expect(p).toBeInstanceOf(Promise);
+      // Consume the promise to avoid unhandled rejection warnings
+      return p;
+    });
+  });
+
+  // ─── retry ──────────────────────────────────────────────────────────────────
+
+  describe('retry', () => {
+    it('returns the result on first success', async () => {
+      const fn = vi.fn().mockResolvedValue('ok');
+      const result = await retry(fn, 3, 0);
+      expect(result).toBe('ok');
+      expect(fn).toHaveBeenCalledTimes(1);
+    });
+
+    it('retries on failure and succeeds on second attempt (zero delay)', async () => {
+      const fn = vi.fn()
+        .mockRejectedValueOnce(new Error('fail1'))
+        .mockResolvedValue('ok2');
+      const result = await retry(fn, 3, 0);
+      expect(result).toBe('ok2');
+      expect(fn).toHaveBeenCalledTimes(2);
+    });
+
+    it('throws the last error after all retries exhausted (zero delay)', async () => {
+      const fn = vi.fn().mockRejectedValue(new Error('always-fails'));
+      await expect(retry(fn, 3, 0)).rejects.toThrow('always-fails');
+      expect(fn).toHaveBeenCalledTimes(3);
+    });
+
+    it('does not sleep after the final failure', async () => {
+      // With maxRetries=2 and delayMs=0 there is no sleep on last attempt
+      const fn = vi.fn().mockRejectedValue(new Error('x'));
+      await expect(retry(fn, 2, 0)).rejects.toThrow('x');
+      expect(fn).toHaveBeenCalledTimes(2);
+    });
+
+    it('calls fn only once when it succeeds immediately', async () => {
+      let calls = 0;
+      const fn = async () => { calls++; return 'done'; };
+      const result = await retry(fn, 5, 0);
+      expect(result).toBe('done');
+      expect(calls).toBe(1);
     });
   });
 });
