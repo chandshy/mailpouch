@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — Autonomous Improvement Cycles #1–#15 (2026-03-18)
+## [Unreleased] — Autonomous Improvement Cycles #1–#19 (2026-03-18)
 
 ### Security
 
@@ -38,7 +38,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Test suite** — 416 tests pass (was 281 before Cycle #1); +135 tests added across Cycles #1–#15 covering all new validation paths, helpers, and security guards
+- **Test suite** — 416 tests pass (was 212 before Cycle #1); +204 tests added across Cycles #1–#19 covering all new validation paths, helpers, and security guards
+
+### Documentation
+
+- **README** — corrected tool count from 45 to 47 in tagline and Full Access preset description (Cycle #16)
+- **README MCP Prompts** — expanded from 3-item list to full 5-row table covering all registered prompts: `compose_reply`, `thread_summary`, `find_subscriptions`, `triage_inbox`, `daily_briefing` (Cycle #17)
+- **Settings UI** — corrected stale "40 tools" to "47 tools" in two locations within the embedded HTML (preset comparison table and setup wizard card) (Cycle #17)
+- **`get_connection_status` outputSchema** — added 6 missing fields: `smtp.lastCheck`, `smtp.insecureTls`, `smtp.error`, `imap.insecureTls`, `settingsConfigured`, `settingsConfigPath` (Cycle #18)
+- **`list_scheduled_emails` outputSchema** — added missing `retryCount` field to item properties (Cycle #18)
+- **`get_email_analytics` outputSchema** — expanded 4 bare `{type:"object"}` entries (`topSenders`, `topRecipients`, `peakActivityHours`, `attachmentStats`) to full typed schemas matching the `EmailAnalytics` interface (Cycle #19)
+- **`get_contacts` outputSchema** — added 4 missing `Contact` interface fields: `name`, `firstInteraction`, `averageResponseTime`, `isFavorite` (Cycle #19)
 
 ## [2.1.0] - 2026-03-17
 
