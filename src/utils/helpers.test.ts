@@ -287,4 +287,106 @@ describe('helpers', () => {
       expect(validateTargetFolder('c'.repeat(1000))).toBeNull();
     });
   });
+
+  // ── Handler-level validation paths (Cycle #3) ─────────────────────────────
+  // The handlers move_email, bulk_move_emails, and send_test_email each call
+  // one of the helpers below at the start of their execution.  Since index.ts
+  // cannot be imported in tests (it reads process.env and calls process.exit),
+  // these test cases exercise the exact helper call + expected error message
+  // for each of the three new handler guard paths added in Cycle #3.
+
+  describe('move_email handler validation (validateTargetFolder)', () => {
+    // mirrors: const mvValidErr = validateTargetFolder(args.targetFolder);
+    //          if (mvValidErr) throw new McpError(ErrorCode.InvalidParams, mvValidErr);
+
+    it('returns null (no error) for a valid targetFolder like INBOX', () => {
+      expect(validateTargetFolder('INBOX')).toBeNull();
+    });
+
+    it('returns null for a path with slashes like Folders/Archive', () => {
+      expect(validateTargetFolder('Folders/Archive')).toBeNull();
+    });
+
+    it('returns an error for a traversal payload like ../../etc', () => {
+      const err = validateTargetFolder('../../etc');
+      expect(err).not.toBeNull();
+      expect(err).toMatch(/invalid characters/i);
+    });
+
+    it('returns an error for a null-byte injection in targetFolder', () => {
+      const err = validateTargetFolder('INBOX\x00payload');
+      expect(err).not.toBeNull();
+      expect(err).toMatch(/invalid characters/i);
+    });
+
+    it('returns an error for a targetFolder that is too long', () => {
+      const err = validateTargetFolder('x'.repeat(1001));
+      expect(err).not.toBeNull();
+      expect(err).toMatch(/exceeds maximum length/i);
+    });
+
+    it('returns null when targetFolder is omitted (undefined) — handler uses its own default', () => {
+      // move_email always provides args.targetFolder as a string; bulk_move_emails
+      // also always has targetFolder from its schema.  This guard tests the helper
+      // contract, not the handler schema.
+      expect(validateTargetFolder(undefined)).toBeNull();
+    });
+  });
+
+  describe('bulk_move_emails handler validation (validateTargetFolder)', () => {
+    // mirrors: const bmValidErr = validateTargetFolder(args.targetFolder);
+    //          if (bmValidErr) throw new McpError(ErrorCode.InvalidParams, bmValidErr);
+    // Note: this handler fails fast BEFORE iterating emailIds, so a bad targetFolder
+    // means NO emails are moved.
+
+    it('returns null for a valid destination folder', () => {
+      expect(validateTargetFolder('Spam')).toBeNull();
+    });
+
+    it('returns an error for a path traversal in targetFolder', () => {
+      const err = validateTargetFolder('Folders/../INBOX');
+      expect(err).not.toBeNull();
+      expect(err).toMatch(/invalid characters/i);
+    });
+
+    it('returns an error for control characters in targetFolder', () => {
+      const err = validateTargetFolder('INBOX\x1f');
+      expect(err).not.toBeNull();
+      expect(err).toMatch(/invalid characters/i);
+    });
+  });
+
+  describe('send_test_email handler validation (isValidEmail)', () => {
+    // mirrors: if (!isValidEmail(args.to as string))
+    //            throw new McpError(ErrorCode.InvalidParams, `Invalid recipient email address: ${args.to}`);
+
+    it('returns true for a valid recipient address', () => {
+      expect(isValidEmail('user@example.com')).toBe(true);
+    });
+
+    it('returns false for an address missing the domain', () => {
+      expect(isValidEmail('user@')).toBe(false);
+    });
+
+    it('returns false for an address missing the @ symbol', () => {
+      expect(isValidEmail('notanemail')).toBe(false);
+    });
+
+    it('returns false for an address with a null byte', () => {
+      expect(isValidEmail('user\x00@example.com')).toBe(false);
+    });
+
+    it('returns false for an address with a newline (header injection attempt)', () => {
+      expect(isValidEmail('user\n@example.com')).toBe(false);
+    });
+
+    it('returns false for an empty string', () => {
+      expect(isValidEmail('')).toBe(false);
+    });
+
+    it('returns false for a local part exceeding 64 characters', () => {
+      const longLocal = 'a'.repeat(65);
+      expect(isValidEmail(`${longLocal}@example.com`)).toBe(false);
+    });
+  });
 });
