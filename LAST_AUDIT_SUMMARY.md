@@ -1,7 +1,19 @@
 # Final Security & Quality Audit Report
 ## Codebase: protonmail-mcp-server
 ## Date: 2026-03-18
-## Cycles completed: 35
+## Cycles completed: 36
+
+### Cycle #36 Addendum
+
+Cycle #36 identified and resolved three quality gaps:
+
+1. **`reply_to_email` `replyAll` boolean type guard** — `if (args.replyAll)` evaluated truthiness with no `typeof` check. A non-boolean truthy value (e.g. `"true"`, `1`) would silently trigger reply-all mode and include all original CC recipients without any error. Added `if (args.replyAll !== undefined && typeof args.replyAll !== "boolean") throw McpError(InvalidParams)`, consistent with all other boolean field guards in the codebase.
+2. **`search_emails` `dateFrom`/`dateTo` string type guards** — Both date filter fields used `args.dateFrom as string` with no `typeof` check. A Date object, number, or other non-string truthy value would be silently cast and forwarded to imapflow as an unparseable string (e.g. `"[object Date]"`), returning zero results with no error. Added `typeof !== "string"` guards for both, consistent with the `from`/`to`/`subject` string guards in the same handler (Cycle #35).
+3. **`get_emails_by_label` / `move_to_label` / `bulk_move_to_label` `label` string type guard** — All three handlers cast `args.label as string` with no `typeof` check before calling `validateLabelName()`. A number or object value produces an opaque validation message rather than a clear `McpError(InvalidParams)`. Added `!args.label || typeof args.label !== "string"` guard in all three handlers, consistent with the existing required-string guard pattern throughout the codebase.
+
+No security findings beyond the above. Build clean. 844/844 tests pass (+27 over Cycle #35 baseline of 817).
+
+---
 
 ### Cycle #35 Addendum
 

@@ -4,6 +4,35 @@ This file records every autonomous improvement cycle run on this codebase.
 
 ---
 
+## Cycle #36 — replyAll boolean guard, dateFrom/dateTo string guards, label string guards
+**Timestamp:** 2026-03-18
+**Branch:** main
+
+### Audit Highlights
+
+**Build & Tests (pre-work):** Clean build, 817/817 tests passing.
+
+**New Findings (all corrected this cycle):**
+
+1. **`reply_to_email` — `replyAll` missing boolean type guard** — `if (args.replyAll)` evaluates truthiness with no `typeof` check. A caller supplying `replyAll: "true"` or `replyAll: 1` would pass the if-block silently, triggering reply-all mode and including all original CC recipients without any error to the caller. Added `if (args.replyAll !== undefined && typeof args.replyAll !== "boolean") throw new McpError(ErrorCode.InvalidParams, "'replyAll' must be a boolean when provided.")`, consistent with the `isHtml`, `isRead`, `isStarred`, and `hasAttachment` boolean guards added in prior cycles.
+
+2. **`search_emails` — `dateFrom`/`dateTo` missing string type guards** — Both date filter parameters used `args.dateFrom as string` / `args.dateTo as string` with no runtime `typeof` check. A caller supplying a `Date` object (truthy, non-string) would be silently cast, producing strings like `"[object Date]"` forwarded to imapflow, which would return zero results without surfacing any error to the caller. A number (Unix timestamp in ms) would similarly produce a numeric string that imapflow cannot parse as a date. Added `if (args.dateFrom !== undefined && typeof args.dateFrom !== "string") throw McpError(InvalidParams)` and equivalent guard for `dateTo`, consistent with the string type guards for `from`, `to`, and `subject` in the same handler (Cycle #35).
+
+3. **`get_emails_by_label` / `move_to_label` / `bulk_move_to_label` — `label` missing string type guard** — All three handlers used `args.label as string` with no `typeof` check before calling `validateLabelName()`. A caller supplying a number (e.g. `42`) or object (e.g. `{ name: "Work" }`) would be silently cast to `"42"` or `"[object Object]"` and forwarded to `validateLabelName()`, which would return an opaque validation failure message (too-long, control-char, etc.) rather than a clear type error. Added `if (!args.label || typeof args.label !== "string") throw McpError(InvalidParams, "'label' is required and must be a string.")` in all three handlers, consistent with the existing pattern for required string parameters throughout the codebase.
+
+### Changes
+
+- `src/index.ts`: Added `replyAll` boolean type guard in `reply_to_email` (6 lines + comment). Added `dateFrom` and `dateTo` string type guards in `search_emails` (9 lines + comment). Added `label` string type guard in `get_emails_by_label` (5 lines + comment). Added `label` string type guard in `move_to_label` (5 lines + comment). Added `label` string type guard in `bulk_move_to_label` (5 lines + comment).
+- `src/utils/helpers.test.ts`: Added 27 new tests: `replyAll` boolean type guard (9 tests), `dateFrom`/`dateTo` string type guard (9 tests sharing a single mirror function), `label` string type guard for all three handlers (9 tests sharing a single mirror function).
+
+### Test Results
+
+**Before:** 817 tests passing
+**After:** 844 tests passing (+27)
+**Build:** Clean (0 TypeScript errors)
+
+---
+
 ## Cycle #35 — search_emails boolean/string type guards, save_draft inReplyTo+references guards
 **Timestamp:** 2026-03-18
 **Branch:** main

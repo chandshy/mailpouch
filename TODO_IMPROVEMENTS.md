@@ -349,6 +349,19 @@ The `LogEntry` interface has an optional `data?: any` field carrying sanitized/r
 ### [DONE - Cycle 32] `list_labels` — `(f: any)` cast in array filter
 The `list_labels` filter used `(f: any)` with optional chaining `f.path?.startsWith()`. Since `getFolders()` returns `EmailFolder[]` and `path` is non-optional, the cast was spurious. Replaced with `(f: EmailFolder)` and direct `f.path.startsWith()`. Added `EmailFolder` to the import line.
 
+## NEW — Cycle #36 Findings (all completed in Cycle #36)
+
+### [DONE - Cycle 36] `reply_to_email` — `replyAll` missing boolean type guard
+`if (args.replyAll)` evaluates truthiness with no typeof check. A non-boolean truthy value (e.g. `"true"`, `1`) would silently trigger reply-all mode and include all original CC recipients without any caller error. Added `typeof !== "boolean"` guard consistent with all other boolean field guards in the codebase.
+
+### [DONE - Cycle 36] `search_emails` — `dateFrom`/`dateTo` missing string type guards
+Both date filter parameters used `args.dateFrom as string` with no typeof check. A Date object or number would be silently cast to an unparseable string and forwarded to imapflow, returning zero results with no error. Added `typeof !== "string"` guards for both, consistent with the `from`/`to`/`subject` string guards in the same handler (Cycle #35).
+
+### [DONE - Cycle 36] `get_emails_by_label` / `move_to_label` / `bulk_move_to_label` — `label` missing string type guard
+All three handlers cast `args.label as string` with no typeof check before calling `validateLabelName()`. A non-string value (number, object) produces an opaque validation failure message rather than a clear type error. Added `!args.label || typeof args.label !== "string"` guard in all three handlers.
+
+---
+
 ## NEW — Cycle #35 Findings (all completed in Cycle #35)
 
 ### [DONE - Cycle 35] `search_emails` `from`/`to`/`subject` — string type guards missing before length checks
