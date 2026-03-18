@@ -3160,7 +3160,11 @@ Structure the briefing as:
     }
 
     case "find_subscriptions": {
-      const folder = (args.folder as string) || "INBOX";
+      const rawFsFolder = (args.folder as string) || "INBOX";
+      // Validate before embedding in prompt text to prevent prompt injection.
+      const fsFolderErr = validateTargetFolder(rawFsFolder);
+      if (fsFolderErr) throw new McpError(ErrorCode.InvalidParams, fsFolderErr);
+      const folder = rawFsFolder;
       let emails: EmailMessage[] = [];
       try {
         emails = await imapService.getEmails(folder, 100);
