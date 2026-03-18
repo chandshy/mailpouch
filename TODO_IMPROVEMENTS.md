@@ -1,6 +1,6 @@
 # TODO Improvements — Prioritized Backlog
 
-Last updated: Cycle #9 (2026-03-18)
+Last updated: Cycle #10 (2026-03-18)
 
 ---
 
@@ -104,23 +104,36 @@ Added `!/^\d+$/.test(emailId)` guard to both handlers. `mtlEmailId` and `rlEmail
 
 ---
 
-## NEW — Cycle #9 Findings
+## NEW — Cycle #9 Findings (all completed in Cycle #10)
 
-### 17. Code quality — unused imports / dead code
-**Files:** `src/index.ts`, service files
-**Issue:** Some imports may be unused after refactoring across cycles. No specific instances identified yet — needs a scan.
-**Effort:** LOW
-**Risk:** None (cleanup only)
+### [DONE - Cycle 10] Code quality — unused imports / dead code scan
+No unused imports found. All imports in `src/index.ts` are referenced. `EmailAttachment` added to the import line as part of narrowing `as any` casts.
 
-### 18. Type safety — remaining `as any` casts in production code
-**Files:** `src/index.ts`, service files
-**Issue:** Several `args.X as any` casts remain (e.g. `args.attachments as any`). Some may be narrowable to proper types.
-**Effort:** LOW–MEDIUM
-**Risk:** LOW (type improvements only)
+### [DONE - Cycle 10] Type safety — remaining `as any` casts in production code
+9 avoidable `as any` casts removed across `src/index.ts`, `analytics-service.ts`, and `simple-imap-service.ts`. 2 unavoidable casts remain: `(result as any).uid` (imapflow type gap), `(att as any).content = undefined` (type omits undefined). See Cycle #10 log for full details.
 
-### 19. JSDoc coverage — public methods in service files
+### JSDoc coverage — public methods in service files
+Partially addressed: `truncate()` in `helpers.ts` received expanded JSDoc. `SimpleIMAPService` and `SmtpService` public methods still largely undocumented. Deferred to Cycle #11.
+
+---
+
+## NEW — Cycle #10 Findings
+
+### 20. `(result as any).uid` in `simple-imap-service.ts` saveDraft
+**File:** `src/services/simple-imap-service.ts` line 774
+**Issue:** imapflow's `client.append()` return type omits `uid` from its TypeScript declarations. The `as any` cast is currently required. A local `interface AppendResult { uid?: number }` type assertion would be cleaner.
+**Effort:** LOW (~5 lines)
+**Risk:** None
+
+### 21. `(att as any).content = undefined` in `simple-imap-service.ts` wipeCache
+**File:** `src/services/simple-imap-service.ts` line 1196
+**Issue:** `EmailAttachment.content` is typed `Buffer | string` (no undefined). The cast is needed to null out content for memory scrubbing. Making `content?: Buffer | string` in `types/index.ts` would allow direct `att.content = undefined`.
+**Effort:** LOW (~3 lines)
+**Risk:** LOW — verify all callers handle optional content (already guarded with `if (att.content && Buffer.isBuffer(att.content))`)
+
+### 22. JSDoc coverage — SimpleIMAPService and SmtpService public methods
 **Files:** `src/services/simple-imap-service.ts`, `src/services/smtp-service.ts`
-**Issue:** Many public methods lack JSDoc comments. Adding JSDoc improves IDE support and codebase comprehension.
+**Issue:** Most public methods (connect, disconnect, getEmails, getEmailById, saveDraft, sendEmail, markEmailRead, starEmail, moveEmail, searchEmails) have no JSDoc. Top 10 most-used public methods should be documented.
 **Effort:** LOW
 **Risk:** None
 

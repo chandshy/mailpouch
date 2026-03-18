@@ -468,6 +468,88 @@ No new HIGH/MEDIUM issues found. Confirmed all cycle 1–8 fixes still intact.
 
 ---
 
+## Cycle #10
+**Timestamp:** 2026-03-18 02:00–02:20 Eastern
+**Git commit:** `d9242ee`
+**Branch:** main
+**Model:** claude-sonnet-4-6
+
+### Audit Highlights (new findings this cycle)
+
+No new HIGH/MEDIUM issues found. Confirmed all cycle 1–9 fixes still intact.
+
+**`as any` scan — `src/index.ts` (7 occurrences identified):**
+- Line 1360: `(request.params as any)._meta?.progressToken` — AVOIDABLE. SDK's `CallToolRequestSchema` types `request.params._meta?.progressToken` directly (per `types.d.ts` line 29735). No cast needed.
+- Lines 1516, 1755, 1784: `args.attachments as any[] | undefined` / `args.attachments as any | undefined` — AVOIDABLE. All three call sites pass to functions expecting `EmailAttachment[] | undefined`. Narrowed correctly; required adding `EmailAttachment` to the import.
+- Lines 2723–2729: `(config.smtp as any).password = ""` etc. — AVOIDABLE. `SMTPConfig` and `IMAPConfig` interfaces use non-readonly fields. Direct assignment compiles cleanly.
+- `progressToken` unused variable reference verified: `progressToken` IS referenced later in the file (progress notification path) — not dead code.
+
+**`as any` scan — `src/services/simple-imap-service.ts` (4 occurrences):**
+- Line 774: `(result as any).uid` — REQUIRED. imapflow's `client.append()` return type does not include `uid` in its TypeScript declaration even though the runtime value includes it. Cannot remove without a custom type declaration file (deferred).
+- Lines 1188–1196 (`wipeCache`): `(email as any).body = ""` etc. — AVOIDABLE. `EmailMessage.body`, `.subject`, `.from` are plain mutable `string` fields. Direct assignment works.
+- Line 1196: `(att as any).content = undefined` — REQUIRED. `EmailAttachment.content` is typed `Buffer | string` (no `undefined`). Must preserve cast.
+
+**`as any` scan — `src/services/analytics-service.ts` (6 occurrences in `wipeData`):**
+- Lines 384–391: `(email as any).body/subject/from = ""` — AVOIDABLE. Same reason as `wipeCache`. Direct assignment compiles cleanly.
+
+**`helpers.ts` review:**
+- `validateFolderName`: contained a redundant `(folder as string).length` cast at the length check — TypeScript already narrows `folder` to `string` via the guard on line 201. Removed.
+- `truncate()`: had only a one-line stub JSDoc. Expanded to full parameter-level docs.
+- All other public functions: already have adequate JSDoc. No additional gaps found.
+
+**`permissions/manager.ts` review:**
+- All public methods (`check`, `rateLimitStatus`, `invalidate`) have JSDoc. Private helpers documented via inline comments. No type-safety gaps.
+
+**`types/index.ts` review:**
+- `LogEntry.data?: any` — appropriate use of `any` for unstructured log metadata. Leave as-is.
+- `EmailAttachment.content?: Buffer | string` — `undefined` omitted deliberately (attached content must be present). Consistent with existing code.
+- No required/optional field mismatches identified. All types complete.
+
+**Unused imports scan — `src/index.ts`:**
+- After adding `EmailAttachment` to line 24, all imports verified referenced. No unused imports found.
+
+### Work Completed This Cycle
+
+1. **`src/index.ts` line 1360** — Removed `as any` cast on `request.params._meta?.progressToken`. SDK type already covers this access. (−1 cast)
+
+2. **`src/index.ts` lines 2723–2729** — Removed `as any` casts on credential scrubbing in shutdown handler. `config.smtp.password = ""` etc. compiles directly against `SMTPConfig`/`IMAPConfig` interfaces. (−5 casts)
+
+3. **`src/index.ts` lines 1516, 1755, 1784** — Narrowed `args.attachments as any[] | undefined` / `as any | undefined` to `as EmailAttachment[] | undefined` in `send_email`, `save_draft`, and `schedule_email` handlers. Added `EmailAttachment` to line-24 import. (−3 casts, +1 import name)
+
+4. **`src/services/simple-imap-service.ts` `wipeCache()`** — Replaced `(email as any).body/subject/from = ""` with direct property writes. (−3 casts)
+
+5. **`src/services/analytics-service.ts` `wipeData()`** — Same fix for inbox and sent email loops. (−6 casts)
+
+6. **`src/utils/helpers.ts` `validateFolderName()`** — Removed redundant `(folder as string).length` cast inside the post-guard length check. (−1 redundant cast)
+
+7. **`src/utils/helpers.ts` `truncate()`** — Replaced one-line stub JSDoc with a full multi-line JSDoc including `@param` tags for `text` and `maxLength` with usage notes. (+5 lines)
+
+**Total `as any` casts removed from production code this cycle: 9**
+**Remaining unavoidable `as any` casts in production code: 2** (`(result as any).uid` in `client.append()` return; `(att as any).content = undefined` where type omits undefined)
+
+**Files changed:** `src/index.ts` (import + 9 cast removals), `src/services/analytics-service.ts` (6 cast removals), `src/services/simple-imap-service.ts` (3 cast removals), `src/utils/helpers.ts` (1 cast removal + JSDoc)
+
+### Validation Results
+
+- `npm run build` — PASS (0 TypeScript errors, verified after each individual change)
+- `npm test` — PASS (374/374 tests, 14 test files, no count change — no new tests this cycle)
+
+### Git Status
+
+- Commit: `d9242ee`
+- Pushed to: `origin/main`
+
+### Next Cycle Focus
+
+**Priority items for Cycle #11:**
+1. JSDoc coverage — `SimpleIMAPService` and `SmtpService` public methods still largely undocumented. Adding JSDoc to the top-10 most-used public methods (e.g. `connect`, `disconnect`, `getEmails`, `getEmailById`, `saveDraft`, `sendEmail`, `markEmailRead`, `starEmail`, `moveEmail`, `searchEmails`). (~LOW effort, improves IDE support)
+2. `(result as any).uid` in `simple-imap-service.ts` — Consider adding a small local interface `interface AppendResult { uid?: number }` to replace the `as any` cast cleanly. (~5 lines, zero risk)
+3. `(att as any).content = undefined` in `wipeCache` — Consider making `EmailAttachment.content` optional (`content?: Buffer | string`) to allow direct null-out. Check whether any existing code assumes content is always defined. (~LOW effort, ~LOW risk)
+4. IMAP reconnect / NOOP health check — architectural backlog, still deferred.
+5. Cursor token HMAC binding — architectural backlog, still deferred.
+
+---
+
 ## Cycle #6
 **Timestamp:** 2026-03-18 00:50–01:00 Eastern
 **Git commit:** `403dcaa`
