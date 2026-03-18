@@ -1083,6 +1083,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: "object",
               properties: {
                 connected: { type: "boolean" },
+                healthy: { type: "boolean" },
                 host: { type: "string" },
                 port: { type: "number" },
               },
@@ -1995,18 +1996,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "move_to_label": {
         const mtlEmailId = requireNumericEmailId(args.emailId);
         const label = args.label as string;
-        // Validate label before constructing the IMAP folder path.
-        // Without this, an empty or slash-containing label can produce paths
-        // like "Labels/" or "Labels/../INBOX", bypassing folder name checks.
-        if (!label || typeof label !== "string" || !label.trim()) {
-          throw new McpError(ErrorCode.InvalidParams, "label must be a non-empty string.");
-        }
-        if (label.includes("/") || label.includes("..") || /[\x00-\x1f]/.test(label)) {
-          throw new McpError(ErrorCode.InvalidParams, "label contains invalid characters (/, .., or control characters).");
-        }
-        if (label.length > 255) {
-          throw new McpError(ErrorCode.InvalidParams, "label exceeds maximum length of 255 characters.");
-        }
+        // Validate label before constructing the IMAP folder path — prevents
+        // path traversal attacks such as Labels/../INBOX.
+        const mtlValidErr = validateLabelName(label);
+        if (mtlValidErr) throw new McpError(ErrorCode.InvalidParams, mtlValidErr);
         await imapService.moveEmail(mtlEmailId, `Labels/${label}`);
         return actionOk();
       }
@@ -2017,15 +2010,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           .filter((id): id is string => typeof id === "string" && /^\d+$/.test(id))
           .slice(0, MAX_BULK_IDS);
         const rawLabel = args.label as string;
-        if (!rawLabel || typeof rawLabel !== "string" || !rawLabel.trim()) {
-          throw new McpError(ErrorCode.InvalidParams, "label must be a non-empty string.");
-        }
-        if (rawLabel.includes("/") || rawLabel.includes("..") || /[\x00-\x1f]/.test(rawLabel)) {
-          throw new McpError(ErrorCode.InvalidParams, "label contains invalid characters (/, .., or control characters).");
-        }
-        if (rawLabel.length > 255) {
-          throw new McpError(ErrorCode.InvalidParams, "label exceeds maximum length of 255 characters.");
-        }
+        // Validate label before constructing the IMAP folder path — prevents
+        // path traversal attacks such as Labels/../INBOX.
+        const bmlValidErr = validateLabelName(rawLabel);
+        if (bmlValidErr) throw new McpError(ErrorCode.InvalidParams, bmlValidErr);
         const labelFolder = `Labels/${rawLabel}`;
         const total2 = emailIds2.length;
         const results2 = { success: 0, failed: 0, errors: [] as string[] };
@@ -2157,6 +2145,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           },
           imap: {
             connected: imapService.isActive(),
+            healthy: await imapService.healthCheck(),
             host: config.imap.host,
             port: config.imap.port,
             insecureTls: imapService.insecureTls,
