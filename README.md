@@ -8,7 +8,7 @@
 
 Give Claude AI — or any MCP-compatible AI agent — secure, controlled access to your ProtonMail inbox via [Proton Bridge](https://proton.me/mail/bridge).
 
-**45 tools · MCP Resources · MCP Prompts · Permission presets · Per-tool rate limiting · Human-gated escalation · Browser-based settings UI**
+**47 tools · MCP Resources · MCP Prompts · Permission presets · Per-tool rate limiting · Human-gated escalation · Browser-based settings UI**
 
 ---
 
@@ -126,7 +126,7 @@ Choose how much the AI is allowed to do:
 | **Read-Only** *(default)* | Read, search, analytics, connection status | Starting out, untrusted agents |
 | **Supervised** | All tools; deletion capped at 5/hr, sending at 20/hr, bulk actions at 10/hr | Day-to-day agentic use |
 | **Send-Only** | Reading + sending only, no deletion or folder writes | Agents that only need to send |
-| **Full Access** | All 45 tools, no rate limits | Trusted workflows where you review actions |
+| **Full Access** | All 47 tools, no rate limits | Trusted workflows where you review actions |
 
 You can change this at any time from the **Permissions** tab.
 
@@ -230,7 +230,7 @@ If any of these fail, see the [Troubleshooting](#9-troubleshooting) section belo
 
 | Tool | Description |
 |---|---|
-| `get_connection_status` | SMTP/IMAP connection health, config path, settings status |
+| `get_connection_status` | SMTP/IMAP connection health; includes `imap.healthy` (live NOOP probe), `insecureTls` flags, config path, and settings status |
 | `get_logs` | Recent server log entries for debugging |
 | `sync_emails` | Manually refresh the email cache (configurable limit, default 100) |
 | `clear_cache` | Clear the email and analytics cache |

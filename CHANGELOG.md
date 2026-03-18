@@ -5,10 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — Autonomous Improvement Cycles #1–#15 (2026-03-18)
+
+### Security
+
+- **Path traversal prevention** — `get_emails_by_label`, `move_to_folder`, `remove_label`, `bulk_remove_label` now validate label/folder args via `validateLabelName()` / `validateTargetFolder()` before use in IMAP paths (Cycle #1)
+- **`decodeCursor` folder field** now validated via `validateTargetFolder()` — crafted cursors with traversal paths (e.g. `../../etc`) are rejected as invalid (Cycle #5)
+- **`save_draft` attachment sanitization** — filename stripped of CRLF/NUL and truncated to 255 chars; contentType validated against type/subtype regex before MIME construction (Cycle #9)
+- **`validateAttachments()` helper** added to `src/utils/helpers.ts`; called in `send_email`, `save_draft`, and `schedule_email` handlers — malformed attachment arrays now raise `McpError(InvalidParams)` at the handler boundary rather than propagating to nodemailer (Cycle #15)
+- **`search_emails` free-text fields** (`from`, `to`, `subject`) capped at 500 characters to prevent oversized IMAP SEARCH commands (Cycle #6)
+- **`move_email` / `bulk_move_emails`** now call `validateTargetFolder()` before IMAP move (Cycle #3)
+- **`send_test_email`** validates recipient address via `isValidEmail()` at handler entry (Cycle #3)
+- **`create_folder` / `delete_folder` / `rename_folder`** now call `validateFolderName()` at handler entry (Cycle #7)
+- **`mark_email_read` / `star_email` / `move_to_label` / `remove_label`** now enforce numeric-only emailId guard (Cycles #7, #9)
+
+### Added
+
+- **`SimpleIMAPService.healthCheck()`** — NOOP-based live connection probe; returns `true`/`false`, never throws (Cycle #13)
+- **`imap.healthy` field** in `get_connection_status` response — surfaces the NOOP probe result to agents (Cycle #14)
+- **`requireNumericEmailId()` helper** in `src/utils/helpers.ts` — DRY extraction of the numeric-UID guard used across 12+ handlers (Cycle #13)
+- **JSDoc coverage** — 14 public methods across `SimpleIMAPService` and `SmtpService` now documented (Cycle #11)
+- **`validateAttachments()` helper** with 23 unit tests (Cycle #15)
+
+### Changed
+
+- **Type safety** — 9 avoidable `as any` casts removed from `src/index.ts`, `analytics-service.ts`, and `simple-imap-service.ts`; `AppendResult` local interface introduced to replace `(result as any).uid`; all production `as any` casts eliminated (Cycles #10–#12)
+- **`move_to_label` / `bulk_move_to_label`** inline validation replaced with `validateLabelName()` helper calls (Cycle #14)
+- **`SchedulerService.pruneHistory()`** added — drops non-pending records older than 30 days and caps list at 1 000 entries on load (Cycle #2)
+- **`Analytics.getEmailStats()`** — `Math.min/max(...dates)` spread replaced with `reduce` pattern to avoid stack overflow on large arrays (Cycle #2)
+- **`parseEmails()`** now logs a `warn` for each dropped invalid address instead of silently discarding (Cycle #3)
+- **`sendTestEmail` body** uses plain ASCII — removed emoji from subject and body (Cycle #4)
+
+### Fixed
+
+- **Test suite** — 416 tests pass (was 281 before Cycle #1); +135 tests added across Cycles #1–#15 covering all new validation paths, helpers, and security guards
+
 ## [2.1.0] - 2026-03-17
 
 ### Added
-- **5 new tools** (45 total): `save_draft`, `schedule_email`, `list_scheduled_emails`, `cancel_scheduled_email`, `download_attachment`
+- **5 new tools** (47 total): `save_draft`, `schedule_email`, `list_scheduled_emails`, `cancel_scheduled_email`, `download_attachment`
 - `save_draft` — IMAP APPEND to Drafts folder; returns server-assigned UID
 - `schedule_email` — queue email for delivery at a future time (60 s – 30 days); survives restarts
 - `list_scheduled_emails` — list all scheduled emails with status and retry count
