@@ -81,7 +81,7 @@
     "@types/nodemailer": "^6.4.19",
     "@vitest/coverage-v8": "^4.0.0",
     "typescript": "^5.7.2",
-    "vitest": "^4.0.0"
+    "vitest": "^4.1.0"
   },
   "files": [
     "dist/**/*",
