@@ -1868,18 +1868,43 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             if (fErr) throw new McpError(ErrorCode.InvalidParams, `folders[${i}]: ${fErr}`);
           }
         }
-        // Guard free-text search fields against excessively long strings that could
-        // produce oversized IMAP SEARCH commands (imapflow handles encoding; this is
-        // a defence-in-depth limit, not an injection guard).
+        // Guard free-text search fields: type check first, then length cap.
+        // Without the typeof check a non-string truthy value (e.g. a number 42)
+        // would be cast as string; (42 as string).length is undefined at runtime
+        // so the > 500 comparison silently fails and the bad value reaches the
+        // IMAP service.  The type guard ensures a clear McpError instead.
         const MAX_SEARCH_TEXT = 500;
+        if (args.from !== undefined && typeof args.from !== "string") {
+          throw new McpError(ErrorCode.InvalidParams, "'from' filter must be a string when provided.");
+        }
         if (args.from && (args.from as string).length > MAX_SEARCH_TEXT) {
           throw new McpError(ErrorCode.InvalidParams, `'from' filter must not exceed ${MAX_SEARCH_TEXT} characters.`);
+        }
+        if (args.to !== undefined && typeof args.to !== "string") {
+          throw new McpError(ErrorCode.InvalidParams, "'to' filter must be a string when provided.");
         }
         if (args.to && (args.to as string).length > MAX_SEARCH_TEXT) {
           throw new McpError(ErrorCode.InvalidParams, `'to' filter must not exceed ${MAX_SEARCH_TEXT} characters.`);
         }
+        if (args.subject !== undefined && typeof args.subject !== "string") {
+          throw new McpError(ErrorCode.InvalidParams, "'subject' filter must be a string when provided.");
+        }
         if (args.subject && (args.subject as string).length > MAX_SEARCH_TEXT) {
           throw new McpError(ErrorCode.InvalidParams, `'subject' filter must not exceed ${MAX_SEARCH_TEXT} characters.`);
+        }
+        // Guard boolean filter fields — hasAttachment, isRead, isStarred.
+        // Without a typeof check a non-boolean truthy value (e.g. "true", 1)
+        // passes the 'as boolean' cast silently and is forwarded to imapflow,
+        // which evaluates it as truthy and applies the filter based on JS
+        // truthiness rather than the caller's intent.
+        if (args.hasAttachment !== undefined && typeof args.hasAttachment !== "boolean") {
+          throw new McpError(ErrorCode.InvalidParams, "'hasAttachment' must be a boolean when provided.");
+        }
+        if (args.isRead !== undefined && typeof args.isRead !== "boolean") {
+          throw new McpError(ErrorCode.InvalidParams, "'isRead' must be a boolean when provided.");
+        }
+        if (args.isStarred !== undefined && typeof args.isStarred !== "boolean") {
+          throw new McpError(ErrorCode.InvalidParams, "'isStarred' must be a boolean when provided.");
         }
         // Validate limit type — same guard as get_emails: a non-numeric value would
         // produce NaN and bypass clamping, reaching the IMAP service unchecked.
@@ -2012,6 +2037,25 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
         if (args.bcc !== undefined && typeof args.bcc !== "string") {
           throw new McpError(ErrorCode.InvalidParams, "'bcc' must be a string when provided.");
+        }
+        // Type guard for optional 'inReplyTo' — must be a string when provided.
+        // A non-string value (e.g. an object or number) would be silently cast to
+        // string and forwarded to the IMAP saveDraft layer as a malformed Message-ID.
+        if (args.inReplyTo !== undefined && typeof args.inReplyTo !== "string") {
+          throw new McpError(ErrorCode.InvalidParams, "'inReplyTo' must be a string when provided.");
+        }
+        // Type guard for optional 'references' array — must be an array of strings.
+        // A non-array value or an array containing non-strings would be silently cast
+        // and forwarded to nodemailer, producing malformed References headers.
+        if (args.references !== undefined) {
+          if (!Array.isArray(args.references)) {
+            throw new McpError(ErrorCode.InvalidParams, "'references' must be an array of strings when provided.");
+          }
+          for (let i = 0; i < (args.references as unknown[]).length; i++) {
+            if (typeof (args.references as unknown[])[i] !== "string") {
+              throw new McpError(ErrorCode.InvalidParams, `'references[${i}]' must be a string.`);
+            }
+          }
         }
         const draftResult = await imapService.saveDraft({
           to: args.to as string | undefined,

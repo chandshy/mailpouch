@@ -3086,4 +3086,299 @@ describe('helpers', () => {
       expect(isIsStarredWrongType({ starred: true })).toBe(true);
     });
   });
+
+  // ── Cycle #35: search_emails string-type guards for from/to/subject ──────────
+  // The length-cap guards (Cycle #6) used bare `args.X && (args.X as string).length`
+  // without a typeof check first.  A non-string truthy value (e.g. the number 42)
+  // would be cast via `as string`; at runtime `(42 as string).length` is `undefined`
+  // and `undefined > 500` is `false`, so the bad value silently passed to the IMAP
+  // service.  The new type guard returns a clear McpError instead.
+
+  describe("search_emails 'from' filter string type guard (Cycle #35)", () => {
+    function isFromWrongType(v: unknown): boolean {
+      return v !== undefined && typeof v !== "string";
+    }
+
+    it('undefined does not trigger guard (field absent)', () => {
+      expect(isFromWrongType(undefined)).toBe(false);
+    });
+
+    it('valid string does not trigger guard', () => {
+      expect(isFromWrongType("alice@example.com")).toBe(false);
+    });
+
+    it('empty string does not trigger guard (handled by length check)', () => {
+      expect(isFromWrongType("")).toBe(false);
+    });
+
+    it('number 42 triggers guard', () => {
+      expect(isFromWrongType(42)).toBe(true);
+    });
+
+    it('boolean true triggers guard', () => {
+      expect(isFromWrongType(true)).toBe(true);
+    });
+
+    it('array triggers guard', () => {
+      expect(isFromWrongType(["alice@example.com"])).toBe(true);
+    });
+
+    it('plain object triggers guard', () => {
+      expect(isFromWrongType({ address: "alice@example.com" })).toBe(true);
+    });
+  });
+
+  describe("search_emails 'to' filter string type guard (Cycle #35)", () => {
+    function isToWrongType(v: unknown): boolean {
+      return v !== undefined && typeof v !== "string";
+    }
+
+    it('undefined does not trigger guard', () => {
+      expect(isToWrongType(undefined)).toBe(false);
+    });
+
+    it('valid string does not trigger guard', () => {
+      expect(isToWrongType("bob@example.com")).toBe(false);
+    });
+
+    it('number triggers guard', () => {
+      expect(isToWrongType(0)).toBe(true);
+    });
+
+    it('array triggers guard', () => {
+      expect(isToWrongType(["bob@example.com"])).toBe(true);
+    });
+  });
+
+  describe("search_emails 'subject' filter string type guard (Cycle #35)", () => {
+    function isSubjectWrongType(v: unknown): boolean {
+      return v !== undefined && typeof v !== "string";
+    }
+
+    it('undefined does not trigger guard', () => {
+      expect(isSubjectWrongType(undefined)).toBe(false);
+    });
+
+    it('valid string does not trigger guard', () => {
+      expect(isSubjectWrongType("Meeting notes")).toBe(false);
+    });
+
+    it('number triggers guard', () => {
+      expect(isSubjectWrongType(100)).toBe(true);
+    });
+
+    it('boolean triggers guard', () => {
+      expect(isSubjectWrongType(false)).toBe(true);
+    });
+
+    it('array triggers guard', () => {
+      expect(isSubjectWrongType(["Meeting notes"])).toBe(true);
+    });
+  });
+
+  // ── Cycle #35: search_emails boolean type guards for hasAttachment/isRead/isStarred ──
+  // These three filter fields were forwarded directly as `args.X as boolean | undefined`
+  // without any runtime type check.  A non-boolean truthy value (e.g. "true" or 1)
+  // would pass the cast silently and reach imapflow, which evaluates it as truthy
+  // and applies the filter based on JS truthiness rather than the caller's intent.
+
+  describe("search_emails 'hasAttachment' boolean type guard (Cycle #35)", () => {
+    function isHasAttachmentWrongType(v: unknown): boolean {
+      return v !== undefined && typeof v !== "boolean";
+    }
+
+    it('undefined does not trigger guard (field absent)', () => {
+      expect(isHasAttachmentWrongType(undefined)).toBe(false);
+    });
+
+    it('true does not trigger guard', () => {
+      expect(isHasAttachmentWrongType(true)).toBe(false);
+    });
+
+    it('false does not trigger guard', () => {
+      expect(isHasAttachmentWrongType(false)).toBe(false);
+    });
+
+    it('string "true" triggers guard', () => {
+      expect(isHasAttachmentWrongType("true")).toBe(true);
+    });
+
+    it('number 1 triggers guard', () => {
+      expect(isHasAttachmentWrongType(1)).toBe(true);
+    });
+
+    it('number 0 triggers guard', () => {
+      expect(isHasAttachmentWrongType(0)).toBe(true);
+    });
+
+    it('null triggers guard', () => {
+      expect(isHasAttachmentWrongType(null)).toBe(true);
+    });
+
+    it('array triggers guard', () => {
+      expect(isHasAttachmentWrongType([true])).toBe(true);
+    });
+
+    it('plain object triggers guard', () => {
+      expect(isHasAttachmentWrongType({ hasAttachment: true })).toBe(true);
+    });
+  });
+
+  describe("search_emails 'isRead' boolean type guard (Cycle #35)", () => {
+    function isIsReadSearchWrongType(v: unknown): boolean {
+      return v !== undefined && typeof v !== "boolean";
+    }
+
+    it('undefined does not trigger guard', () => {
+      expect(isIsReadSearchWrongType(undefined)).toBe(false);
+    });
+
+    it('true does not trigger guard', () => {
+      expect(isIsReadSearchWrongType(true)).toBe(false);
+    });
+
+    it('false does not trigger guard', () => {
+      expect(isIsReadSearchWrongType(false)).toBe(false);
+    });
+
+    it('string "yes" triggers guard', () => {
+      expect(isIsReadSearchWrongType("yes")).toBe(true);
+    });
+
+    it('number 1 triggers guard', () => {
+      expect(isIsReadSearchWrongType(1)).toBe(true);
+    });
+
+    it('null triggers guard', () => {
+      expect(isIsReadSearchWrongType(null)).toBe(true);
+    });
+  });
+
+  describe("search_emails 'isStarred' boolean type guard (Cycle #35)", () => {
+    function isIsStarredSearchWrongType(v: unknown): boolean {
+      return v !== undefined && typeof v !== "boolean";
+    }
+
+    it('undefined does not trigger guard', () => {
+      expect(isIsStarredSearchWrongType(undefined)).toBe(false);
+    });
+
+    it('true does not trigger guard', () => {
+      expect(isIsStarredSearchWrongType(true)).toBe(false);
+    });
+
+    it('false does not trigger guard', () => {
+      expect(isIsStarredSearchWrongType(false)).toBe(false);
+    });
+
+    it('string "starred" triggers guard', () => {
+      expect(isIsStarredSearchWrongType("starred")).toBe(true);
+    });
+
+    it('number 0 triggers guard', () => {
+      expect(isIsStarredSearchWrongType(0)).toBe(true);
+    });
+
+    it('null triggers guard', () => {
+      expect(isIsStarredSearchWrongType(null)).toBe(true);
+    });
+  });
+
+  // ── Cycle #35: save_draft 'inReplyTo' string type guard ──────────────────────
+  // The field was cast directly as `args.inReplyTo as string | undefined` with no
+  // runtime type check.  A non-string value (number, object, array) would be silently
+  // cast to string and forwarded to the IMAP saveDraft layer as a malformed Message-ID.
+
+  describe("save_draft 'inReplyTo' string type guard (Cycle #35)", () => {
+    function isInReplyToWrongType(v: unknown): boolean {
+      return v !== undefined && typeof v !== "string";
+    }
+
+    it('undefined does not trigger guard (field absent)', () => {
+      expect(isInReplyToWrongType(undefined)).toBe(false);
+    });
+
+    it('valid Message-ID string does not trigger guard', () => {
+      expect(isInReplyToWrongType("<abc123@mail.example.com>")).toBe(false);
+    });
+
+    it('empty string does not trigger guard', () => {
+      expect(isInReplyToWrongType("")).toBe(false);
+    });
+
+    it('number triggers guard', () => {
+      expect(isInReplyToWrongType(42)).toBe(true);
+    });
+
+    it('boolean triggers guard', () => {
+      expect(isInReplyToWrongType(true)).toBe(true);
+    });
+
+    it('array triggers guard', () => {
+      expect(isInReplyToWrongType(["<id@example.com>"])).toBe(true);
+    });
+
+    it('plain object triggers guard', () => {
+      expect(isInReplyToWrongType({ id: "<id@example.com>" })).toBe(true);
+    });
+  });
+
+  // ── Cycle #35: save_draft 'references' array type guard ──────────────────────
+  // The field was cast directly as `args.references as string[] | undefined` with no
+  // runtime type check.  A non-array value or an array containing non-strings would
+  // reach nodemailer and produce malformed References headers.
+
+  describe("save_draft 'references' array and item type guard (Cycle #35)", () => {
+    // Mirror the guard logic:
+    //   if (!Array.isArray(v)) → error
+    //   for each item: typeof item !== "string" → error
+    function referencesGuardError(v: unknown): string | null {
+      if (v === undefined) return null;
+      if (!Array.isArray(v)) return "not an array";
+      for (let i = 0; i < (v as unknown[]).length; i++) {
+        if (typeof (v as unknown[])[i] !== "string") return `item ${i} not string`;
+      }
+      return null;
+    }
+
+    it('undefined does not trigger guard', () => {
+      expect(referencesGuardError(undefined)).toBeNull();
+    });
+
+    it('empty array does not trigger guard', () => {
+      expect(referencesGuardError([])).toBeNull();
+    });
+
+    it('array of valid strings does not trigger guard', () => {
+      expect(referencesGuardError(["<a@b.com>", "<c@d.com>"])).toBeNull();
+    });
+
+    it('string (not array) triggers guard', () => {
+      expect(referencesGuardError("<a@b.com>")).toBe("not an array");
+    });
+
+    it('number triggers guard', () => {
+      expect(referencesGuardError(42)).toBe("not an array");
+    });
+
+    it('plain object triggers guard', () => {
+      expect(referencesGuardError({ 0: "<a@b.com>" })).toBe("not an array");
+    });
+
+    it('array with a number item triggers item guard', () => {
+      expect(referencesGuardError(["<a@b.com>", 99])).toBe("item 1 not string");
+    });
+
+    it('array with a boolean item triggers item guard', () => {
+      expect(referencesGuardError([true])).toBe("item 0 not string");
+    });
+
+    it('array with null item triggers item guard', () => {
+      expect(referencesGuardError([null])).toBe("item 0 not string");
+    });
+
+    it('array with object item triggers item guard', () => {
+      expect(referencesGuardError([{ id: "<a@b.com>" }])).toBe("item 0 not string");
+    });
+  });
 });
