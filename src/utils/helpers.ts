@@ -204,7 +204,7 @@ export function validateFolderName(folder: unknown): string | null {
   if (folder.includes("/") || folder.includes("..") || /[\x00-\x1f]/.test(folder)) {
     return "folder contains invalid characters (/, .., or control characters).";
   }
-  if ((folder as string).length > 255) {
+  if (folder.length > 255) {
     return "folder exceeds maximum length of 255 characters.";
   }
   return null;
@@ -236,7 +236,12 @@ export function validateTargetFolder(targetFolder: unknown): string | null {
 }
 
 /**
- * Truncate text with ellipsis
+ * Truncate text to a maximum length, appending "..." when truncated.
+ *
+ * @param text - The string to truncate.
+ * @param maxLength - Maximum number of characters (including the 3-char ellipsis).
+ *   Must be greater than 3 for the ellipsis to fit; strings shorter than or
+ *   equal to maxLength are returned unchanged.
  */
 export function truncate(text: string, maxLength: number): string {
   if (text.length <= maxLength) return text;

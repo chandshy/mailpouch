@@ -1185,9 +1185,9 @@ export class SimpleIMAPService {
   wipeCache(): void {
     // Overwrite email bodies/subjects before clearing
     for (const [, email] of this.emailCache) {
-      if (email.body) (email as any).body = "";
-      if (email.subject) (email as any).subject = "";
-      if (email.from) (email as any).from = "";
+      if (email.body) email.body = "";
+      if (email.subject) email.subject = "";
+      if (email.from) email.from = "";
       if (email.attachments) {
         for (const att of email.attachments) {
           if (att.content && Buffer.isBuffer(att.content)) {

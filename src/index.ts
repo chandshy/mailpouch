@@ -21,7 +21,7 @@ import {
   ErrorCode,
 } from "@modelcontextprotocol/sdk/types.js";
 
-import { ProtonMailConfig, EmailMessage } from "./types/index.js";
+import { ProtonMailConfig, EmailMessage, EmailAttachment } from "./types/index.js";
 import { SMTPService } from "./services/smtp-service.js";
 import { SimpleIMAPService } from "./services/simple-imap-service.js";
 import { AnalyticsService } from "./services/analytics-service.js";
@@ -1357,7 +1357,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args = {} } = request.params;
-  const progressToken = (request.params as any)._meta?.progressToken;
+  const progressToken = request.params._meta?.progressToken;
 
   const { body: _b, attachments: _a, password: _p, ...safeArgs } = args as Record<string, unknown>;
   logger.debug(`Tool: ${name}`, "MCPServer", safeArgs);
@@ -1513,7 +1513,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           isHtml: args.isHtml as boolean | undefined,
           priority: args.priority as "high" | "normal" | "low" | undefined,
           replyTo: args.replyTo as string | undefined,
-          attachments: args.attachments as any[] | undefined,
+          attachments: args.attachments as EmailAttachment[] | undefined,
         });
         if (!result.success) {
           return { content: [{ type: "text" as const, text: "Email delivery failed" }], isError: true, structuredContent: { success: false, reason: "Email delivery failed" } };
@@ -1752,7 +1752,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           subject: args.subject as string | undefined,
           body: args.body as string | undefined,
           isHtml: args.isHtml as boolean | undefined,
-          attachments: args.attachments as any | undefined,
+          attachments: args.attachments as EmailAttachment[] | undefined,
           inReplyTo: args.inReplyTo as string | undefined,
           references: args.references as string[] | undefined,
         });
@@ -1781,7 +1781,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             isHtml: args.isHtml as boolean | undefined,
             priority: args.priority as "high" | "normal" | "low" | undefined,
             replyTo: args.replyTo as string | undefined,
-            attachments: args.attachments as any | undefined,
+            attachments: args.attachments as EmailAttachment[] | undefined,
           }, sendAt);
           return ok({ success: true, id: schedId, scheduledAt: sendAt.toISOString() },
             `Scheduled for ${sendAt.toISOString()} (ID: ${schedId})`);
@@ -2720,13 +2720,13 @@ async function gracefulShutdown(signal: string): Promise<void> {
 
     // 4. Wipe top-level config credentials
     if (config?.smtp) {
-      (config.smtp as any).password = "";
-      (config.smtp as any).username = "";
-      (config.smtp as any).smtpToken = "";
+      config.smtp.password = "";
+      config.smtp.username = "";
+      config.smtp.smtpToken = "";
     }
     if (config?.imap) {
-      (config.imap as any).password = "";
-      (config.imap as any).username = "";
+      config.imap.password = "";
+      config.imap.username = "";
     }
 
     logger.info("Shutdown complete (memory scrubbed)", "MCPServer");
