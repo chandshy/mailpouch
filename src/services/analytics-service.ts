@@ -375,4 +375,23 @@ export class AnalyticsService {
     this.invalidateCache();
     logger.info('All analytics data cleared', 'AnalyticsService');
   }
+
+  /** Securely wipe all email data from memory. */
+  wipeData(): void {
+    for (const email of this.inboxEmails) {
+      if (email.body) (email as any).body = "";
+      if (email.subject) (email as any).subject = "";
+      if (email.from) (email as any).from = "";
+    }
+    for (const email of this.sentEmails) {
+      if (email.body) (email as any).body = "";
+      if (email.subject) (email as any).subject = "";
+      if (email.from) (email as any).from = "";
+    }
+    this.inboxEmails = [];
+    this.sentEmails = [];
+    this.contacts.clear();
+    this.invalidateCache();
+    logger.info('Analytics data wiped from memory', 'AnalyticsService');
+  }
 }

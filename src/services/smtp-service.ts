@@ -346,4 +346,18 @@ export class SMTPService {
       logger.info("SMTP transporter closed", "SMTPService");
     }
   }
+
+  /** Securely wipe credential strings from memory. */
+  wipeCredentials(): void {
+    if (this.config?.smtp) {
+      if (this.config.smtp.password) (this.config.smtp as any).password = "";
+      if (this.config.smtp.smtpToken) (this.config.smtp as any).smtpToken = "";
+      if (this.config.smtp.username) (this.config.smtp as any).username = "";
+    }
+    if (this.transporter) {
+      this.transporter.close();
+      this.transporter = null;
+    }
+    logger.info("SMTP credentials wiped from memory", "SMTPService");
+  }
 }

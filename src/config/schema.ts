@@ -131,4 +131,6 @@ export interface ServerConfig {
   configVersion: number;
   connection: ConnectionSettings;
   permissions: ServerPermissions;
+  /** Where credentials are stored: "keychain" (OS keychain) or "config" (JSON file). */
+  credentialStorage?: "keychain" | "config";
 }

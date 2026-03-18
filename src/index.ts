@@ -33,7 +33,7 @@ import {
   getEscalationStatus,
   isUpgrade,
 } from "./permissions/escalation.js";
-import { loadConfig, defaultConfig } from "./config/loader.js";
+import { loadConfig, defaultConfig, migrateCredentials } from "./config/loader.js";
 import type { ToolName, PermissionPreset } from "./config/schema.js";
 import { isValidChallengeId, sanitizeText, isValidEscalationTarget } from "./settings/security.js";
 
@@ -2297,6 +2297,16 @@ Produce:
 async function main() {
   logger.info("Starting Proton Mail MCP Server v2.0.0", "MCPServer");
 
+  // Migrate plaintext credentials to OS keychain if available
+  try {
+    const migrated = await migrateCredentials();
+    if (migrated) {
+      logger.info("Credentials migrated to OS keychain", "MCPServer");
+    }
+  } catch (e) {
+    logger.debug("Keychain migration skipped (not available or no credentials to migrate)", "MCPServer");
+  }
+
   try {
     logger.info("Verifying SMTP connection...", "MCPServer");
     try {
@@ -2346,15 +2356,42 @@ process.on("unhandledRejection", (reason) => {
 async function gracefulShutdown(signal: string): Promise<void> {
   logger.info(`Received ${signal}, shutting down gracefully...`, "MCPServer");
   try {
+    // 1. Disconnect services
     await imapService.disconnect();
     await smtpService.close();
-    logger.info("Shutdown complete", "MCPServer");
+
+    // 2. Scrub sensitive data from memory
+    imapService.wipeCache();
+    analyticsService.wipeData();
+    smtpService.wipeCredentials();
+
+    // 3. Wipe top-level config credentials
+    if (config?.smtp) {
+      (config.smtp as any).password = "";
+      (config.smtp as any).username = "";
+      (config.smtp as any).smtpToken = "";
+    }
+    if (config?.imap) {
+      (config.imap as any).password = "";
+      (config.imap as any).username = "";
+    }
+
+    logger.info("Shutdown complete (memory scrubbed)", "MCPServer");
     process.exit(0);
   } catch (error) {
     logger.error(`Error during ${signal} shutdown`, "MCPServer", error);
     process.exit(1);
   }
 }
+
+// Last-resort wipe on any exit path
+process.on("exit", () => {
+  try {
+    imapService.wipeCache();
+    analyticsService.wipeData();
+    smtpService.wipeCredentials();
+  } catch { /* best-effort */ }
+});
 
 process.on("SIGINT", () => gracefulShutdown("SIGINT"));
 process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));

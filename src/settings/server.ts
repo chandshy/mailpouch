@@ -37,6 +37,7 @@ import {
 import {
   loadConfig,
   saveConfig,
+  saveConfigWithCredentials,
   getConfigPath,
   defaultConfig,
   buildPermissions,
@@ -90,6 +91,7 @@ function json(res: http.ServerResponse, status: number, body: unknown): void {
 function safeConfig(cfg: ServerConfig): unknown {
   return {
     ...cfg,
+    credentialStorage: cfg.credentialStorage ?? "config",
     connection: {
       ...cfg.connection,
       password: cfg.connection.password ? "••••••••" : "",
@@ -1878,8 +1880,9 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
           };
         }
 
-        saveConfig(current);
-        json(res, 200, { ok: true });
+        // Try to store credentials in OS keychain; fall back to config file
+        const credStorage = await saveConfigWithCredentials(current);
+        json(res, 200, { ok: true, credentialStorage: credStorage });
         return;
       }
 

@@ -21,6 +21,12 @@ import {
   type PermissionPreset,
   type ToolName,
 } from "./schema.js";
+import {
+  isKeychainAvailable,
+  loadCredentials as loadKeychainCredentials,
+  saveCredentials as saveKeychainCredentials,
+  migrateFromConfig,
+} from "../security/keychain.js";
 
 // ─── Config path ───────────────────────────────────────────────────────────────
 
@@ -169,4 +175,69 @@ export function saveConfig(config: ServerConfig): void {
   const tmp = join(tmpdir(), `protonmcp-cfg-${randomBytes(8).toString("hex")}.json.tmp`);
   writeFileSync(tmp, payload, { encoding: "utf-8", mode: 0o600 });
   renameSync(tmp, dest);
+}
+
+// ─── Keychain-aware credential helpers ──────────────────────────────────────
+
+/**
+ * Load credentials with keychain priority: keychain > config file.
+ * Returns the credentials and the storage method used.
+ */
+export async function loadCredentialsFromKeychain(): Promise<{
+  password: string;
+  smtpToken: string;
+  storage: "keychain" | "config";
+} | null> {
+  // Try keychain first
+  const keychainCreds = await loadKeychainCredentials();
+  if (keychainCreds && (keychainCreds.password || keychainCreds.smtpToken)) {
+    return { ...keychainCreds, storage: "keychain" };
+  }
+
+  // Fall back to config file
+  const config = loadConfig();
+  if (config && (config.connection.password || config.connection.smtpToken)) {
+    return {
+      password: config.connection.password,
+      smtpToken: config.connection.smtpToken,
+      storage: "config",
+    };
+  }
+
+  return null;
+}
+
+/**
+ * Save config with credentials routed to keychain when available.
+ * If keychain is available, credentials are stored there and blanked in the JSON file.
+ * If keychain is unavailable, credentials are stored in the JSON file as fallback.
+ */
+export async function saveConfigWithCredentials(config: ServerConfig): Promise<"keychain" | "config"> {
+  const password = config.connection.password;
+  const smtpToken = config.connection.smtpToken;
+
+  const keychainOk = await saveKeychainCredentials(password, smtpToken);
+  if (keychainOk) {
+    // Blank credentials in config file — they're now in keychain
+    config.connection.password = "";
+    config.connection.smtpToken = "";
+    config.credentialStorage = "keychain";
+    saveConfig(config);
+    return "keychain";
+  }
+
+  // Fallback: store in config file
+  config.credentialStorage = "config";
+  saveConfig(config);
+  return "config";
+}
+
+/**
+ * One-time migration: move plaintext credentials from config file to keychain.
+ * Idempotent — safe to call on every startup.
+ */
+export async function migrateCredentials(): Promise<boolean> {
+  const config = loadConfig();
+  if (!config) return false;
+  return migrateFromConfig(config, saveConfig);
 }

@@ -73,6 +73,9 @@
     "mailparser": "~3.7.5",
     "nodemailer": "~6.10.1"
   },
+  "optionalDependencies": {
+    "keytar": "^7.9.0"
+  },
   "devDependencies": {
     "@types/node": "^22.10.2",
     "@types/nodemailer": "^6.4.19",

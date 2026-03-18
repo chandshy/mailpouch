@@ -918,4 +918,32 @@ export class SimpleIMAPService {
     this.folderCache.clear();
     logger.info('IMAP cache cleared', 'IMAPService');
   }
+
+  /** Securely wipe all cached data and stored credentials from memory. */
+  wipeCache(): void {
+    // Overwrite email bodies/subjects before clearing
+    for (const [, email] of this.emailCache) {
+      if (email.body) (email as any).body = "";
+      if (email.subject) (email as any).subject = "";
+      if (email.from) (email as any).from = "";
+      if (email.attachments) {
+        for (const att of email.attachments) {
+          if (att.content && Buffer.isBuffer(att.content)) {
+            (att.content as Buffer).fill(0);
+          }
+          (att as any).content = undefined;
+        }
+      }
+    }
+    this.emailCache.clear();
+    this.folderCache.clear();
+
+    // Wipe stored connection credentials
+    if (this.connectionConfig) {
+      if (this.connectionConfig.password) this.connectionConfig.password = "";
+      if (this.connectionConfig.username) this.connectionConfig.username = "";
+      this.connectionConfig = null;
+    }
+    logger.info("IMAP cache and credentials wiped", "IMAPService");
+  }
 }
