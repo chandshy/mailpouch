@@ -1,6 +1,6 @@
-# Contributing to ProtonMail MCP Server
+# Contributing to ProtonMail Agentic MCP
 
-Thank you for your interest in contributing to the ProtonMail MCP Server! This document provides guidelines and information for contributors.
+Thank you for your interest in contributing to ProtonMail Agentic MCP! This document provides guidelines and information for contributors.
 
 ## Getting Started
 
@@ -16,8 +16,8 @@ Thank you for your interest in contributing to the ProtonMail MCP Server! This d
 1. Fork the repository on GitHub
 2. Clone your fork locally:
    ```bash
-   git clone https://github.com/YOUR_USERNAME/protonmail-mcp-server.git
-   cd protonmail-mcp-server
+   git clone https://github.com/YOUR_USERNAME/protonmail-agentic-mcp.git
+   cd protonmail-agentic-mcp
    ```
 
 3. Install dependencies:
@@ -106,7 +106,7 @@ feat: add email filtering by date range
 
 ```
 src/
-├── index.ts                    # Main MCP server (45 tools, Resources, Prompts)
+├── index.ts                    # Main MCP server (47 tools, Resources, Prompts)
 ├── settings-main.ts            # Settings UI entry point
 ├── config/
 │   ├── schema.ts               # Tool list, categories, permission types
@@ -259,7 +259,7 @@ If you discover a security vulnerability:
 ## Questions?
 
 - Open a GitHub Discussion for general questions
-- Open an [Issue](https://github.com/chandshy/protonmail-mcp-server/issues) for bug reports or feature requests
+- Open an [Issue](https://github.com/chandshy/protonmail-agentic-mcp/issues) for bug reports or feature requests
 - Check existing issues and discussions first
 
 ## License

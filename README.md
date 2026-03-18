@@ -482,7 +482,7 @@ src/
 
 ## Acknowledgements
 
-This project was forked from [barhatch/protonmail-mcp-server](https://github.com/barhatch/protonmail-mcp-server), which provided the original foundation. We are grateful to barhatch for the groundwork that made this project possible.
+This project is built on the foundation originally created by **[Hawk94](https://github.com/Hawk94)**, whose initial implementation provided the core IMAP/SMTP integration, tool architecture, and test setup that made this project possible. The original work was published as [barhatch/protonmail-mcp-server](https://github.com/barhatch/protonmail-mcp-server). We are grateful to both for the groundwork they laid.
 
 ## License
 
