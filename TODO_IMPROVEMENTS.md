@@ -1,6 +1,6 @@
 # TODO Improvements — Prioritized Backlog
 
-Last updated: Cycle #3 (2026-03-18)
+Last updated: Cycle #4 (2026-03-18)
 
 ---
 
@@ -43,10 +43,27 @@ Added `isValidEmail(args.to)` check at handler entry. Returns `McpError(InvalidP
 ### [DONE - Cycle 3] `parseEmails` — silent dropping of invalid addresses
 Imported `logger` into helpers.ts. `parseEmails` now calls `logger.warn(...)` for each dropped address.
 
-### 4. `send_test_email` body uses emoji in HTML
-**File:** `src/index.ts` case `send_test_email`
-**Issue:** Default test email body includes emoji (`🧪`, `🌟`, `🎉`) which may render incorrectly in some email clients.
-**Effort:** Cosmetic, trivial
+### [DONE - Cycle 4] `send_test_email` body uses emoji in HTML
+Fixed in `src/services/smtp-service.ts`. Subject and body now use plain ASCII text only.
+
+### [DONE - Cycle 4] Add handler-level validation tests for Cycle #3 changes
+Added 16 tests in `src/utils/helpers.test.ts` covering `move_email`, `bulk_move_emails`, and `send_test_email` validation paths (traversal, control chars, invalid email, oversized inputs, valid cases).
+
+---
+
+## NEW — Cycle #4 Findings
+
+### 7. `decodeCursor` folder field not validated against traversal
+**File:** `src/index.ts`, `decodeCursor()` + `get_emails` / `get_emails_by_label` cases
+**Issue:** The `parsed.folder` string from a base64url cursor is passed directly to `imapService.getEmails(folder, ...)`. A crafted cursor could inject a traversal path (e.g. `../../etc`). The cursor is server-generated in practice, but no HMAC binding prevents forgery.
+**Effort:** LOW — add `validateTargetFolder(parsed.folder)` inside `decodeCursor` before returning.
+**Risk:** LOW (cursor forgery only meaningful if attacker can also read responses)
+
+### 8. `get_email_by_id` / `download_attachment` — no handler-level type check on emailId/attachmentIndex
+**File:** `src/index.ts`
+**Issue:** `args.emailId` is cast directly with `as string`; `args.attachmentIndex` is cast with `as number`. No check that emailId is a non-empty string or attachmentIndex is a non-negative integer.
+**Effort:** LOW — add 2-line guards per handler
+**Risk:** LOW (imapflow will reject invalid types, but error message would be opaque)
 
 ---
 
