@@ -2931,4 +2931,159 @@ describe('helpers', () => {
       expect(MAX_BODY_LENGTH).toBe(10485760);
     });
   });
+
+  // ── Cycle #34 guards ──────────────────────────────────────────────────────
+
+  // reply_to_email body max-length guard (Cycle #34)
+  // Applied in reply_to_email — was missed in Cycle #33 when send_email,
+  // save_draft, and schedule_email received the same cap.
+  // Condition: (args.body as string).length > MAX_BODY_LENGTH → throw.
+
+  describe("'body' max-length guard — reply_to_email (Cycle #34)", () => {
+    const MAX_BODY_LENGTH = 10 * 1024 * 1024; // mirrors src/index.ts
+
+    function isBodyTooLong(v: string): boolean {
+      return v.length > MAX_BODY_LENGTH;
+    }
+
+    it('short body does not trigger guard', () => {
+      expect(isBodyTooLong('Hello!')).toBe(false);
+    });
+
+    it('body exactly at MAX_BODY_LENGTH does not trigger guard (boundary)', () => {
+      expect(isBodyTooLong('a'.repeat(MAX_BODY_LENGTH))).toBe(false);
+    });
+
+    it('body one byte over MAX_BODY_LENGTH triggers guard', () => {
+      expect(isBodyTooLong('a'.repeat(MAX_BODY_LENGTH + 1))).toBe(true);
+    });
+
+    it('body at 20 MB triggers guard', () => {
+      const fakeLength = 20 * 1024 * 1024;
+      expect(fakeLength > MAX_BODY_LENGTH).toBe(true);
+    });
+  });
+
+  // forward_email fwdBody max-length guard (Cycle #34)
+  // The forwarded body is assembled from (optional user message) + forwarded
+  // header + original email body, so a large original can push it over the cap.
+  // Same MAX_BODY_LENGTH = 10 MB applies.
+
+  describe("forwarded body max-length guard — forward_email (Cycle #34)", () => {
+    const MAX_BODY_LENGTH = 10 * 1024 * 1024;
+
+    function isFwdBodyTooLong(v: string): boolean {
+      return v.length > MAX_BODY_LENGTH;
+    }
+
+    it('normal forwarded body does not trigger guard', () => {
+      expect(isFwdBodyTooLong('---------- Forwarded message ----------\nHello')).toBe(false);
+    });
+
+    it('forwarded body exactly at MAX_BODY_LENGTH does not trigger guard', () => {
+      expect(isFwdBodyTooLong('a'.repeat(MAX_BODY_LENGTH))).toBe(false);
+    });
+
+    it('forwarded body one byte over MAX_BODY_LENGTH triggers guard', () => {
+      expect(isFwdBodyTooLong('a'.repeat(MAX_BODY_LENGTH + 1))).toBe(true);
+    });
+
+    it('very large original email body (50 MB) triggers guard', () => {
+      const fakeLength = 50 * 1024 * 1024;
+      expect(fakeLength > MAX_BODY_LENGTH).toBe(true);
+    });
+  });
+
+  // isRead boolean type guard — mark_email_read / bulk_mark_read (Cycle #34)
+  // Condition: args.isRead !== undefined && typeof args.isRead !== "boolean" → throw.
+  // A non-boolean truthy value (e.g. "yes", 1) would silently cast to boolean
+  // and mark the email read/unread based on JS truthiness rather than caller intent.
+
+  describe("'isRead' boolean type guard — mark_email_read / bulk_mark_read (Cycle #34)", () => {
+    function isIsReadWrongType(v: unknown): boolean {
+      return v !== undefined && typeof v !== "boolean";
+    }
+
+    it('undefined does not trigger guard (field absent)', () => {
+      expect(isIsReadWrongType(undefined)).toBe(false);
+    });
+
+    it('true does not trigger guard', () => {
+      expect(isIsReadWrongType(true)).toBe(false);
+    });
+
+    it('false does not trigger guard', () => {
+      expect(isIsReadWrongType(false)).toBe(false);
+    });
+
+    it('string "true" triggers guard', () => {
+      expect(isIsReadWrongType("true")).toBe(true);
+    });
+
+    it('number 1 triggers guard', () => {
+      expect(isIsReadWrongType(1)).toBe(true);
+    });
+
+    it('number 0 triggers guard', () => {
+      expect(isIsReadWrongType(0)).toBe(true);
+    });
+
+    it('null triggers guard', () => {
+      expect(isIsReadWrongType(null)).toBe(true);
+    });
+
+    it('array triggers guard', () => {
+      expect(isIsReadWrongType([true])).toBe(true);
+    });
+
+    it('plain object triggers guard', () => {
+      expect(isIsReadWrongType({ read: true })).toBe(true);
+    });
+  });
+
+  // isStarred boolean type guard — star_email / bulk_star (Cycle #34)
+  // Condition: args.isStarred !== undefined && typeof args.isStarred !== "boolean" → throw.
+  // Mirrors the isRead guard above and the isHtml guard from Cycle #33.
+
+  describe("'isStarred' boolean type guard — star_email / bulk_star (Cycle #34)", () => {
+    function isIsStarredWrongType(v: unknown): boolean {
+      return v !== undefined && typeof v !== "boolean";
+    }
+
+    it('undefined does not trigger guard (field absent)', () => {
+      expect(isIsStarredWrongType(undefined)).toBe(false);
+    });
+
+    it('true does not trigger guard', () => {
+      expect(isIsStarredWrongType(true)).toBe(false);
+    });
+
+    it('false does not trigger guard', () => {
+      expect(isIsStarredWrongType(false)).toBe(false);
+    });
+
+    it('string "yes" triggers guard', () => {
+      expect(isIsStarredWrongType("yes")).toBe(true);
+    });
+
+    it('number 1 triggers guard', () => {
+      expect(isIsStarredWrongType(1)).toBe(true);
+    });
+
+    it('number 0 triggers guard', () => {
+      expect(isIsStarredWrongType(0)).toBe(true);
+    });
+
+    it('null triggers guard', () => {
+      expect(isIsStarredWrongType(null)).toBe(true);
+    });
+
+    it('array triggers guard', () => {
+      expect(isIsStarredWrongType([false])).toBe(true);
+    });
+
+    it('plain object triggers guard', () => {
+      expect(isIsStarredWrongType({ starred: true })).toBe(true);
+    });
+  });
 });

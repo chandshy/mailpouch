@@ -1656,6 +1656,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (!args.body || typeof args.body !== "string" || !(args.body as string).trim()) {
           throw new McpError(ErrorCode.InvalidParams, "'body' must be a non-empty string.");
         }
+        // Guard body max length — same 10 MB cap as send_email / save_draft /
+        // schedule_email (Cycle #33).  reply_to_email was missed in that cycle.
+        // A multi-megabyte reply body will exhaust Node.js heap or cause an
+        // opaque SMTP timeout before the error is surfaced to the caller.
+        if ((args.body as string).length > MAX_BODY_LENGTH) {
+          throw new McpError(ErrorCode.InvalidParams, `'body' must not exceed ${MAX_BODY_LENGTH} bytes (${MAX_BODY_LENGTH / 1024 / 1024} MB).`);
+        }
         // Guard 'isHtml' type — must be boolean when provided.  Consistent with
         // the guard added to send_email; prevents a non-boolean truthy value (e.g.
         // "yes" or 1) from silently enabling HTML mode in the SMTP call.
@@ -1748,6 +1755,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
         const userMessage = args.message ? `${args.message as string}\n\n` : "";
         const fwdBody = `${userMessage}${fwdHeader}\n${fwdOriginal.body ?? ""}`;
+        // Guard forwarded body max length — the body is assembled from the user's
+        // optional message plus the original email's body, which may itself be
+        // very large.  Sending a multi-megabyte body will exhaust Node.js heap or
+        // produce an opaque SMTP timeout.  Same 10 MB cap as all other senders.
+        if (fwdBody.length > MAX_BODY_LENGTH) {
+          throw new McpError(ErrorCode.InvalidParams, `Forwarded body must not exceed ${MAX_BODY_LENGTH} bytes (${MAX_BODY_LENGTH / 1024 / 1024} MB).`);
+        }
 
         const fwdResult = await smtpService.sendEmail({
           to: args.to as string,
@@ -2202,6 +2216,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "mark_email_read": {
         const merEmailId = requireNumericEmailId(args.emailId);
+        // Guard 'isRead' type — must be boolean when provided.  A non-boolean truthy
+        // value (e.g. "yes" or 1) would silently be cast and forwarded to the IMAP
+        // service, marking the email read/unread based on JS truthiness rather than
+        // the caller's intent.  Consistent with isHtml / isStarred guards.
+        if (args.isRead !== undefined && typeof args.isRead !== "boolean") {
+          throw new McpError(ErrorCode.InvalidParams, "'isRead' must be a boolean when provided.");
+        }
         const isRead = args.isRead !== undefined ? (args.isRead as boolean) : true;
         await imapService.markEmailRead(merEmailId, isRead);
         return actionOk();
@@ -2209,6 +2230,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "star_email": {
         const seEmailId = requireNumericEmailId(args.emailId);
+        // Guard 'isStarred' type — must be boolean when provided.  Consistent
+        // with the 'isRead' guard above and the 'isHtml' guard in send_email.
+        if (args.isStarred !== undefined && typeof args.isStarred !== "boolean") {
+          throw new McpError(ErrorCode.InvalidParams, "'isStarred' must be a boolean when provided.");
+        }
         const isStarred = args.isStarred !== undefined ? (args.isStarred as boolean) : true;
         await imapService.starEmail(seEmailId, isStarred);
         return actionOk();
@@ -2262,6 +2288,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const bmrEmailIds: string[] = bmrIds
           .filter((id): id is string => typeof id === "string" && /^\d+$/.test(id))
           .slice(0, MAX_BULK_IDS);
+        // Guard 'isRead' type — must be boolean when provided.  Consistent with
+        // the guard added to mark_email_read in this cycle.
+        if (args.isRead !== undefined && typeof args.isRead !== "boolean") {
+          throw new McpError(ErrorCode.InvalidParams, "'isRead' must be a boolean when provided.");
+        }
         const bmrIsRead = args.isRead !== undefined ? (args.isRead as boolean) : true;
         const bmrTotal = bmrEmailIds.length;
         const bmrResults = { success: 0, failed: 0, errors: [] as string[] };
@@ -2287,6 +2318,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const bsEmailIds: string[] = bsIds
           .filter((id): id is string => typeof id === "string" && /^\d+$/.test(id))
           .slice(0, MAX_BULK_IDS);
+        // Guard 'isStarred' type — must be boolean when provided.  Consistent with
+        // the guard added to star_email in this cycle.
+        if (args.isStarred !== undefined && typeof args.isStarred !== "boolean") {
+          throw new McpError(ErrorCode.InvalidParams, "'isStarred' must be a boolean when provided.");
+        }
         const bsIsStarred = args.isStarred !== undefined ? (args.isStarred as boolean) : true;
         const bsTotal = bsEmailIds.length;
         const bsResults = { success: 0, failed: 0, errors: [] as string[] };
