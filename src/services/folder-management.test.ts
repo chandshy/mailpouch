@@ -169,5 +169,77 @@ describe('Folder Management', () => {
       await service.renameFolder('OldName', 'NewName');
       expect(clearSpy).toHaveBeenCalled();
     });
+
+    it('should reset folderCachedAt to 0 after createFolder', async () => {
+      // Simulate a warm cache
+      (service as any).folderCachedAt = Date.now();
+      await service.createFolder('AnotherFolder');
+      expect((service as any).folderCachedAt).toBe(0);
+    });
+
+    it('should reset folderCachedAt to 0 after deleteFolder', async () => {
+      (service as any).folderCachedAt = Date.now();
+      await service.deleteFolder('MyFolder');
+      expect((service as any).folderCachedAt).toBe(0);
+    });
+
+    it('should reset folderCachedAt to 0 after renameFolder', async () => {
+      (service as any).folderCachedAt = Date.now();
+      await service.renameFolder('OldName', 'NewName');
+      expect((service as any).folderCachedAt).toBe(0);
+    });
+
+    it('should reset folderCachedAt to 0 after clearCache()', () => {
+      (service as any).folderCachedAt = Date.now();
+      service.clearCache();
+      expect((service as any).folderCachedAt).toBe(0);
+    });
+  });
+
+  describe('getFolders TTL cache', () => {
+    it('should return cached folders without IMAP call when TTL is not expired', async () => {
+      // Seed the folder cache with a folder
+      const mockClient = (service as any).client;
+      (service as any).folderCache.set('INBOX', {
+        name: 'INBOX', path: 'INBOX', totalMessages: 5, unreadMessages: 2,
+        specialUse: undefined, folderType: 'system',
+      });
+      // Set a recent timestamp
+      (service as any).folderCachedAt = Date.now();
+
+      const listCallsBefore = mockClient.list.mock.calls.length;
+      const result = await service.getFolders();
+      // list() should NOT have been called again
+      expect(mockClient.list.mock.calls.length).toBe(listCallsBefore);
+      expect(result).toHaveLength(1);
+      expect(result[0].path).toBe('INBOX');
+    });
+
+    it('should fetch from IMAP when folderCachedAt is 0 (cold cache)', async () => {
+      const mockClient = (service as any).client;
+      mockClient.status = vi.fn().mockResolvedValue({ messages: 10, unseen: 3 });
+      (service as any).folderCachedAt = 0;
+      (service as any).folderCache.clear();
+
+      await service.getFolders();
+      expect(mockClient.list).toHaveBeenCalled();
+    });
+
+    it('should fetch from IMAP when TTL is expired and update folderCachedAt', async () => {
+      const mockClient = (service as any).client;
+      mockClient.status = vi.fn().mockResolvedValue({ messages: 10, unseen: 3 });
+      // Set an expired timestamp
+      (service as any).folderCachedAt = Date.now() - 10 * 60 * 1000; // 10 min ago
+      (service as any).folderCache.set('INBOX', {
+        name: 'INBOX', path: 'INBOX', totalMessages: 5, unreadMessages: 2,
+        specialUse: undefined, folderType: 'system',
+      });
+      const listCallsBefore = mockClient.list.mock.calls.length;
+
+      await service.getFolders();
+      expect(mockClient.list.mock.calls.length).toBeGreaterThan(listCallsBefore);
+      // folderCachedAt should be updated to a recent timestamp
+      expect((service as any).folderCachedAt).toBeGreaterThan(Date.now() - 5000);
+    });
   });
 });

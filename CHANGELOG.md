@@ -5,10 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — Autonomous Improvement Cycles #1–#41 (2026-03-18)
+## [Unreleased] — Autonomous Improvement Cycles #1–#43 (2026-03-18)
 
 ### Security
 
+- **`tray.ts` systray2 types** — ambient module declaration added (`src/types/systray2.d.ts`); all `any` type annotations in `tray.ts` replaced with proper types from the ambient module (`SysTrayConstructor`, `MenuItem`, `InstanceType<SysTrayConstructor>`); zero `any` type annotations remain anywhere in production TypeScript source (Cycle #43)
+- **Email cache byte-size limit** — `MAX_EMAIL_CACHE_BYTES = 50 MB` enforced alongside the existing 500-entry count cap; `cacheByteEstimate` counter maintained; `evictCacheEntry()` / `clearCacheAll()` helpers ensure all 11 mutation sites update the counter atomically (Cycle #42)
 - **`body` JSON parsers in settings server** typed as `Record<string, unknown>` instead of `any`; `permissions.preset` now validated against `PERMISSION_PRESETS` before assignment; credential spreads require `typeof === "string"` guard (Cycle #41)
 - **IMAP search boolean flags** — `isStarred: false` was previously a no-op (unanswered/undraft fields silently ignored by imapflow); fixed to use `SearchObject` boolean API — `seen`/`answered`/`draft` now correctly pass `false` as "not set" (Cycle #40, bug fix)
 - **`search_emails` multi-folder `folders[]`** — each entry now validated via `validateTargetFolder()` to prevent path traversal; service-level `validateFolderName()` also now checks for `..` sequences as defence-in-depth (Cycle #22)
@@ -42,7 +44,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Type safety milestone (Cycles #37–#41)** — all `catch (e: any)` blocks replaced with `catch (e: unknown)` across entire codebase; `SearchObject` imported from imapflow replacing hand-rolled `ImapSearchCriteria`; `SendMailOptions` from nodemailer replacing `mailOptions: any`; `ImapBodyNode` interface for bodyStructure traversal; `body: any` JSON parsers in settings server replaced with `Record<string, unknown>`; `wipeString/wipeObject` parameters tightened. Zero `any` catch blocks or avoidable `any` type annotations remain in production source.
+- **Type safety milestone (Cycles #37–#43)** — all `catch (e: any)` blocks replaced with `catch (e: unknown)` across entire codebase; `SearchObject` imported from imapflow replacing hand-rolled `ImapSearchCriteria`; `SendMailOptions` from nodemailer replacing `mailOptions: any`; `ImapBodyNode` interface for bodyStructure traversal; `body: any` JSON parsers in settings server replaced with `Record<string, unknown>`; `wipeString/wipeObject` parameters tightened; `tray.ts` fully typed via systray2 ambient module. Zero `any` catch blocks or avoidable `any` type annotations remain anywhere in production source.
+- **Email cache dual-eviction policy** — `setCacheEntry()` now evicts on BOTH entry count (500) AND byte size (50 MB); prevents unbounded memory growth with very large email bodies (Cycle #42)
 - **Parameter type guards** — comprehensive runtime type checks added across all 47 tool handlers for string, number, boolean, array, and enum fields; all guards throw `McpError(InvalidParams)` with actionable messages (Cycles #20–#36)
 - **`imapSecure` flag** added to IMAP connection config (Cycle #21, implicit TLS support)
 - **Type safety** — 9 avoidable `as any` casts removed from `src/index.ts`, `analytics-service.ts`, and `simple-imap-service.ts`; `AppendResult` local interface introduced to replace `(result as any).uid`; all production `as any` casts eliminated (Cycles #10–#12)
@@ -56,7 +59,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **IMAP `isStarred: false` search** — was silently ignored (imapflow non-existent `unflagged` field); now correctly passes `flagged: false` (Cycle #40)
 - **`search_emails` date cross-validation** — `dateFrom > dateTo` now returns `McpError(InvalidParams)` instead of silently returning zero results (Cycle #25)
-- **Test suite** — 849 tests pass (was 212 before Cycle #1); +637 tests added across Cycles #1–#41 covering all new validation paths, helpers, and security guards
+- **Test suite** — 854 tests pass (was 212 before Cycle #1); +642 tests added across Cycles #1–#43 covering all new validation paths, helpers, security guards, and cache byte-limit behaviour
 
 ### Documentation
 

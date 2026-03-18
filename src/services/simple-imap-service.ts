@@ -77,6 +77,10 @@ export class SimpleIMAPService {
   /** Running byte estimate for emailCache — updated by evictCacheEntry/clearCacheAll/setCacheEntry. */
   private cacheByteEstimate = 0;
   private folderCache: Map<string, EmailFolder> = new Map();
+  /** Timestamp (ms) of the last successful folderCache refresh. 0 = never. */
+  private folderCachedAt = 0;
+  /** TTL for folderCache entries. After expiry, getFolders() fetches fresh data from IMAP. */
+  private static readonly FOLDER_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
   private connectionConfig: { host: string; port: number; username?: string; password?: string; bridgeCertPath?: string; secure?: boolean } | null = null;
   /** Tracks UIDVALIDITY per folder path to detect server-side mailbox rebuilds. */
   private uidValidityMap: Map<string, bigint> = new Map();
@@ -458,11 +462,29 @@ export class SimpleIMAPService {
     }); // end tracer.span('imap.healthCheck')
   }
 
-  /** Fetch all IMAP folders with message and unseen counts. Results are cached. */
+  /**
+   * Clear folderCache and reset the TTL timestamp so the next getFolders() call
+   * fetches fresh data from IMAP.  Use in place of direct `this.folderCache.clear()`.
+   */
+  private clearFolderCache(): void {
+    this.folderCache.clear();
+    this.folderCachedAt = 0;
+  }
+
+  /** Fetch all IMAP folders with message and unseen counts. Results are cached for {@link FOLDER_CACHE_TTL_MS}. */
   async getFolders(): Promise<EmailFolder[]> {
     const tags: SpanTags = {};
     return tracer.span('imap.getFolders', tags, async () => {
     logger.debug('Fetching folders', 'IMAPService');
+
+    // Return cached data if it is still fresh (avoids an IMAP round-trip per call)
+    const cacheAge = Date.now() - this.folderCachedAt;
+    if (this.folderCache.size > 0 && cacheAge < SimpleIMAPService.FOLDER_CACHE_TTL_MS) {
+      logger.debug('Returning cached folders (TTL not expired)', 'IMAPService');
+      const cached = Array.from(this.folderCache.values());
+      tags.resultCount = cached.length;
+      return cached;
+    }
 
     try {
       await this.ensureConnection();
@@ -511,6 +533,8 @@ export class SimpleIMAPService {
         this.folderCache.set(folder.path, emailFolder);
       }
 
+      // Record the timestamp of this successful refresh
+      this.folderCachedAt = Date.now();
       tags.resultCount = result.length;
       logger.info(`Retrieved ${result.length} folders`, 'IMAPService');
       return result;
@@ -1671,8 +1695,8 @@ export class SimpleIMAPService {
       // Create the mailbox
       const result = await this.client.mailboxCreate(folderName);
 
-      // Clear folder cache to refresh
-      this.folderCache.clear();
+      // Clear folder cache to refresh (also resets TTL so next getFolders() re-fetches)
+      this.clearFolderCache();
 
       logger.info(`Folder created: ${folderName}`, 'IMAPService');
       return true;
@@ -1709,8 +1733,8 @@ export class SimpleIMAPService {
 
       await this.client.mailboxDelete(folderName);
 
-      // Clear folder cache to refresh
-      this.folderCache.clear();
+      // Clear folder cache to refresh (also resets TTL so next getFolders() re-fetches)
+      this.clearFolderCache();
 
       logger.info(`Folder deleted: ${folderName}`, 'IMAPService');
       return true;
@@ -1750,8 +1774,8 @@ export class SimpleIMAPService {
 
       await this.client.mailboxRename(oldName, newName);
 
-      // Clear folder cache to refresh
-      this.folderCache.clear();
+      // Clear folder cache to refresh (also resets TTL so next getFolders() re-fetches)
+      this.clearFolderCache();
 
       logger.info(`Folder renamed: ${oldName} -> ${newName}`, 'IMAPService');
       return true;
@@ -1876,7 +1900,7 @@ export class SimpleIMAPService {
   clearCache(): void {
     tracer.spanSync('imap.clearCache', {}, () => {
     this.clearCacheAll();
-    this.folderCache.clear();
+    this.clearFolderCache();
     logger.info('IMAP cache cleared', 'IMAPService');
     }); // end tracer.spanSync('imap.clearCache')
   }
@@ -1900,7 +1924,7 @@ export class SimpleIMAPService {
       }
     }
     this.clearCacheAll();
-    this.folderCache.clear();
+    this.clearFolderCache();
 
     // Wipe stored connection credentials
     if (this.connectionConfig) {
