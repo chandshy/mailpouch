@@ -476,6 +476,240 @@ describe('AnalyticsService', () => {
     });
   });
 
+  describe('wipeData — falsy fields are skipped', () => {
+    it('handles emails where body/subject/from are already empty strings', () => {
+      const emptyFieldEmail: EmailMessage = {
+        id: '200',
+        from: '',
+        to: ['x@x.com'],
+        subject: '',
+        body: '',
+        isHtml: false,
+        date: new Date(),
+        folder: 'INBOX',
+        isRead: false,
+        isStarred: false,
+        hasAttachment: false,
+      };
+      const svc = new AnalyticsService();
+      svc.updateEmails([emptyFieldEmail], [emptyFieldEmail]);
+      // Should not throw even with falsy fields
+      expect(() => svc.wipeData()).not.toThrow();
+      expect(svc.getEmailStats().totalEmails).toBe(0);
+    });
+  });
+
+  describe('calculateResponseTimeStats — edge cases', () => {
+    it('ignores sent replies with inReplyTo not matching any inbox message-id', () => {
+      const inbox: EmailMessage = {
+        id: '1',
+        from: 'a@b.com',
+        to: ['me@x.com'],
+        subject: 'Hi',
+        body: '',
+        isHtml: false,
+        date: new Date('2024-01-01T10:00:00Z'),
+        folder: 'INBOX',
+        isRead: true,
+        isStarred: false,
+        hasAttachment: false,
+        headers: { 'message-id': '<real-msg-id@x.com>' },
+      };
+      const sent: EmailMessage = {
+        id: '2',
+        from: 'me@x.com',
+        to: ['a@b.com'],
+        subject: 'Re: Hi',
+        body: '',
+        isHtml: false,
+        date: new Date('2024-01-01T12:00:00Z'),
+        folder: 'Sent',
+        isRead: true,
+        isStarred: false,
+        hasAttachment: false,
+        inReplyTo: '<unknown-id@x.com>', // no matching inbox msg
+      };
+      const svc = new AnalyticsService();
+      svc.updateEmails([inbox], [sent]);
+      const analytics = svc.getEmailAnalytics();
+      // No matches → null response time stats
+      expect(analytics.responseTimeStats).toBeNull();
+    });
+
+    it('ignores replies where sent is before original (negative diffHours)', () => {
+      const inbox: EmailMessage = {
+        id: '3',
+        from: 'a@b.com',
+        to: ['me@x.com'],
+        subject: 'Hi',
+        body: '',
+        isHtml: false,
+        date: new Date('2024-01-01T12:00:00Z'),
+        folder: 'INBOX',
+        isRead: true,
+        isStarred: false,
+        hasAttachment: false,
+        headers: { 'message-id': '<msg-3@x.com>' },
+      };
+      const sent: EmailMessage = {
+        id: '4',
+        from: 'me@x.com',
+        to: ['a@b.com'],
+        subject: 'Re: Hi',
+        body: '',
+        isHtml: false,
+        date: new Date('2024-01-01T10:00:00Z'), // BEFORE original — negative diff
+        folder: 'Sent',
+        isRead: true,
+        isStarred: false,
+        hasAttachment: false,
+        inReplyTo: '<msg-3@x.com>',
+      };
+      const svc = new AnalyticsService();
+      svc.updateEmails([inbox], [sent]);
+      const analytics = svc.getEmailAnalytics();
+      expect(analytics.responseTimeStats).toBeNull();
+    });
+
+    it('ignores replies more than 30 days after the original', () => {
+      const inbox: EmailMessage = {
+        id: '5',
+        from: 'a@b.com',
+        to: ['me@x.com'],
+        subject: 'Hi',
+        body: '',
+        isHtml: false,
+        date: new Date('2024-01-01T10:00:00Z'),
+        folder: 'INBOX',
+        isRead: true,
+        isStarred: false,
+        hasAttachment: false,
+        headers: { 'message-id': '<msg-5@x.com>' },
+      };
+      const sent: EmailMessage = {
+        id: '6',
+        from: 'me@x.com',
+        to: ['a@b.com'],
+        subject: 'Re: Hi (very late)',
+        body: '',
+        isHtml: false,
+        date: new Date('2024-03-01T10:00:00Z'), // 60+ days later
+        folder: 'Sent',
+        isRead: true,
+        isStarred: false,
+        hasAttachment: false,
+        inReplyTo: '<msg-5@x.com>',
+      };
+      const svc = new AnalyticsService();
+      svc.updateEmails([inbox], [sent]);
+      const analytics = svc.getEmailAnalytics();
+      expect(analytics.responseTimeStats).toBeNull();
+    });
+  });
+
+  describe('processContacts — edge cases', () => {
+    it('skips sent email to address that extractEmailAddress cannot parse', () => {
+      // If extractEmailAddress returns null/undefined/empty for the to address,
+      // line 76 (if (toAddress)) is false — should not throw
+      const sentWithBadTo: EmailMessage = {
+        id: '300',
+        from: 'me@x.com',
+        to: [''], // empty string → extractEmailAddress returns falsy
+        subject: 'Test',
+        body: '',
+        isHtml: false,
+        date: new Date(),
+        folder: 'Sent',
+        isRead: true,
+        isStarred: false,
+        hasAttachment: false,
+      };
+      const svc = new AnalyticsService();
+      expect(() => svc.updateEmails([], [sentWithBadTo])).not.toThrow();
+    });
+
+    it('silently drops new contacts once MAX_CONTACTS (10000) is reached', () => {
+      // Build 10000 inbox emails with unique senders, plus one extra
+      // processContacts() rebuilds from the email arrays so we pass all 10001 emails at once
+      const svc = new AnalyticsService();
+      const now = new Date();
+
+      // 10000 unique senders fills the cap
+      const tenKEmails: EmailMessage[] = Array.from({ length: 10_000 }, (_, i) => ({
+        id: String(i),
+        from: `user${i}@example.com`,
+        to: ['me@x.com'],
+        subject: `Email ${i}`,
+        body: '',
+        isHtml: false,
+        date: now,
+        folder: 'INBOX',
+        isRead: true,
+        isStarred: false,
+        hasAttachment: false,
+      }));
+
+      // The 10001st email is a brand-new sender — should be silently dropped
+      const oneMore: EmailMessage = {
+        id: '10001',
+        from: 'overflow@example.com',
+        to: ['me@x.com'],
+        subject: 'Overflow',
+        body: '',
+        isHtml: false,
+        date: now,
+        folder: 'INBOX',
+        isRead: false,
+        isStarred: false,
+        hasAttachment: false,
+      };
+
+      svc.updateEmails([...tenKEmails, oneMore], []);
+      // The cap is 10000; overflow@example.com should be dropped
+      expect((svc as any).contacts.size).toBe(10_000);
+      expect((svc as any).contacts.has('overflow@example.com')).toBe(false);
+    });
+  });
+
+  describe('calculateResponseTimeStats — array message-id header', () => {
+    it('handles message-id header provided as an array', () => {
+      const inbox: EmailMessage = {
+        id: '400',
+        from: 'a@b.com',
+        to: ['me@x.com'],
+        subject: 'Array header',
+        body: '',
+        isHtml: false,
+        date: new Date('2024-01-01T10:00:00Z'),
+        folder: 'INBOX',
+        isRead: true,
+        isStarred: false,
+        hasAttachment: false,
+        headers: { 'message-id': ['<msg-array@x.com>', '<alt-id@x.com>'] as any },
+      };
+      const sent: EmailMessage = {
+        id: '401',
+        from: 'me@x.com',
+        to: ['a@b.com'],
+        subject: 'Re: Array header',
+        body: '',
+        isHtml: false,
+        date: new Date('2024-01-01T12:00:00Z'),
+        folder: 'Sent',
+        isRead: true,
+        isStarred: false,
+        hasAttachment: false,
+        inReplyTo: '<msg-array@x.com>',
+      };
+      const svc = new AnalyticsService();
+      svc.updateEmails([inbox], [sent]);
+      const analytics = svc.getEmailAnalytics();
+      // Array header: first element is used; should match the inReplyTo
+      expect(analytics.responseTimeStats).not.toBeNull();
+      expect(analytics.responseTimeStats!.sampleSize).toBe(1);
+    });
+  });
+
   describe('getVolumeTrends — day clamping', () => {
     it('clamps to minimum 1 day', () => {
       // Math.trunc(-5) = -5; Math.max(1, -5) = 1
