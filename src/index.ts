@@ -1844,16 +1844,26 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "create_folder": {
+        // Validate folderName before passing to IMAP — returns clean McpError
+        // rather than letting the service throw a raw Error.
+        const cfValidErr = validateFolderName(args.folderName);
+        if (cfValidErr) throw new McpError(ErrorCode.InvalidParams, cfValidErr);
         await imapService.createFolder(args.folderName as string);
         return actionOk();
       }
 
       case "delete_folder": {
+        const dfValidErr = validateFolderName(args.folderName);
+        if (dfValidErr) throw new McpError(ErrorCode.InvalidParams, dfValidErr);
         await imapService.deleteFolder(args.folderName as string);
         return actionOk();
       }
 
       case "rename_folder": {
+        const rfOldErr = validateFolderName(args.oldName);
+        if (rfOldErr) throw new McpError(ErrorCode.InvalidParams, `oldName: ${rfOldErr}`);
+        const rfNewErr = validateFolderName(args.newName);
+        if (rfNewErr) throw new McpError(ErrorCode.InvalidParams, `newName: ${rfNewErr}`);
         await imapService.renameFolder(args.oldName as string, args.newName as string);
         return actionOk();
       }
@@ -1861,14 +1871,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // ── Email Actions ──────────────────────────────────────────────────────────
 
       case "mark_email_read": {
+        const merEmailId = args.emailId;
+        if (!merEmailId || typeof merEmailId !== "string" || !/^\d+$/.test(merEmailId)) {
+          throw new McpError(ErrorCode.InvalidParams, "emailId must be a non-empty numeric UID string.");
+        }
         const isRead = args.isRead !== undefined ? (args.isRead as boolean) : true;
-        await imapService.markEmailRead(args.emailId as string, isRead);
+        await imapService.markEmailRead(merEmailId, isRead);
         return actionOk();
       }
 
       case "star_email": {
+        const seEmailId = args.emailId;
+        if (!seEmailId || typeof seEmailId !== "string" || !/^\d+$/.test(seEmailId)) {
+          throw new McpError(ErrorCode.InvalidParams, "emailId must be a non-empty numeric UID string.");
+        }
         const isStarred = args.isStarred !== undefined ? (args.isStarred as boolean) : true;
-        await imapService.starEmail(args.emailId as string, isStarred);
+        await imapService.starEmail(seEmailId, isStarred);
         return actionOk();
       }
 

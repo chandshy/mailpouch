@@ -555,4 +555,129 @@ describe('helpers', () => {
       expect(isInvalidAttIndex(undefined)).toBe(true);
     });
   });
+
+  // ── create_folder / delete_folder handler validation (validateFolderName) ──
+
+  describe('create_folder / delete_folder handler validation (validateFolderName)', () => {
+    // Replicates the guard: validateFolderName(args.folderName)
+    it('valid folder name "Work" returns null (no error)', () => {
+      expect(validateFolderName('Work')).toBeNull();
+    });
+
+    it('valid folder name with unicode returns null', () => {
+      expect(validateFolderName('Receipts-2024')).toBeNull();
+    });
+
+    it('empty string returns error', () => {
+      expect(validateFolderName('')).not.toBeNull();
+    });
+
+    it('whitespace-only string returns error', () => {
+      expect(validateFolderName('   ')).not.toBeNull();
+    });
+
+    it('null returns error', () => {
+      expect(validateFolderName(null)).not.toBeNull();
+    });
+
+    it('undefined returns error', () => {
+      expect(validateFolderName(undefined)).not.toBeNull();
+    });
+
+    it('name containing "/" returns error (leaf segment only)', () => {
+      expect(validateFolderName('Folders/Work')).not.toBeNull();
+    });
+
+    it('traversal ".." returns error', () => {
+      expect(validateFolderName('..')).not.toBeNull();
+    });
+
+    it('name with null byte returns error', () => {
+      expect(validateFolderName('Work\x00Evil')).not.toBeNull();
+    });
+
+    it('name with C0 control char returns error', () => {
+      expect(validateFolderName('Work\x1fEvil')).not.toBeNull();
+    });
+
+    it('exact 255-char name returns null (at limit)', () => {
+      expect(validateFolderName('a'.repeat(255))).toBeNull();
+    });
+
+    it('256-char name returns error (over limit)', () => {
+      expect(validateFolderName('a'.repeat(256))).not.toBeNull();
+    });
+  });
+
+  // ── rename_folder handler validation (validateFolderName for oldName/newName) ──
+
+  describe('rename_folder handler validation (validateFolderName for oldName and newName)', () => {
+    it('valid oldName "Archive" returns null', () => {
+      expect(validateFolderName('Archive')).toBeNull();
+    });
+
+    it('valid newName "Archive-Old" returns null', () => {
+      expect(validateFolderName('Archive-Old')).toBeNull();
+    });
+
+    it('oldName with path traversal "../INBOX" returns error', () => {
+      expect(validateFolderName('../INBOX')).not.toBeNull();
+    });
+
+    it('newName that is empty returns error', () => {
+      expect(validateFolderName('')).not.toBeNull();
+    });
+
+    it('newName containing "/" returns error', () => {
+      expect(validateFolderName('New/Name')).not.toBeNull();
+    });
+  });
+
+  // ── mark_email_read / star_email handler validation (numeric UID guard) ──
+
+  describe('mark_email_read / star_email handler validation (numeric emailId guard)', () => {
+    // Replicates: !emailId || typeof emailId !== "string" || !/^\d+$/.test(emailId)
+    const isInvalidEmailId = (v: unknown): boolean =>
+      !v || typeof v !== 'string' || !/^\d+$/.test(v as string);
+
+    it('valid emailId "42" passes guard', () => {
+      expect(isInvalidEmailId('42')).toBe(false);
+    });
+
+    it('valid emailId "1" passes guard', () => {
+      expect(isInvalidEmailId('1')).toBe(false);
+    });
+
+    it('empty string triggers guard', () => {
+      expect(isInvalidEmailId('')).toBe(true);
+    });
+
+    it('alphabetic string "abc" triggers guard', () => {
+      expect(isInvalidEmailId('abc')).toBe(true);
+    });
+
+    it('mixed "12a3" triggers guard', () => {
+      expect(isInvalidEmailId('12a3')).toBe(true);
+    });
+
+    it('negative "-1" triggers guard', () => {
+      expect(isInvalidEmailId('-1')).toBe(true);
+    });
+
+    it('float "1.5" triggers guard', () => {
+      expect(isInvalidEmailId('1.5')).toBe(true);
+    });
+
+    it('null triggers guard', () => {
+      expect(isInvalidEmailId(null)).toBe(true);
+    });
+
+    it('undefined triggers guard', () => {
+      expect(isInvalidEmailId(undefined)).toBe(true);
+    });
+
+    it('null-byte injection "12\x0034" triggers guard', () => {
+      expect(isInvalidEmailId('12\x0034')).toBe(true);
+    });
+  });
 });
