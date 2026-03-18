@@ -124,7 +124,7 @@ Choose how much the AI is allowed to do:
 | Preset | What's allowed | Best for |
 |---|---|---|
 | **Read-Only** *(default)* | Read, search, analytics, connection status | Starting out, untrusted agents |
-| **Supervised** | All tools; deletion capped at 5/hr, sending at 20/hr | Day-to-day agentic use |
+| **Supervised** | All tools; deletion capped at 5/hr, sending at 20/hr, bulk actions at 10/hr | Day-to-day agentic use |
 | **Send-Only** | Reading + sending only, no deletion or folder writes | Agents that only need to send |
 | **Full Access** | All 45 tools, no rate limits | Trusted workflows where you review actions |
 
@@ -292,7 +292,7 @@ If any of these fail, see the [Troubleshooting](#9-troubleshooting) section belo
 
 | Tool | Description |
 |---|---|
-| `request_escalation` | Ask the human to grant a higher permission preset temporarily |
+| `request_permission_escalation` | Ask the human to grant a higher permission preset temporarily |
 | `check_escalation_status` | Poll the status of a pending escalation challenge |
 
 ### MCP Prompts
@@ -311,7 +311,7 @@ The escalation system lets an AI agent request broader permissions when it needs
 
 ### How it works
 
-1. The agent calls `request_escalation` with a reason and the target preset it needs (e.g. `"supervised"` to be able to send email).
+1. The agent calls `request_permission_escalation` with a reason and the target preset it needs (e.g. `"supervised"` to be able to send email).
 2. A challenge appears in the **Settings UI** (`npx protonmail-mcp-settings`) under the Escalation tab — and is also printed to the terminal.
 3. **You** review the request, type `APPROVE` in the confirmation field, and click Approve (or Deny).
 4. The agent polls with `check_escalation_status` and proceeds once approved.
@@ -407,7 +407,7 @@ Credentials are saved to `~/.protonmail-mcp.json` with `0600` permissions (owner
 - Open the settings UI and check the **Permissions** tab.
 - The current preset is shown in the header. Switch to **Supervised** or **Full Access** for write tools.
 - Individual tools can be re-enabled using the per-tool toggles.
-- If an AI agent needs more access, it can call `request_escalation` and you can approve from the **Escalations** tab.
+- If an AI agent needs more access, it can call `request_permission_escalation` and you can approve from the **Escalations** tab.
 
 ### "Certificate error" or TLS handshake failure
 
