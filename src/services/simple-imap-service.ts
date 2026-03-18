@@ -51,6 +51,8 @@ export class SimpleIMAPService {
   private emailCache: Map<string, EmailMessage> = new Map();
   private folderCache: Map<string, EmailFolder> = new Map();
   private connectionConfig: { host: string; port: number; username?: string; password?: string; bridgeCertPath?: string } | null = null;
+  /** True when TLS certificate validation is disabled (no Bridge cert configured). */
+  insecureTls = false;
 
   /**
    * Write an entry to emailCache, evicting the oldest entry (FIFO) when the
@@ -114,18 +116,22 @@ export class SimpleIMAPService {
             logger.info('IMAP: Using exported Bridge certificate for TLS trust', 'IMAPService');
           } catch (err) {
             logger.error(
-              `IMAP: Failed to load Bridge cert at "${bridgeCertPath}" — file may not exist or is unreadable. Falling back to rejectUnauthorized:false. Fix the PROTONMAIL_BRIDGE_CERT path.`,
+              `IMAP: Failed to load Bridge cert at "${bridgeCertPath}" — TLS certificate validation DISABLED. ` +
+              `Fix the PROTONMAIL_BRIDGE_CERT path to secure this connection.`,
               'IMAPService',
               err
             );
             tlsOptions = { rejectUnauthorized: false, minVersion: 'TLSv1.2' };
+            this.insecureTls = true;
           }
         } else {
-          logger.warn(
-            'IMAP: No PROTONMAIL_BRIDGE_CERT configured — using rejectUnauthorized:false for localhost. Export the cert from Bridge settings and set the env var.',
+          logger.error(
+            'IMAP: PROTONMAIL_BRIDGE_CERT not set — TLS certificate validation DISABLED for localhost. ' +
+            'Export the cert from Bridge → Help → Export TLS Certificate and set this env var.',
             'IMAPService'
           );
           tlsOptions = { rejectUnauthorized: false, minVersion: 'TLSv1.2' };
+          this.insecureTls = true;
         }
       } else {
         // Non-localhost: full certificate validation required
@@ -315,7 +321,17 @@ export class SimpleIMAPService {
                 size: att.size,
                 content: att.content,
                 contentId: att.cid
-              }))
+              })),
+              headers: parsed.headers
+                ? Object.fromEntries(
+                    Array.from(parsed.headers.entries()).map(([k, v]) => [
+                      k,
+                      Array.isArray(v) ? v.join(', ') : String(v),
+                    ])
+                  )
+                : undefined,
+              inReplyTo: parsed.inReplyTo,
+              references: parsed.references,
             };
 
             this.setCacheEntry(cachedEmail.id, cachedEmail);
@@ -404,7 +420,17 @@ export class SimpleIMAPService {
                 size: att.size,
                 content: att.content,
                 contentId: att.cid
-              }))
+              })),
+              headers: parsed.headers
+                ? Object.fromEntries(
+                    Array.from(parsed.headers.entries()).map(([k, v]) => [
+                      k,
+                      Array.isArray(v) ? v.join(', ') : String(v),
+                    ])
+                  )
+                : undefined,
+              inReplyTo: parsed.inReplyTo,
+              references: parsed.references,
             };
 
             // Cache the full version (including binary content) for internal use
@@ -445,11 +471,22 @@ export class SimpleIMAPService {
     try {
       const searchCriteria: any = {};
 
-      if (options.from) searchCriteria.from = options.from;
-      if (options.to) searchCriteria.to = options.to;
-      if (options.subject) searchCriteria.subject = options.subject;
-      if (options.dateFrom) searchCriteria.since = new Date(options.dateFrom);
-      if (options.dateTo) searchCriteria.before = new Date(options.dateTo);
+      // Strip IMAP search-unsafe characters (quote and backslash) to prevent
+      // search criteria injection.  imapflow passes these as quoted strings
+      // in the IMAP SEARCH command, so an unescaped '"' would close the
+      // quoted string early, and '\' could escape the closing quote.
+      const sanitizeImapStr = (s: string) => s.replace(/["\\]/g, "");
+      if (options.from) searchCriteria.from = sanitizeImapStr(options.from);
+      if (options.to) searchCriteria.to = sanitizeImapStr(options.to);
+      if (options.subject) searchCriteria.subject = sanitizeImapStr(options.subject);
+      if (options.dateFrom) {
+        const d = new Date(options.dateFrom);
+        if (!isNaN(d.getTime())) searchCriteria.since = d;
+      }
+      if (options.dateTo) {
+        const d = new Date(options.dateTo);
+        if (!isNaN(d.getTime())) searchCriteria.before = d;
+      }
 
       if (options.isRead !== undefined) {
         if (options.isRead) {
@@ -624,6 +661,44 @@ export class SimpleIMAPService {
   }
 
   /**
+   * Resolve the server-side Drafts folder path.
+   * Prefers the folder with specialUse === '\\Drafts'; falls back to a
+   * case-insensitive name match against common names; last resort 'Drafts'.
+   */
+  private async findDraftsFolder(): Promise<string> {
+    // Check folder cache first (populated by getFolders / markEmailRead etc.)
+    const cached = Array.from(this.folderCache.values());
+    const fromCache = this.pickDraftsFolder(cached);
+    if (fromCache) return fromCache;
+
+    // Cache miss — refresh and retry
+    try {
+      const folders = await this.getFolders();
+      const found = this.pickDraftsFolder(folders);
+      if (found) return found;
+    } catch {
+      // swallow — fall through to default
+    }
+
+    return 'Drafts';
+  }
+
+  private pickDraftsFolder(folders: EmailFolder[]): string | null {
+    // IMAP special-use attribute wins
+    const bySpecialUse = folders.find(f => f.specialUse === '\\Drafts');
+    if (bySpecialUse) return bySpecialUse.path;
+
+    // Case-insensitive name / path match
+    const names = ['drafts', 'draft', '[gmail]/drafts'];
+    const byName = folders.find(f =>
+      names.includes(f.name.toLowerCase()) || names.includes(f.path.toLowerCase())
+    );
+    if (byName) return byName.path;
+
+    return null;
+  }
+
+  /**
    * Save an email as a draft in the Drafts folder via IMAP APPEND.
    * Builds the raw MIME message using nodemailer's stream transport, then
    * appends it with the \Draft flag set.
@@ -660,7 +735,7 @@ export class SimpleIMAPService {
         text: options.isHtml ? undefined : (options.body || ''),
         html: options.isHtml ? (options.body || '') : undefined,
         inReplyTo: options.inReplyTo,
-        references: options.references?.join(' '),
+        references: options.references?.map(r => r.replace(/[\x00-\x1f\x7f]/g, "")).join(' '),
       };
 
       if (options.attachments && options.attachments.length > 0) {
@@ -676,7 +751,8 @@ export class SimpleIMAPService {
       const rawMime = info.message as Buffer;
 
       // Append to Drafts folder with the \Draft IMAP flag
-      const result = await this.client.append('Drafts', rawMime, ['\\Draft']);
+      const draftsPath = await this.findDraftsFolder();
+      const result = await this.client.append(draftsPath, rawMime, ['\\Draft']);
 
       const uid = result && typeof result === 'object' ? (result as any).uid : undefined;
       logger.info('Draft saved', 'IMAPService', { uid });

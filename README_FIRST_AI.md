@@ -18,7 +18,7 @@ read emails through this server, the content is sent to your provider's API
 Your access is **gated by a permission preset** set by the human. If a tool
 call is blocked, it means the human has not granted that level of access. You
 can ask them to change it in the settings UI, or you can use
-`request_escalation` to request a temporary upgrade (they must approve it).
+`request_permission_escalation` to request a temporary upgrade (they must approve it).
 
 **Never assume you have broad access.** Always start with read-only tools to
 understand context before attempting any action that modifies email state.
@@ -72,10 +72,11 @@ Returns the full email including `body`, `isHtml`, `cc`, and attachment
 metadata (filenames, MIME types, sizes — not binary content).
 
 #### `search_emails`
-Search within a folder.
+Search within one or more folders.
 
 ```
-folder        string   Default "INBOX"
+folder        string   Default "INBOX". Ignored when `folders` is set.
+folders       string[] Search multiple folders. Use ["*"] to search all folders (capped at 20).
 from          string   Sender address or name fragment
 to            string   Recipient address
 subject       string   Subject text fragment
@@ -89,6 +90,10 @@ limit         number   1–200, default 50
 
 All fields are optional. The search queries IMAP directly via Proton Bridge,
 so results reflect the current state of the mailbox.
+
+**Multi-folder example:** Pass `folders: ["INBOX", "Sent"]` to find a message
+without knowing which folder it's in. Pass `folders: ["*"]` to search
+everywhere (first 20 folders, sorted alphabetically).
 
 #### `get_unread_count`
 Cheap call — returns unread counts per folder without fetching email bodies.
@@ -112,6 +117,19 @@ Returns `{ emails, folder, count, nextCursor? }`.
 #### `get_folders`
 List all folders with `name`, `path`, `totalMessages`, `unreadMessages`.
 Labels appear as folders with a `Labels/` prefix (e.g. `Labels/Work`).
+
+#### `download_attachment`
+Download the binary content of an email attachment as a base64-encoded string.
+
+```
+email_id          string  UID from get_emails or search_emails.
+attachment_index  number  Zero-based index into the email's attachments array.
+```
+
+Returns `{ filename, contentType, size, content (base64), encoding: "base64" }`,
+or `null` if the email or attachment is not found.
+
+**Note:** Email must be in the cache; call `get_email_by_id` first if needed.
 
 ---
 
@@ -215,6 +233,60 @@ message  string   Optional message to prepend before forwarded content.
 
 #### `send_test_email`
 Send a test email to verify SMTP is working. Returns `{ success, messageId }`.
+
+---
+
+### Drafts & Scheduling — requires `supervised`, `send_only`, or `full`
+
+#### `save_draft`
+Save an email as a draft without sending it. Writes to the Drafts folder via
+IMAP APPEND.
+
+```
+to          string   Optional recipient(s), comma-separated.
+cc          string   Optional.
+bcc         string   Optional.
+subject     string   Optional.
+body        string   Optional.
+isHtml      boolean  Default false.
+attachments array    Same format as send_email.
+inReplyTo   string   Optional Message-ID to thread the draft.
+references  string[] Optional thread reference IDs.
+```
+
+Returns `{ success: true, uid: <IMAP UID> }` or `{ success: false, error: "..." }`.
+All fields are optional — a draft can be completely empty.
+
+#### `schedule_email`
+Queue an email for delivery at a future time.
+
+```
+to        string   Required. Recipient(s), comma-separated.
+subject   string   Required.
+body      string   Required.
+send_at   string   Required. ISO 8601 datetime. Must be 60 s–30 days in the future.
+cc        string   Optional.
+bcc       string   Optional.
+isHtml    boolean  Default false.
+```
+
+Returns `{ success: true, id: "<uuid>" }`. The ID can be used with
+`cancel_scheduled_email`. Scheduled emails survive server restarts (persisted
+to disk). The server polls every 60 s to send due emails.
+
+#### `list_scheduled_emails`
+List all scheduled emails (pending, sent, failed, and cancelled), sorted by
+scheduled time ascending. Returns `{ emails: [...], count }`.
+
+#### `cancel_scheduled_email`
+Cancel a pending scheduled email before it is sent.
+
+```
+id  string  The UUID returned by schedule_email.
+```
+
+Returns `{ success: true }` or `{ success: false, error: "..." }` (e.g. if
+the email was already sent or the ID is not found).
 
 ---
 
@@ -370,7 +442,7 @@ Alias for `bulk_delete_emails`. Same input/output.
 
 Use these when you need higher permissions than currently granted.
 
-#### `request_escalation`
+#### `request_permission_escalation`
 Ask the human to temporarily grant a higher preset.
 
 ```
@@ -401,7 +473,7 @@ Returns the current status: `"pending"`, `"approved"`, `"denied"`, or
 
 **Typical escalation flow:**
 ```
-1. Call request_escalation → get challengeId
+1. Call request_permission_escalation → get challengeId
 2. Inform the user: "I've requested supervised access. Please approve in the settings UI."
 3. Poll check_escalation_status every 15 s
 4. When status == "approved": proceed with the originally requested action

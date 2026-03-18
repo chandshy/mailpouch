@@ -36,6 +36,8 @@ const MAX_TOTAL_ATT_BYTES   = 25 * 1024 * 1024; // 25 MB total across all attach
 export class SMTPService {
   private transporter: nodemailer.Transporter | null = null;
   private config: ProtonMailConfig;
+  /** True when TLS certificate validation is disabled (no Bridge cert configured). */
+  insecureTls = false;
 
   constructor(config: ProtonMailConfig) {
     this.config = config;
@@ -66,19 +68,23 @@ export class SMTPService {
           tlsOptions = { ca: [bridgeCert], minVersion: "TLSv1.2" };
           logger.info("SMTP: Using exported Bridge certificate for TLS trust", "SMTPService");
         } catch (err) {
-          logger.warn(
-            "SMTP: Failed to load Bridge cert — falling back to rejectUnauthorized:false (set PROTONMAIL_BRIDGE_CERT to fix)",
+          logger.error(
+            "SMTP: Failed to load Bridge cert — TLS certificate validation DISABLED. " +
+            "Fix the PROTONMAIL_BRIDGE_CERT path to secure this connection.",
             "SMTPService",
             err
           );
           tlsOptions = { rejectUnauthorized: false, minVersion: "TLSv1.2" };
+          this.insecureTls = true;
         }
       } else {
-        logger.warn(
-          "SMTP: No PROTONMAIL_BRIDGE_CERT configured — using rejectUnauthorized:false for localhost. Export the cert from Bridge settings and set the env var.",
+        logger.error(
+          "SMTP: PROTONMAIL_BRIDGE_CERT not set — TLS certificate validation DISABLED for localhost. " +
+          "Export the cert from Bridge → Help → Export TLS Certificate and set this env var.",
           "SMTPService"
         );
         tlsOptions = { rejectUnauthorized: false, minVersion: "TLSv1.2" };
+        this.insecureTls = true;
       }
     } else {
       // Non-localhost: full certificate validation required

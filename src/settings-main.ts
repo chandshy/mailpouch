@@ -19,8 +19,11 @@
  *   --tui           Force interactive TUI (skips browser even if display available)
  *   --plain         Force plain readline menus (no ANSI escape codes)
  *   --no-open       Start HTTP server but do not auto-open browser
+ *   --version       Print version and exit
+ *   --help          Show usage and exit
  */
 
+import { createRequire } from "module";
 import {
   detectEnvironment,
   openBrowser,
@@ -36,6 +39,33 @@ const args = process.argv.slice(2);
 
 function flagIndex(name: string): number { return args.indexOf(name); }
 function hasFlag(name: string): boolean  { return flagIndex(name) !== -1; }
+
+if (hasFlag("--help") || hasFlag("-h")) {
+  process.stdout.write(
+    "Usage: protonmail-mcp-settings [options]\n\n" +
+    "Options:\n" +
+    "  --port <n>    HTTP server port (default: 8765)\n" +
+    "  --browser     Force browser mode\n" +
+    "  --tui         Force interactive TUI\n" +
+    "  --plain       Force plain readline menus (no ANSI)\n" +
+    "  --no-open     Start HTTP server without auto-opening browser\n" +
+    "  --lan         Bind HTTP server to LAN interface\n" +
+    "  --version     Print version and exit\n" +
+    "  --help        Show this help message\n"
+  );
+  process.exit(0);
+}
+
+if (hasFlag("--version") || hasFlag("-v")) {
+  try {
+    const require = createRequire(import.meta.url);
+    const pkg = require("../package.json") as { version: string };
+    process.stdout.write(`${pkg.version}\n`);
+  } catch {
+    process.stdout.write("unknown\n");
+  }
+  process.exit(0);
+}
 
 const portArg = flagIndex("--port");
 const port = portArg !== -1 ? parseInt(args[portArg + 1], 10) : 8765;

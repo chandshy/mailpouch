@@ -126,15 +126,22 @@ describe("SchedulerService", () => {
     expect(smtp.sendEmail).toHaveBeenCalledTimes(1);
   });
 
-  it("processDue() marks failed when sendEmail returns success:false", async () => {
+  it("processDue() marks failed when sendEmail returns success:false (after 3 attempts)", async () => {
     const smtp = makeSMTP({ success: false, error: "SMTP error" });
     const svc = new SchedulerService(smtp, storePath);
     const id = svc.schedule(makeOptions(), futureDate(120));
     vi.advanceTimersByTime(121 * 1000);
+    // Retry up to MAX_RETRIES (3) times before permanently failing
+    await svc.processDue();
+    expect(svc.list().find(i => i.id === id)!.status).toBe("pending"); // still retrying
+    await svc.processDue();
+    expect(svc.list().find(i => i.id === id)!.status).toBe("pending"); // still retrying
     await svc.processDue();
     const item = svc.list().find(i => i.id === id)!;
     expect(item.status).toBe("failed");
     expect(item.error).toBe("SMTP error");
+    expect(item.retryCount).toBe(3);
+    expect(smtp.sendEmail).toHaveBeenCalledTimes(3);
   });
 
   it("processDue() does not send items that are not due yet", async () => {

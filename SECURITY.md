@@ -66,8 +66,9 @@ The server implements a 10-layer defense-in-depth security model:
 - No unknown keys allowed (defense-in-depth)
 
 ### 9. Memory Safety
-- Email cache capped at 500 entries
-- Rate-limiter buckets capped at 10k
+- Email cache capped at 500 entries per folder fetch (hard limit in `getEmails`)
+- Analytics cache collapses concurrent fetches into a single in-flight IMAP round-trip (no stampede)
+- Rate-limiter buckets capped at 10k entries (memory safety)
 - Safe request body reader (64 KiB limit, 15s timeout)
 
 ### 10. Network Security
@@ -97,8 +98,9 @@ When using this MCP server:
 - Reserve **full** preset for trusted, supervised workflows
 
 ### Data Protection
-- Email data is **cached in memory** only (cleared on restart, capped at 500 entries)
-- No persistent storage of email content
+- Email data is **cached in memory** only (cleared on restart, capped at 500 entries per fetch)
+- **Scheduled emails** are persisted to `~/.protonmail-mcp-scheduled.json` (mode 0600, atomic writes) so they survive restarts. This file contains email metadata (recipients, subject, body) — protect it accordingly.
+- No persistent storage of email content beyond the scheduled email queue
 - Logs are sanitized (no full email bodies)
 - Audit log contains escalation metadata only (no email content)
 

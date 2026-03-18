@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2026-03-17
+
+### Added
+- **5 new tools** (45 total): `save_draft`, `schedule_email`, `list_scheduled_emails`, `cancel_scheduled_email`, `download_attachment`
+- `save_draft` — IMAP APPEND to Drafts folder; returns server-assigned UID
+- `schedule_email` — queue email for delivery at a future time (60 s – 30 days); survives restarts
+- `list_scheduled_emails` — list all scheduled emails with status and retry count
+- `cancel_scheduled_email` — cancel a pending scheduled email by ID
+- `download_attachment` — retrieve attachment content as base64 from cached email
+- Retry logic for scheduled emails (up to 3 attempts before marking permanently failed)
+- `--help` / `--version` flags for `npm run settings` entry point
+- `insecureTls` field on `get_connection_status` SMTP and IMAP sub-objects — agents can now detect degraded TLS
+
+### Changed
+- `EmailMessage.headers` type widened to `Record<string, string | string[]>` (RFC 5322 multi-value headers)
+- `ScheduledEmail` interface gains optional `retryCount` field
+- `PERMISSION_PRESETS` is now an exported const in `schema.ts`; `loader.ts` and `security.ts` derive their valid-preset sets from it
+- `settings-main.ts` validates `PROTONMAIL_MCP_CONFIG` env var stays within the home directory
+
+### Security
+- TLS cert-missing and cert-load-failure paths now log at `error` level (previously `warn`) and set `insecureTls = true` on the service instance — surface via `get_connection_status`
+- Escalation `approveEscalation()` now re-checks expiry after finding the record (prevents TOCTOU race)
+- Escalation `reason` field now strips ANSI/C0/C1 control codes before storage
+- Scheduler `load()` validates each record's shape — malformed entries are skipped with a warning rather than poisoning the in-memory list
+- Scheduler `persist()` uses atomic temp-file + rename to prevent partial writes
+- Rate-limit denials now logged at `warn` level (previously silent)
+- Logger sanitizer updated from `[\r\n\t]` to full C0/C1 range `[\x00-\x1f\x7f]`
+- IMAP search strings (`from`, `to`, `subject`) sanitized against `"` and `\` to prevent SEARCH injection
+- `dateFrom` / `dateTo` search parameters validated with `isNaN(Date.parse(...))` before use
+- `references` items in `saveDraft` stripped of C0/C1 control characters
+- Analytics cache now uses an in-flight promise to collapse concurrent stampede fetches
+- Redundant per-tool `permissions.check()` calls removed from `save_draft` and `schedule_email` (already enforced centrally)
+- Duplicate `'drafts'` entry removed from `pickDraftsFolder` fallback list
+
 ## [2.0.0] - 2026-03-17
 
 ### Added

@@ -10,12 +10,13 @@
 
 import { readFileSync, writeFileSync, existsSync, renameSync } from "fs";
 import { homedir, tmpdir } from "os";
-import { join } from "path";
+import { join, resolve, normalize } from "path";
 import { randomBytes } from "crypto";
 import {
   ALL_TOOLS,
   TOOL_CATEGORIES,
   CONFIG_VERSION,
+  PERMISSION_PRESETS,
   type ServerConfig,
   type ToolPermission,
   type PermissionPreset,
@@ -31,10 +32,20 @@ import {
 // ─── Config path ───────────────────────────────────────────────────────────────
 
 export function getConfigPath(): string {
-  return (
-    process.env.PROTONMAIL_MCP_CONFIG ||
-    join(homedir(), ".protonmail-mcp.json")
-  );
+  const envPath = process.env.PROTONMAIL_MCP_CONFIG;
+  if (envPath) {
+    // Resolve to absolute path and ensure it stays within the user's home
+    // directory — prevents path-traversal attacks (e.g. "../../etc/passwd").
+    const resolved = resolve(normalize(envPath));
+    const home = homedir();
+    if (!resolved.startsWith(home + "/") && !resolved.startsWith(home + "\\") && resolved !== home) {
+      throw new Error(
+        `PROTONMAIL_MCP_CONFIG must point to a path within the home directory (${home}). Got: ${resolved}`
+      );
+    }
+    return resolved;
+  }
+  return join(homedir(), ".protonmail-mcp.json");
 }
 
 // ─── Default values ────────────────────────────────────────────────────────────
@@ -130,7 +141,7 @@ export function loadConfig(): ServerConfig | null {
     // Validate the preset value from disk against the known-good set.
     // An arbitrary string (e.g. "superuser") must not survive into the live
     // permission state; fall back to the safe "read_only" default.
-    const VALID_PRESETS = new Set<string>(["read_only", "send_only", "supervised", "custom", "full"]);
+    const VALID_PRESETS = new Set<string>(PERMISSION_PRESETS as unknown as string[]);
     const rawPreset = parsed.permissions?.preset;
     const safePreset: PermissionPreset = VALID_PRESETS.has(rawPreset as string)
       ? (rawPreset as PermissionPreset)

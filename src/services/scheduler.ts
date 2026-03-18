@@ -7,7 +7,8 @@
  * immediately on startup.
  */
 
-import { readFileSync, writeFileSync, existsSync } from "fs";
+import { readFileSync, writeFileSync, renameSync, existsSync } from "fs";
+import { join, dirname } from "path";
 import { ScheduledEmail, SendEmailOptions } from "../types/index.js";
 import { SMTPService } from "./smtp-service.js";
 import { logger } from "../utils/logger.js";
@@ -18,10 +19,27 @@ const MAX_SCHEDULE_AHEAD_MS = 30 * 24 * 60 * 60 * 1000;
 const MIN_LEAD_TIME_MS = 60 * 1000;
 /** Background check interval. */
 const POLL_INTERVAL_MS = 60 * 1000;
+/** Number of send attempts before marking an item as permanently failed. */
+const MAX_RETRIES = 3;
+
+const VALID_STATUSES = new Set(["pending", "sent", "failed", "cancelled"]);
+
+/** Validate a deserialized ScheduledEmail record. Returns false if malformed. */
+function isValidRecord(r: unknown): r is import("../types/index.js").ScheduledEmail {
+  if (!r || typeof r !== "object") return false;
+  const o = r as Record<string, unknown>;
+  if (typeof o.id !== "string" || !o.id) return false;
+  if (typeof o.scheduledAt !== "string" || isNaN(Date.parse(o.scheduledAt))) return false;
+  if (typeof o.createdAt !== "string" || isNaN(Date.parse(o.createdAt))) return false;
+  if (typeof o.status !== "string" || !VALID_STATUSES.has(o.status)) return false;
+  if (!o.options || typeof o.options !== "object") return false;
+  return true;
+}
 
 export class SchedulerService {
   private items: ScheduledEmail[] = [];
   private timer: ReturnType<typeof setInterval> | null = null;
+  private isProcessing = false;
 
   constructor(
     private readonly smtpService: SMTPService,
@@ -109,43 +127,65 @@ export class SchedulerService {
   // ─── Internal ───────────────────────────────────────────────────────────────
 
   async processDue(): Promise<void> {
-    const now = new Date();
-    const due = this.items.filter(
-      i => i.status === "pending" && new Date(i.scheduledAt) <= now
-    );
+    if (this.isProcessing) return;
+    this.isProcessing = true;
 
-    if (due.length === 0) return;
+    try {
+      const now = new Date();
+      const due = this.items.filter(
+        i => i.status === "pending" && new Date(i.scheduledAt) <= now
+      );
 
-    logger.info(`Processing ${due.length} due scheduled email(s)`, "Scheduler");
+      if (due.length === 0) return;
 
-    for (const item of due) {
-      try {
-        const result = await this.smtpService.sendEmail(item.options);
-        if (result.success) {
-          item.status = "sent";
-          logger.info(`Scheduled email sent`, "Scheduler", { id: item.id, messageId: result.messageId });
-        } else {
-          item.status = "failed";
-          item.error = result.error;
-          logger.warn(`Scheduled email failed`, "Scheduler", { id: item.id, error: result.error });
+      logger.info(`Processing ${due.length} due scheduled email(s)`, "Scheduler");
+
+      for (const item of due) {
+        try {
+          const result = await this.smtpService.sendEmail(item.options);
+          if (result.success) {
+            item.status = "sent";
+            logger.info(`Scheduled email sent`, "Scheduler", { id: item.id, messageId: result.messageId });
+          } else {
+            item.retryCount = (item.retryCount ?? 0) + 1;
+            item.error = result.error;
+            if ((item.retryCount ?? 0) >= MAX_RETRIES) {
+              item.status = "failed";
+              logger.warn(`Scheduled email permanently failed after ${MAX_RETRIES} attempts`, "Scheduler", { id: item.id, error: result.error });
+            } else {
+              logger.warn(`Scheduled email send failed (attempt ${item.retryCount}/${MAX_RETRIES}), will retry`, "Scheduler", { id: item.id, error: result.error });
+            }
+          }
+        } catch (err: any) {
+          item.retryCount = (item.retryCount ?? 0) + 1;
+          item.error = err.message;
+          if ((item.retryCount ?? 0) >= MAX_RETRIES) {
+            item.status = "failed";
+            logger.error(`Scheduled email permanently failed after ${MAX_RETRIES} attempts`, "Scheduler", { id: item.id, error: err.message });
+          } else {
+            logger.warn(`Scheduled email threw (attempt ${item.retryCount}/${MAX_RETRIES}), will retry`, "Scheduler", { id: item.id, error: err.message });
+          }
         }
-      } catch (err: any) {
-        item.status = "failed";
-        item.error = err.message;
-        logger.error(`Scheduled email threw`, "Scheduler", { id: item.id, error: err.message });
       }
-    }
 
-    this.persist();
+      this.persist();
+    } finally {
+      this.isProcessing = false;
+    }
   }
 
   private load(): void {
     if (!existsSync(this.storePath)) return;
     try {
       const raw = readFileSync(this.storePath, "utf-8");
-      const parsed = JSON.parse(raw) as ScheduledEmail[];
+      const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
-        this.items = parsed;
+        const valid = parsed.filter(isValidRecord);
+        const skipped = parsed.length - valid.length;
+        if (skipped > 0) {
+          logger.warn(`Skipped ${skipped} malformed record(s) from scheduled email store`, "Scheduler");
+        }
+        this.items = valid;
         logger.debug(`Loaded ${this.items.length} scheduled emails from disk`, "Scheduler");
       }
     } catch (err) {
@@ -155,8 +195,10 @@ export class SchedulerService {
   }
 
   private persist(): void {
+    const tmp = this.storePath + ".tmp";
     try {
-      writeFileSync(this.storePath, JSON.stringify(this.items, null, 2), "utf-8");
+      writeFileSync(tmp, JSON.stringify(this.items, null, 2), { encoding: "utf-8", mode: 0o600 });
+      renameSync(tmp, this.storePath);
     } catch (err) {
       logger.warn("Failed to persist scheduled emails", "Scheduler", err);
     }

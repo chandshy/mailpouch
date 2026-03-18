@@ -107,7 +107,8 @@ export interface ToolPermission {
   rateLimit: number | null;
 }
 
-export type PermissionPreset = "full" | "read_only" | "supervised" | "send_only" | "custom";
+export const PERMISSION_PRESETS = ["full", "read_only", "supervised", "send_only", "custom"] as const;
+export type PermissionPreset = typeof PERMISSION_PRESETS[number];
 
 export interface ServerPermissions {
   preset: PermissionPreset;

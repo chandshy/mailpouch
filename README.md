@@ -184,6 +184,7 @@ Restart Claude Desktop after saving the config.
 | `PROTONMAIL_BRIDGE_CERT` | No | — | Path to exported Bridge TLS `.crt` file |
 | `PROTONMAIL_SMTP_TOKEN` | No | — | SMTP token (required for direct `smtp.protonmail.ch`, paid plans only) |
 | `PROTONMAIL_MCP_CONFIG` | No | `~/.protonmail-mcp.json` | Override config file path |
+| `PROTONMAIL_SCHEDULER_STORE` | No | `~/.protonmail-mcp-scheduled.json` | Path for scheduled email persistence file |
 
 ---
 
@@ -414,6 +415,8 @@ Credentials are saved to `~/.protonmail-mcp.json` with `0600` permissions (owner
 - Export the Bridge TLS certificate: Bridge app → **Settings → Export TLS certificates**.
 - Set the path in the settings UI under **Setup → Bridge TLS Certificate**, or set `PROTONMAIL_BRIDGE_CERT` env var.
 - This enables proper TLS trust instead of skipping certificate validation.
+
+> **Security note:** If `PROTONMAIL_BRIDGE_CERT` is not configured, TLS certificate validation is **disabled** for the localhost Bridge connection. The server logs an error and the `get_connection_status` tool will report `insecureTls: true` for the affected service. Configure the cert path to restore full TLS security.
 
 ### Claude Desktop doesn't show ProtonMail tools
 

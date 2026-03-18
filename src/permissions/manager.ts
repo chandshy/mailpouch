@@ -5,11 +5,12 @@
  * made via the settings UI take effect without restarting the MCP server.
  *
  * Rate limiting uses an in-memory rolling 1-hour window.
- * If no config file exists all tools are allowed (permissive default).
+ * If no config file exists the read-only preset is enforced (safe default).
  */
 
 import { loadConfig, defaultConfig } from "../config/loader.js";
 import type { ToolName } from "../config/schema.js";
+import { logger } from "../utils/logger.js";
 
 interface RateBucket {
   /** Timestamps (ms) of calls within the current rolling window */
@@ -58,6 +59,7 @@ export class PermissionManager {
     const limit = perm.rateLimit;
     if (limit !== null && limit !== undefined && limit > 0) {
       if (!this.consumeRateSlot(tool, limit)) {
+        logger.warn(`Rate limit reached for tool '${tool}' (limit: ${limit}/hour)`, "PermissionManager");
         return {
           allowed: false,
           reason: `'${tool}' rate limit of ${limit} calls/hour has been reached. Try again later or raise the limit in settings.`,

@@ -335,7 +335,7 @@ export function requestEscalation(
     expiresAt:        expiresAt.toISOString(),
     targetPreset,
     currentPreset,
-    reason:           reason.slice(0, 500),
+    reason:           reason.replace(/[\x00-\x1f\x7f]|\x1b\[[0-9;]*[a-zA-Z]/g, "").slice(0, 500),
     status:           "pending",
     resolvedAt:       null,
     resolvedBy:       null,
@@ -391,6 +391,9 @@ export function approveEscalation(
   const e = data.escalations.find(r => r.id === id);
   if (!e)                    return { ok: false, error: "Escalation not found."              };
   if (e.status !== "pending") return { ok: false, error: `Escalation is already ${e.status}.` };
+  if (Date.now() > new Date(e.expiresAt).getTime()) {
+    return { ok: false, error: "Challenge has expired." };
+  }
 
   e.status     = "approved";
   e.resolvedAt = new Date().toISOString();

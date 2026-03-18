@@ -115,24 +115,33 @@ let smtpStatus: { connected: boolean; lastCheck: Date; error?: string } = {
 
 const ANALYTICS_CACHE_TTL_MS = 5 * 60 * 1000;
 let analyticsCache: { inbox: EmailMessage[]; sent: EmailMessage[]; fetchedAt: number } | null = null;
+/** In-flight fetch promise — collapses concurrent cache-miss calls into one IMAP round-trip. */
+let analyticsCacheInflight: Promise<{ inbox: EmailMessage[]; sent: EmailMessage[] }> | null = null;
 
 /**
  * Fetch inbox + sent emails, update the analytics service, and cache the result.
- * The analytics service is only updated on a cache miss — avoiding the double-cache
- * bug where updateEmails() would immediately invalidate the service's own computed cache.
+ * Concurrent cache-miss callers share a single in-flight fetch to avoid a stampede.
  */
 async function getAnalyticsEmails(): Promise<{ inbox: EmailMessage[]; sent: EmailMessage[] }> {
   const now = Date.now();
   if (analyticsCache && now - analyticsCache.fetchedAt < ANALYTICS_CACHE_TTL_MS) {
     return { inbox: analyticsCache.inbox, sent: analyticsCache.sent };
   }
-  const [inbox, sent] = await Promise.all([
-    imapService.getEmails("INBOX", 200),
-    imapService.getEmails("Sent", 100).catch(() => [] as EmailMessage[]),
-  ]);
-  analyticsCache = { inbox, sent, fetchedAt: now };
-  analyticsService.updateEmails(inbox, sent);
-  return { inbox, sent };
+  if (analyticsCacheInflight) return analyticsCacheInflight;
+  analyticsCacheInflight = (async () => {
+    try {
+      const [inbox, sent] = await Promise.all([
+        imapService.getEmails("INBOX", 200),
+        imapService.getEmails("Sent", 100).catch(() => [] as EmailMessage[]),
+      ]);
+      analyticsCache = { inbox, sent, fetchedAt: Date.now() };
+      analyticsService.updateEmails(inbox, sent);
+      return { inbox, sent };
+    } finally {
+      analyticsCacheInflight = null;
+    }
+  })();
+  return analyticsCacheInflight;
 }
 
 // ─── Cursor-Based Pagination ──────────────────────────────────────────────────
@@ -1705,10 +1714,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // ── Drafts & Scheduling ───────────────────────────────────────────────────
 
       case "save_draft": {
-        const saveDraftPerm = permissions.check("save_draft" as ToolName);
-        if (!saveDraftPerm.allowed) {
-          return { content: [{ type: "text" as const, text: `Permission denied: ${saveDraftPerm.reason ?? "save_draft not allowed"}` }], isError: true, structuredContent: { success: false, reason: saveDraftPerm.reason } };
-        }
         const draftResult = await imapService.saveDraft({
           to: args.to as string | undefined,
           cc: args.cc as string | undefined,
@@ -1727,10 +1732,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "schedule_email": {
-        const schedPerm = permissions.check("schedule_email" as ToolName);
-        if (!schedPerm.allowed) {
-          return { content: [{ type: "text" as const, text: `Permission denied: ${schedPerm.reason ?? "schedule_email not allowed"}` }], isError: true, structuredContent: { success: false, reason: schedPerm.reason } };
-        }
         const sendAtStr = args.send_at as string;
         if (!sendAtStr) {
           return { content: [{ type: "text" as const, text: "send_at is required" }], isError: true, structuredContent: { success: false, reason: "send_at is required" } };
@@ -1760,15 +1761,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "list_scheduled_emails": {
         const allScheduled = schedulerService.list();
-        const summary = allScheduled.map(s => ({
-          id: s.id,
-          scheduledAt: s.scheduledAt,
-          status: s.status,
-          subject: (s.options as any).subject,
-          to: Array.isArray((s.options as any).to) ? (s.options as any).to.join(", ") : (s.options as any).to,
-          createdAt: s.createdAt,
-          error: s.error,
-        }));
+        const summary = allScheduled.map(s => {
+          const opts = s.options as unknown as Record<string, unknown>;
+          const toField = opts?.to;
+          const toStr = Array.isArray(toField) ? toField.join(", ") : (typeof toField === "string" ? toField : undefined);
+          return {
+            id: s.id,
+            scheduledAt: s.scheduledAt,
+            status: s.status,
+            subject: typeof opts?.subject === "string" ? opts.subject : undefined,
+            to: toStr,
+            createdAt: s.createdAt,
+            error: s.error,
+            retryCount: s.retryCount,
+          };
+        });
         return ok({ scheduled: summary, count: summary.length });
       }
 
@@ -1923,7 +1930,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           await sendProgress(i + 1, total, `Moved ${i + 1} of ${total}`);
         }
 
-        analyticsCache = null; // invalidate
+        analyticsCache = null; analyticsCacheInflight = null; // invalidate
         return bulkOk(results);
       }
 
@@ -1975,7 +1982,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           await sendProgress(i + 1, total2, `Labeled ${i + 1} of ${total2}`);
         }
 
-        analyticsCache = null;
+        analyticsCache = null; analyticsCacheInflight = null;
         return bulkOk(results2);
       }
 
@@ -2005,13 +2012,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           await sendProgress(i + 1, brlTotal, `Unlabeled ${i + 1} of ${brlTotal}`);
         }
 
-        analyticsCache = null;
+        analyticsCache = null; analyticsCacheInflight = null;
         return bulkOk(brlResults);
       }
 
       case "delete_email": {
         await imapService.deleteEmail(args.emailId as string);
-        analyticsCache = null;
+        analyticsCache = null; analyticsCacheInflight = null;
         return actionOk();
       }
 
@@ -2035,7 +2042,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           await sendProgress(i + 1, total3, `Deleted ${i + 1} of ${total3}`);
         }
 
-        analyticsCache = null;
+        analyticsCache = null; analyticsCacheInflight = null;
         return bulkOk(results3);
       }
 
@@ -2075,12 +2082,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             host: config.smtp.host,
             port: config.smtp.port,
             lastCheck: smtpStatus.lastCheck.toISOString(),
+            insecureTls: smtpService.insecureTls,
             ...(smtpStatus.error ? { error: smtpStatus.error } : {}),
           },
           imap: {
             connected: imapService.isActive(),
             host: config.imap.host,
             port: config.imap.port,
+            insecureTls: imapService.insecureTls,
           },
           settingsConfigured: configExists(),
           settingsConfigPath: getConfigPath(),
@@ -2092,14 +2101,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const folder = (args.folder as string) || "INBOX";
         const limit = Math.min(Math.max(1, (args.limit as number) || 100), 500);
         const emails = await imapService.getEmails(folder, limit);
-        analyticsCache = null; // force analytics refresh on next request
+        analyticsCache = null; analyticsCacheInflight = null; // force analytics refresh on next request
         return ok({ success: true, folder, count: emails.length });
       }
 
       case "clear_cache": {
         imapService.clearCache();
         analyticsService.clearCache();
-        analyticsCache = null;
+        analyticsCache = null; analyticsCacheInflight = null;
         return actionOk();
       }
 

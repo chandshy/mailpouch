@@ -20,7 +20,7 @@ export class Logger {
     if (data === null || data === undefined) return data;
     if (typeof data === "string") {
       const truncated = data.length > 200 ? data.substring(0, 200) + "…" : data;
-      return truncated.replace(/[\r\n\t]/g, " ");
+      return truncated.replace(/[\x00-\x1f\x7f]/g, " ");
     }
     if (Array.isArray(data)) {
       return data.map((item) => this.sanitizeData(item));

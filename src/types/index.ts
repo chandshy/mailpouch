@@ -50,7 +50,7 @@ export interface EmailMessage {
   isStarred: boolean;
   hasAttachment: boolean;
   attachments?: EmailAttachment[];
-  headers?: Record<string, string>;
+  headers?: Record<string, string | string[]>;
   inReplyTo?: string;
   references?: string[];
 }
@@ -185,6 +185,7 @@ export interface ScheduledEmail {
   status: "pending" | "sent" | "failed" | "cancelled";
   createdAt: string; // ISO 8601
   error?: string;
+  retryCount?: number;
 }
 
 export interface ConnectionStatus {

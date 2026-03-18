@@ -355,7 +355,11 @@ export function sanitizeText(text: unknown, maxLen = 500): string {
   return text.replace(CONTROL_CHARS_RE, "").slice(0, maxLen).trim();
 }
 
-/** Validate that a string is one of the known preset names. */
+/**
+ * Presets an agent is allowed to request escalation to.
+ * Intentionally excludes "read_only" (you can't escalate downward) and
+ * "custom" (custom presets are human-configured, not agent-requested).
+ */
 const VALID_ESCALATION_TARGETS = new Set(["send_only", "supervised", "full"]);
 
 export function isValidEscalationTarget(preset: unknown): preset is string {

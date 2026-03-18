@@ -106,7 +106,7 @@ feat: add email filtering by date range
 
 ```
 src/
-├── index.ts                    # Main MCP server (40 tools, Resources, Prompts)
+├── index.ts                    # Main MCP server (45 tools, Resources, Prompts)
 ├── settings-main.ts            # Settings UI entry point
 ├── config/
 │   ├── schema.ts               # Tool list, categories, permission types
@@ -114,6 +114,8 @@ src/
 ├── permissions/
 │   ├── manager.ts              # Permission + rate-limit enforcement
 │   └── escalation.ts           # Human-gated escalation system
+├── security/
+│   └── keychain.ts             # OS keychain integration (@napi-rs/keyring)
 ├── settings/
 │   ├── security.ts             # Rate limiting, CSRF, input sanitization
 │   ├── server.ts               # Browser-based settings UI (localhost:8765)
@@ -121,6 +123,7 @@ src/
 ├── services/
 │   ├── smtp-service.ts         # SMTP email sending
 │   ├── simple-imap-service.ts  # IMAP email reading
+│   ├── scheduler.ts            # Scheduled email delivery
 │   └── analytics-service.ts    # Email analytics
 ├── types/
 │   └── index.ts                # TypeScript type definitions
@@ -199,7 +202,10 @@ When adding new features:
    }
    ```
 
-5. Update `src/config/loader.ts` to include the tool in appropriate presets
+5. Update `src/config/loader.ts` to include the tool in appropriate presets:
+   - Add the tool to the `read_only` allowed-set if it is a read-only operation
+   - Add rate-limit overrides in `supervised` / `send_only` sections as appropriate
+   - Verify the tool is correctly toggled by running `buildPermissions("read_only")` in a test
 6. Add tests
 7. Update README.md and README_FIRST_AI.md
 

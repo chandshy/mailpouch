@@ -235,7 +235,8 @@ export class AnalyticsService {
     // Build a lookup from Message-ID to inbox email date
     const inboxById = new Map<string, Date>();
     for (const email of this.inboxEmails) {
-      const msgId = email.headers?.['message-id'];
+      const msgIdRaw = email.headers?.['message-id'];
+      const msgId = Array.isArray(msgIdRaw) ? msgIdRaw[0] : msgIdRaw;
       if (msgId) {
         inboxById.set(msgId.trim(), email.date);
       }

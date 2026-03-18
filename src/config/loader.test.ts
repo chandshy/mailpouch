@@ -155,11 +155,26 @@ describe("getConfigPath", () => {
     }
   });
 
-  it("respects PROTONMAIL_MCP_CONFIG env var", () => {
+  it("respects PROTONMAIL_MCP_CONFIG env var when path is within home dir", () => {
     const saved = process.env.PROTONMAIL_MCP_CONFIG;
-    process.env.PROTONMAIL_MCP_CONFIG = "/tmp/custom-config.json";
+    const customPath = join(homedir(), "custom-config.json");
+    process.env.PROTONMAIL_MCP_CONFIG = customPath;
     try {
-      expect(getConfigPath()).toBe("/tmp/custom-config.json");
+      expect(getConfigPath()).toBe(customPath);
+    } finally {
+      if (saved !== undefined) {
+        process.env.PROTONMAIL_MCP_CONFIG = saved;
+      } else {
+        delete process.env.PROTONMAIL_MCP_CONFIG;
+      }
+    }
+  });
+
+  it("throws when PROTONMAIL_MCP_CONFIG points outside home dir", () => {
+    const saved = process.env.PROTONMAIL_MCP_CONFIG;
+    process.env.PROTONMAIL_MCP_CONFIG = "/tmp/evil-config.json";
+    try {
+      expect(() => getConfigPath()).toThrow("must point to a path within the home directory");
     } finally {
       if (saved !== undefined) {
         process.env.PROTONMAIL_MCP_CONFIG = saved;
