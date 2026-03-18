@@ -709,7 +709,7 @@ function buildHtml(configPath: string, csrfToken: string): string {
       <tr><td style="padding:3px 8px 3px 0;font-weight:600;color:var(--text)">Read-Only</td><td>Reading, analytics, and system tools only — no writes of any kind. <strong style="color:#a090ff">Default when no config is saved.</strong></td></tr>
       <tr><td style="padding:3px 8px 3px 0;font-weight:600;color:var(--text)">Supervised</td><td>All tools enabled; deletion capped at 5/hr, sending at 20/hr, bulk actions at 10/hr.</td></tr>
       <tr><td style="padding:3px 8px 3px 0;font-weight:600;color:var(--text)">Send-Only</td><td>Reading + sending only — no deletion, no folder writes.</td></tr>
-      <tr><td style="padding:3px 8px 3px 0;font-weight:600;color:var(--text)">Full Access</td><td>All 30 tools enabled, no rate limits. Grant this only when you trust the agent fully.</td></tr>
+      <tr><td style="padding:3px 8px 3px 0;font-weight:600;color:var(--text)">Full Access</td><td>All 29 tools enabled, no rate limits. Grant this only when you trust the agent fully.</td></tr>
     </table>
   </div>
 
@@ -941,7 +941,7 @@ function buildHtml(configPath: string, csrfToken: string): string {
           <input type="radio" name="wiz-preset" value="full">
           <div>
             <div class="wiz-preset-name">⚡ Full Access</div>
-            <div class="wiz-preset-desc">All 30 tools, no rate limits. Grant only when you fully trust the agent to act autonomously.</div>
+            <div class="wiz-preset-desc">All 29 tools, no rate limits. Grant only when you fully trust the agent to act autonomously.</div>
           </div>
         </label>
       </div>

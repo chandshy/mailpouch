@@ -32,6 +32,10 @@ parallel-test.js
 coverage/
 .nyc_output/
 
+# Runtime config and audit files
+*.audit.jsonl
+*.pending.json
+
 # Temporary files
 temp/
 tmp/

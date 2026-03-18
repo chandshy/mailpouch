@@ -4,13 +4,14 @@
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 1.x.x   | :white_check_mark: |
+| 2.x.x   | :white_check_mark: |
+| 1.x.x   | :x:                |
 
 ## Reporting a Vulnerability
 
 **Please do not report security vulnerabilities through public GitHub issues.**
 
-If you discover a security vulnerability, please send an email to **tom.miller.94@pm.me** with:
+If you discover a security vulnerability, please send an email to **chandshy@gmail.com** with:
 
 1. **Description** of the vulnerability
 2. **Steps to reproduce** the issue
@@ -24,6 +25,56 @@ If you discover a security vulnerability, please send an email to **tom.miller.9
 - **Credit**: You will be credited for the discovery (unless you prefer to remain anonymous)
 - **Timeline**: We aim to patch critical vulnerabilities within 7 days
 
+## Security Architecture (v2.0)
+
+The server implements a 10-layer defense-in-depth security model:
+
+### 1. Permission Gate
+- Every tool call checked against `~/.protonmail-mcp.json` (refreshed every 15s)
+- 4 presets: read_only (default), supervised, send_only, full
+- Per-tool enable/disable and rate limiting
+
+### 2. Rate Limiting
+- Sliding-window rate limits enforced per tool
+- Supervised preset: deletion capped at 5/hr, sending at 20/hr
+- Rate-limiter buckets capped at 10k entries (memory safety)
+
+### 3. Human-Gated Escalation
+- Two-channel design: agent requests via MCP, human approves via separate UI
+- One-time use challenges with 5-minute expiry
+- Max 5 requests/hr, max 1 pending at a time
+- Human must type "APPROVE" before confirmation button activates
+
+### 4. Audit Trail
+- Append-only log at `~/.protonmail-mcp.audit.jsonl`
+- Records all escalation requests, approvals, and denials
+
+### 5. CSRF Protection
+- All mutating settings API calls require X-CSRF-Token header
+- Timing-safe token comparison
+
+### 6. Origin Validation
+- Settings server checks Origin/Referer headers on all requests
+
+### 7. Input Validation
+- Email addresses, folder names, attachment sizes, hostnames validated
+- CRLF injection prevention in SMTP headers, subjects, filenames
+
+### 8. Config File Isolation
+- Atomic writes with mode 0600
+- Preset and tool names validated on load
+- No unknown keys allowed (defense-in-depth)
+
+### 9. Memory Safety
+- Email cache capped at 500 entries
+- Rate-limiter buckets capped at 10k
+- Safe request body reader (64 KiB limit, 15s timeout)
+
+### 10. Network Security
+- Settings UI binds to localhost only (127.0.0.1:8765)
+- Proton Bridge connections default to localhost
+- Self-signed certificate handling for Bridge TLS (configurable via PROTONMAIL_BRIDGE_CERT)
+
 ## Security Best Practices
 
 When using this MCP server:
@@ -36,28 +87,20 @@ When using this MCP server:
 
 ### Network Security
 - Use **localhost (127.0.0.1)** for Proton Bridge connections
-- Ensure Proton Bridge uses **TLS/SSL** connections
-- The server automatically accepts **self-signed certificates** for localhost only
+- Export and configure the **Bridge TLS certificate** for production use
+- The server accepts self-signed certificates for localhost only when no cert is configured
 
 ### Access Control
-- Restrict access to the MCP server configuration file
-- Use appropriate file permissions (600) for `.env` files
-- Limit who can modify the MCP server code
+- Config file at `~/.protonmail-mcp.json` is written with mode 0600
+- Start with **read_only** preset and escalate only as needed
+- Use **supervised** preset for day-to-day agent use (rate-limited writes)
+- Reserve **full** preset for trusted, supervised workflows
 
 ### Data Protection
-- Email data is **cached in memory** only (cleared on restart)
+- Email data is **cached in memory** only (cleared on restart, capped at 500 entries)
 - No persistent storage of email content
-- Logs may contain email metadata (not full content)
-
-## Known Security Considerations
-
-1. **Self-Signed Certificates**: The server accepts self-signed certificates from localhost for Proton Bridge. This is by design but could be a concern if used with remote hosts.
-
-2. **Memory Storage**: Email data is stored in memory during operation. Ensure proper server shutdown to clear sensitive data.
-
-3. **Logging**: Debug mode may log email metadata. Avoid debug mode in production.
-
-4. **Dependencies**: We regularly update dependencies to patch security vulnerabilities. Check for updates regularly.
+- Logs are sanitized (no full email bodies)
+- Audit log contains escalation metadata only (no email content)
 
 ## Disclosure Policy
 
@@ -68,15 +111,15 @@ When using this MCP server:
 ## Security Updates
 
 Security patches will be released as:
-- **Patch version** for minor security fixes (1.0.x)
-- **Minor version** for moderate security fixes (1.x.0)
+- **Patch version** for minor security fixes (2.0.x)
+- **Minor version** for moderate security fixes (2.x.0)
 - **Major version** if breaking changes are required for security
 
 ## Audit Trail
 
-| Date | Version | Issue | Severity | Status |
-|------|---------|-------|----------|--------|
-| TBD  | -       | -     | -        | -      |
+| Date       | Version | Issue                          | Severity | Status   |
+|------------|---------|--------------------------------|----------|----------|
+| 2026-03-17 | 2.0.0   | Security hardening (25 findings from 3 audit loops) | Various  | Resolved |
 
 ---
 

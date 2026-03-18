@@ -305,7 +305,7 @@ const PRESETS: { id: PermissionPreset; label: string; desc: string }[] = [
   { id: "read_only",  label: "Read-Only",   desc: "Reading, analytics, system only — no writes"             },
   { id: "supervised", label: "Supervised",  desc: "All tools; deletion ≤5/hr, sending ≤20/hr"              },
   { id: "send_only",  label: "Send-Only",   desc: "Reading + sending only — no deletion or folder writes"   },
-  { id: "full",       label: "Full Access", desc: "All 30 tools, no rate limits — full agent trust"         },
+  { id: "full",       label: "Full Access", desc: "All 29 tools, no rate limits — full agent trust"         },
 ];
 
 function ansiDraw(st: AnsiState): void {

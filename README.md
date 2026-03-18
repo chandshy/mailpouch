@@ -1,16 +1,14 @@
 # ProtonMail MCP Server
 
 [![CI](https://github.com/chandshy/protonmail-mcp-server/actions/workflows/ci.yml/badge.svg)](https://github.com/chandshy/protonmail-mcp-server/actions/workflows/ci.yml)
-[![npm version](https://img.shields.io/npm/v/protonmail-mcp-server.svg)](https://www.npmjs.com/package/protonmail-mcp-server)
-[![npm downloads](https://img.shields.io/npm/dm/protonmail-mcp-server.svg)](https://www.npmjs.com/package/protonmail-mcp-server)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Node.js Version](https://img.shields.io/node/v/protonmail-mcp-server.svg)](https://nodejs.org/)
+[![Node.js Version](https://img.shields.io/badge/node-%3E%3D20.0.0-brightgreen.svg)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.7-blue.svg)](https://www.typescriptlang.org/)
 [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-1.20+-green.svg)](https://github.com/modelcontextprotocol/sdk)
 
 Give Claude AI — or any MCP-compatible AI agent — secure, controlled access to your ProtonMail inbox via [Proton Bridge](https://proton.me/mail/bridge).
 
-**30 tools · MCP Resources · MCP Prompts · Permission presets · Per-tool rate limiting · Human-gated escalation · Browser-based settings UI**
+**29 tools · MCP Resources · MCP Prompts · Permission presets · Per-tool rate limiting · Human-gated escalation · Browser-based settings UI**
 
 ---
 
@@ -18,7 +16,7 @@ Give Claude AI — or any MCP-compatible AI agent — secure, controlled access 
 
 This is a **Model Context Protocol (MCP) server** that bridges Claude Desktop (or any MCP host) with your ProtonMail account. It connects to Proton Bridge — the official desktop app that decrypts your end-to-end encrypted emails locally — and exposes a rich set of email tools to AI agents.
 
-**Everything stays on your machine.** Your emails are decrypted by Proton Bridge locally, never by this server or by Anthropic.
+**Privacy note:** Your emails are decrypted locally by Proton Bridge. When Claude reads your emails through this server, the content is sent to Anthropic's API for processing. No email data is stored persistently by this server — it is cached in memory only and cleared on restart.
 
 ### What Claude can do with this server
 
@@ -128,7 +126,7 @@ Choose how much the AI is allowed to do:
 | **Read-Only** *(default)* | Read, search, analytics, connection status | Starting out, untrusted agents |
 | **Supervised** | All tools; deletion capped at 5/hr, sending at 20/hr | Day-to-day agentic use |
 | **Send-Only** | Reading + sending only, no deletion or folder writes | Agents that only need to send |
-| **Full Access** | All 30 tools, no rate limits | Trusted workflows where you review actions |
+| **Full Access** | All 29 tools, no rate limits | Trusted workflows where you review actions |
 
 You can change this at any time from the **Permissions** tab.
 
@@ -240,7 +238,6 @@ If any of these fail, see the [Troubleshooting](#9-troubleshooting) section belo
 | `send_email` | Send email with HTML/text body, attachments, CC, BCC, Reply-To |
 | `send_test_email` | Send a test email to verify SMTP is working |
 | `reply_to_email` | Reply to an email (sets In-Reply-To and References headers) |
-| `forward_email` | Forward an email with optional added message |
 
 ### Actions (requires supervised or full preset)
 
@@ -249,8 +246,8 @@ If any of these fail, see the [Troubleshooting](#9-troubleshooting) section belo
 | `mark_email_read` | Mark one email read or unread |
 | `star_email` | Star or unstar an email |
 | `move_email` | Move an email to a different folder |
+| `archive_email` | Move an email to the Archive folder |
 | `move_to_label` | Apply a ProtonMail label to an email (`Labels/<name>`) |
-| `bulk_mark_read` | Mark multiple emails read/unread |
 | `bulk_move_emails` | Move multiple emails to a folder |
 | `bulk_move_to_label` | Apply a label to multiple emails |
 
@@ -268,7 +265,7 @@ If any of these fail, see the [Troubleshooting](#9-troubleshooting) section belo
 |---|---|
 | `delete_email` | Permanently delete an email |
 | `delete_folder` | Delete a folder (must be empty) |
-| `bulk_delete` | Delete multiple emails permanently |
+| `bulk_delete_emails` | Delete multiple emails permanently |
 
 ### Escalation (always available)
 

@@ -10,9 +10,10 @@
 ## Quick orientation
 
 You have access to a user's ProtonMail inbox via Proton Bridge (a local
-desktop app that decrypts their end-to-end encrypted email). All email
-processing happens on the user's machine — you are **not** connecting to
-ProtonMail's servers directly.
+desktop app that decrypts their end-to-end encrypted email). The MCP server
+runs on the user's machine and connects to Bridge locally — but when you
+read emails through this server, the content is sent to your provider's API
+(e.g. Anthropic) for processing.
 
 Your access is **gated by a permission preset** set by the human. If a tool
 call is blocked, it means the human has not granted that level of access. You
@@ -86,8 +87,8 @@ dateTo        string   ISO 8601
 limit         number   1–200, default 50
 ```
 
-All fields are optional. The search runs over the cached email set — call
-`sync_emails` first if you need up-to-date results.
+All fields are optional. The search queries IMAP directly via Proton Bridge,
+so results reflect the current state of the mailbox.
 
 #### `get_unread_count`
 Cheap call — returns unread counts per folder without fetching email bodies.
@@ -189,15 +190,6 @@ isHtml   boolean  Default false.
 replyAll boolean  Include original CC recipients. Default false.
 ```
 
-#### `forward_email`
-Forward an email with optional additional message prepended.
-
-```
-emailId    string   UID to forward.
-to         string   Forward recipient(s).
-message    string   Optional text to prepend before the forwarded body.
-```
-
 #### `send_test_email`
 Send a test email to verify SMTP is working. Returns `{ success, messageId }`.
 
@@ -232,12 +224,6 @@ Apply a ProtonMail label to an email. The label path is constructed as
 emailId  string
 label    string  Label name only (not the full path). E.g. "urgent", not "Labels/urgent".
                  Max 255 chars. No slashes, no control characters.
-```
-
-#### `bulk_mark_read`
-```
-emailIds  string[]  Array of UIDs. Max 200.
-isRead    boolean   Default true.
 ```
 
 #### `bulk_move_emails`
@@ -294,7 +280,7 @@ The folder must be empty before it can be deleted.
 folderName  string
 ```
 
-#### `bulk_delete`
+#### `bulk_delete_emails`
 ```
 emailIds  string[]  Max 200.
 ```
@@ -407,7 +393,7 @@ on failure. Common patterns:
    stop and inform the user rather than retrying repeatedly.
 
 4. **Confirm before deleting.** Deletion is permanent. Always confirm with the
-   user before calling `delete_email`, `delete_folder`, or `bulk_delete`, even
+   user before calling `delete_email`, `delete_folder`, or `bulk_delete_emails`, even
    if they asked for it — mistakes are not recoverable.
 
 5. **Be transparent about escalation.** When calling `request_escalation`,
