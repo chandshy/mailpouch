@@ -7,9 +7,16 @@
  * tool annotations, progress notifications, cursor-based pagination.
  */
 
-import { writeFileSync } from "fs";
+import { writeFileSync, existsSync } from "fs";
+import { homedir } from "os";
+import { deflateSync } from "zlib";
+import { createRequire as _createRequire } from "module";
 import { createConnection } from "net";
 import { spawn } from "child_process";
+import { startSettingsServer } from "./settings/server.js";
+import { openBrowser } from "./settings/tui.js";
+import type SysTrayClass from "systray2";
+import type { MenuItem, SysTrayMenu } from "systray2";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -1233,6 +1240,32 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
 
+      // ── Bridge & Server Control ────────────────────────────────────────────
+      {
+        name: "start_bridge",
+        title: "Start Proton Bridge",
+        description: "Launch Proton Mail Bridge if it is not already running. Waits up to 15 s for SMTP/IMAP ports to become reachable before returning.",
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+        inputSchema: { type: "object", properties: {} },
+        outputSchema: ACTION_RESULT_SCHEMA,
+      },
+      {
+        name: "shutdown_server",
+        title: "Shutdown MCP Server",
+        description: "Gracefully shut down the MCP server. Terminates Proton Bridge (regardless of whether this server launched it), disconnects IMAP/SMTP, scrubs credentials from memory, then exits.",
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+        inputSchema: { type: "object", properties: {} },
+        outputSchema: ACTION_RESULT_SCHEMA,
+      },
+      {
+        name: "restart_server",
+        title: "Restart MCP Server",
+        description: "Restart the MCP server. Terminates Proton Bridge, shuts down gracefully, then spawns a fresh server process. If autoStartBridge is enabled the new process will re-launch Bridge automatically.",
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+        inputSchema: { type: "object", properties: {} },
+        outputSchema: ACTION_RESULT_SCHEMA,
+      },
+
       // ── Drafts & Scheduling ────────────────────────────────────────────────
       {
         name: "save_draft",
@@ -1391,7 +1424,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         description:
           "Request an increase in the server's active permission preset. " +
           "YOU CANNOT APPROVE THIS YOURSELF — approval requires a human to open the " +
-          "settings UI (http://localhost:8765) and click Approve. " +
+          `settings UI (http://localhost:${config.settingsPort ?? 8765}) and click Approve. ` +
           "Use check_escalation_status to poll for the result. " +
           "Downgrading (reducing access) never requires a challenge.",
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
@@ -1485,7 +1518,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (!result.ok) {
       return { content: [{ type: "text" as const, text: result.error }], isError: true };
     }
-    const settingsUrl = "http://localhost:8765";
+    const settingsUrl = `http://localhost:${config.settingsPort ?? 8765}`;
     const newToolList = result.newTools.length > 0
       ? `\n\nNew tools that would be granted:\n${result.newTools.map(t => `  • ${t}`).join("\n")}`
       : "";
@@ -2804,6 +2837,56 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return ok(status, JSON.stringify(status) + insecureTlsWarning);
       }
 
+      case "start_bridge": {
+        await launchProtonBridge();
+        // launchProtonBridge() sets bridgeAutoStarted=true on success (ports came up within 15 s).
+        // A single post-check reports the actual state — no extra wait needed as the 15 s window is spent.
+        const [smtpUp, imapUp] = await Promise.all([
+          isBridgeReachable(config.smtp.host, config.smtp.port),
+          isBridgeReachable(config.imap.host, config.imap.port),
+        ]);
+        if (smtpUp && imapUp) {
+          bridgeAutoStarted = true;
+          return ok({ success: true }, "Proton Bridge is running and reachable.");
+        }
+        return ok(
+          { success: false, reason: "Bridge launch command sent but ports are not yet reachable. Bridge may still be starting." },
+          "Bridge launch command sent — ports not yet reachable.",
+        );
+      }
+
+      case "shutdown_server": {
+        logger.info("Shutdown requested via MCP tool.", "MCPServer");
+        // Kill bridge unconditionally (not just if this process launched it)
+        await killProtonBridge();
+        bridgeAutoStarted = false;
+        setImmediate(() => gracefulShutdown("mcp_tool_shutdown"));
+        return ok({ success: true }, "Shutdown initiated. MCP server is shutting down.");
+      }
+
+      case "restart_server": {
+        logger.info("Restart requested via MCP tool.", "MCPServer");
+        // Kill bridge first so the new process doesn't connect then lose it mid-startup
+        await killProtonBridge();
+        bridgeAutoStarted = false;
+        // Spawn a fresh copy of this process — spawn is already imported at the top of the file.
+        // PROTONMAIL_MCP_RESPAWN=1 tells the child to skip settings server + tray startup:
+        // the child has stdio:ignore (no real MCP connection) so Claude Desktop will relaunch
+        // the authoritative process; the child is just a bridge-safe fallback that stays slim.
+        try {
+          spawn(process.execPath, process.argv.slice(1), {
+            stdio: "ignore",
+            detached: true,
+            env: { ...process.env, PROTONMAIL_MCP_RESPAWN: "1" },
+          }).unref();
+        } catch (spawnErr: unknown) {
+          logger.error("Failed to spawn replacement process during restart", "MCPServer", spawnErr);
+          throw new McpError(ErrorCode.InternalError, "Restart failed: could not spawn replacement process.");
+        }
+        setImmediate(() => gracefulShutdown("mcp_tool_restart"));
+        return ok({ success: true }, "Restart initiated. A new MCP server process is starting.");
+      }
+
       case "sync_emails": {
         const folder = (args.folder as string) || "INBOX";
         // Validate folder to prevent path traversal via the folder argument.
@@ -3278,19 +3361,95 @@ async function launchProtonBridge(): Promise<void> {
   const platform = process.platform;
   let cmd: string;
   let args: string[];
+  let useShell = false;
+  // Strip surrounding quotes that users sometimes paste in (e.g. from explorer)
+  if (config.bridgePath) {
+    config.bridgePath = config.bridgePath.trim().replace(/^["']|["']$/g, "");
+  }
+  // User-configured path takes top priority
+  if (config.bridgePath && existsSync(config.bridgePath)) {
+    try {
+      spawn(config.bridgePath, [], { stdio: "ignore", detached: true, shell: false }).unref();
+      logger.info("Proton Bridge launch command sent — waiting up to 15 s for ports to open…", "MCPServer");
+      const deadline = Date.now() + 15_000;
+      while (Date.now() < deadline) {
+        await new Promise<void>(r => setTimeout(r, 1500));
+        const [smtpOk, imapOk] = await Promise.all([
+          isBridgeReachable(config.smtp.host, config.smtp.port),
+          isBridgeReachable(config.imap.host, config.imap.port),
+        ]);
+        if (smtpOk && imapOk) {
+          logger.info("Proton Bridge is now reachable", "MCPServer");
+          bridgeAutoStarted = true;
+          bridgeRestartAttempts = 0;
+          return;
+        }
+      }
+      logger.warn("Proton Bridge did not become reachable within 15 s — continuing anyway", "MCPServer");
+    } catch (e: unknown) {
+      logger.warn("Failed to launch Proton Bridge from configured path", "MCPServer", e);
+    }
+    return;
+  }
+
   if (platform === "win32") {
-    // "Proton Mail Bridge" is the Windows display name; fall back to known install paths
-    cmd = "cmd";
-    args = ["/c", "start", "", "Proton Mail Bridge"];
+    // Try known install paths first, then fall back to display-name launch
+    const bridgeCandidates = [
+      `${homedir()}\\AppData\\Local\\Programs\\Proton Mail Bridge\\bridge.exe`,
+      `${homedir()}\\AppData\\Local\\Programs\\bridge\\bridge.exe`,
+      "C:\\Program Files\\Proton AG\\Proton Mail Bridge\\proton-bridge.exe",
+      "C:\\Program Files\\Proton Mail\\Proton Mail Bridge\\bridge.exe",
+      "C:\\Program Files\\Proton\\Proton Mail Bridge\\bridge.exe",
+      "C:\\Program Files (x86)\\Proton Mail\\Proton Mail Bridge\\bridge.exe",
+    ];
+    const found = bridgeCandidates.find(p => existsSync(p));
+    if (found) {
+      cmd = found;
+      args = [];
+    } else {
+      logger.error(
+        "Proton Bridge executable not found. Open the MCP settings page and set the bridge path under Bridge TLS Certificate.",
+        "MCPServer"
+      );
+      return;
+    }
   } else if (platform === "darwin") {
-    cmd = "open";
-    args = ["-a", "Proton Mail Bridge"];
+    const macCandidates = [
+      "/Applications/Proton Mail Bridge.app/Contents/MacOS/Proton Mail Bridge",
+      `${homedir()}/Applications/Proton Mail Bridge.app/Contents/MacOS/Proton Mail Bridge`,
+    ];
+    const macFound = macCandidates.find(p => existsSync(p));
+    if (macFound) {
+      cmd = macFound;
+      args = [];
+    } else {
+      logger.error(
+        "Proton Bridge executable not found. Open the MCP settings page and set the bridge path under Bridge TLS Certificate.",
+        "MCPServer"
+      );
+      return;
+    }
   } else {
-    cmd = "proton-bridge";
-    args = ["--no-window"];
+    const linuxCandidates = [
+      "/usr/bin/proton-bridge",
+      "/usr/local/bin/proton-bridge",
+      `${homedir()}/.local/bin/proton-bridge`,
+      "/opt/proton-bridge/proton-bridge",
+    ];
+    const linuxFound = linuxCandidates.find(p => existsSync(p));
+    if (linuxFound) {
+      cmd = linuxFound;
+      args = [];
+    } else {
+      logger.error(
+        "Proton Bridge executable not found. Open the MCP settings page and set the bridge path under Bridge TLS Certificate.",
+        "MCPServer"
+      );
+      return;
+    }
   }
   try {
-    spawn(cmd, args, { stdio: "ignore", detached: true, shell: platform === "win32" }).unref();
+    spawn(cmd, args, { stdio: "ignore", detached: true, shell: false }).unref();
     logger.info("Proton Bridge launch command sent — waiting up to 15 s for ports to open…", "MCPServer");
     const deadline = Date.now() + 15_000;
     while (Date.now() < deadline) {
@@ -3416,6 +3575,216 @@ function trimForAnalytics(emails: EmailMessage[]): EmailMessage[] {
   }));
 }
 
+// ─── Daemon: Tray Icon Generation ────────────────────────────────────────────
+// Pure-Node PNG + ICO generation — no external dependencies.
+
+function _crc32(buf: Buffer): number {
+  const tbl = Array.from({ length: 256 }, (_, i) => {
+    let c = i;
+    for (let j = 0; j < 8; j++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    return c >>> 0;
+  });
+  let crc = 0xFFFFFFFF;
+  for (const b of buf) crc = (crc >>> 8) ^ tbl[(crc ^ b) & 0xFF];
+  return (~crc) >>> 0;
+}
+
+function _pngChunk(type: string, data: Buffer): Buffer {
+  const t   = Buffer.from(type, "ascii");
+  const len = Buffer.allocUnsafe(4); len.writeUInt32BE(data.length, 0);
+  const crc = Buffer.allocUnsafe(4); crc.writeUInt32BE(_crc32(Buffer.concat([t, data])), 0);
+  return Buffer.concat([len, t, data, crc]);
+}
+
+function _makeEnvelopePng(): Buffer {
+  const W = 32, H = 32;
+  const rowSize = 1 + W * 4;
+  const raw = Buffer.allocUnsafe(H * rowSize);
+  for (let y = 0; y < H; y++) {
+    raw[y * rowSize] = 0;
+    for (let x = 0; x < W; x++) {
+      const o = y * rowSize + 1 + x * 4;
+      raw[o] = 109; raw[o + 1] = 74; raw[o + 2] = 255; raw[o + 3] = 255;
+    }
+  }
+  function setWhite(x: number, y: number) {
+    if (x < 0 || x >= W || y < 0 || y >= H) return;
+    const o = y * rowSize + 1 + x * 4;
+    raw[o] = 255; raw[o + 1] = 255; raw[o + 2] = 255; raw[o + 3] = 255;
+  }
+  function drawLine(ax: number, ay: number, bx: number, by: number) {
+    const dx = Math.abs(bx - ax), dy = Math.abs(by - ay);
+    const sx = ax < bx ? 1 : -1, sy = ay < by ? 1 : -1;
+    let err = dx - dy;
+    for (;;) {
+      setWhite(ax, ay);
+      if (ax === bx && ay === by) break;
+      const e2 = 2 * err;
+      if (e2 > -dy) { err -= dy; ax += sx; }
+      if (e2 <  dx) { err += dx; ay += sy; }
+    }
+  }
+  const x1 = 3, y1 = 9, x2 = 28, y2 = 22;
+  for (let x = x1; x <= x2; x++) { setWhite(x, y1); setWhite(x, y2); }
+  for (let y = y1; y <= y2; y++) { setWhite(x1, y); setWhite(x2, y); }
+  const cx = Math.floor((x1 + x2) / 2);
+  const cy = y1 + Math.floor((y2 - y1) * 0.5);
+  drawLine(x1, y1, cx, cy);
+  drawLine(x2, y1, cx, cy);
+  const ihdr = Buffer.allocUnsafe(13);
+  ihdr.writeUInt32BE(W, 0); ihdr.writeUInt32BE(H, 4);
+  ihdr[8] = 8; ihdr[9] = 6; ihdr[10] = 0; ihdr[11] = 0; ihdr[12] = 0;
+  return Buffer.concat([
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+    _pngChunk("IHDR", ihdr),
+    _pngChunk("IDAT", deflateSync(raw)),
+    _pngChunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
+function _pngToIco(png: Buffer): Buffer {
+  const hdr   = Buffer.from([0, 0, 1, 0, 1, 0]);
+  const entry = Buffer.allocUnsafe(16);
+  entry[0] = 32; entry[1] = 32;
+  entry[2] = 0;  entry[3] = 0;
+  entry.writeUInt16LE(1,  4);
+  entry.writeUInt16LE(32, 6);
+  entry.writeUInt32LE(png.length, 8);
+  entry.writeUInt32LE(22, 12);
+  return Buffer.concat([hdr, entry, png]);
+}
+
+const _trayIconPng = _makeEnvelopePng();
+const TRAY_ICON_B64 = process.platform === "win32"
+  ? _pngToIco(_trayIconPng).toString("base64")
+  : _trayIconPng.toString("base64");
+
+// ─── Daemon: Settings Server + Tray State ────────────────────────────────────
+
+let _settingsStop:    (() => Promise<void>) | null = null;
+let _settingsEnabled: boolean = false;
+let _settingsUrl:     string  = "";
+let _trayInstance:    InstanceType<typeof SysTrayClass> | null = null;
+const _trayRequire = _createRequire(import.meta.url);
+
+async function _startSettingsServerDaemon(): Promise<void> {
+  const port = config.settingsPort ?? 8765;
+  const maxAttempts = 5;
+  const retryMs     = 1000;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const { scheme, stop } = await startSettingsServer(port, false, true /* quiet */);
+      _settingsStop    = stop;
+      _settingsUrl     = `${scheme}://localhost:${port}`;
+      _settingsEnabled = true;
+      logger.info(`Settings UI started at ${_settingsUrl}`, "MCPServer");
+      return;
+    } catch (err: unknown) {
+      const isInUse = (err as NodeJS.ErrnoException).code === "EADDRINUSE";
+      if (isInUse && attempt < maxAttempts) {
+        logger.debug(`Settings UI port ${port} in use, retrying (${attempt}/${maxAttempts})…`, "MCPServer");
+        await new Promise(r => setTimeout(r, retryMs));
+      } else {
+        logger.warn("Settings UI failed to start", "MCPServer", err);
+        return;
+      }
+    }
+  }
+}
+
+async function _stopSettingsServerDaemon(): Promise<void> {
+  if (_settingsStop) {
+    try {
+      await _settingsStop();
+      logger.info("Settings UI stopped", "MCPServer");
+    } catch (err: unknown) {
+      logger.warn("Settings UI stop error", "MCPServer", err);
+    } finally {
+      _settingsStop    = null;
+      _settingsEnabled = false;
+    }
+  }
+}
+
+function _buildTrayMenu(): SysTrayMenu {
+  const sep: MenuItem = { title: "<SEPARATOR>", tooltip: "", enabled: true, checked: false };
+  const statusLabel   = smtpStatus.connected ? "\u25CF Connected" : "\u25CB Disconnected";
+  const emailLabel    = config.smtp.username || "Not configured";
+  const items: MenuItem[] = [
+    { title: "ProtonMail MCP", tooltip: "ProtonMail MCP Daemon", enabled: false, checked: false },
+    sep,
+    { title: statusLabel, tooltip: "", enabled: false, checked: false },
+    { title: emailLabel,  tooltip: "", enabled: false, checked: false },
+    sep,
+    ...(_settingsEnabled && _settingsUrl
+      ? [{ title: "Open Settings", tooltip: `Open ${_settingsUrl}`, enabled: true, checked: false }]
+      : []),
+    sep,
+    {
+      title:   _settingsEnabled ? "Disable Settings UI" : "Enable Settings UI",
+      tooltip: _settingsEnabled ? "Stop the settings HTTP server" : "Start the settings HTTP server",
+      enabled: true,
+      checked: false,
+    },
+    sep,
+    { title: "Quit", tooltip: "Stop the MCP daemon", enabled: true, checked: false },
+  ];
+  return { icon: TRAY_ICON_B64, title: "", tooltip: "ProtonMail MCP", items };
+}
+
+async function _rebuildTray(): Promise<void> {
+  if (!_trayInstance) return;
+  try {
+    await _trayInstance.sendAction({ type: "update-menu", menu: _buildTrayMenu() });
+  } catch (err: unknown) {
+    logger.debug("Tray menu update failed", "MCPServer", err);
+  }
+}
+
+async function _initTray(): Promise<void> {
+  type SysTrayConstructor = typeof SysTrayClass;
+  let ST: SysTrayConstructor | undefined;
+  try {
+    ST = (_trayRequire("systray2") as { default: SysTrayConstructor }).default;
+  } catch {
+    logger.debug("systray2 not installed — tray icon disabled", "MCPServer");
+    return;
+  }
+
+  try {
+    const tray = new ST({ menu: _buildTrayMenu(), debug: false, copyDir: true });
+
+    // Wait for the native tray binary to signal ready
+    await tray.ready();
+    _trayInstance = tray;
+    logger.info("System tray icon active", "MCPServer");
+
+    await tray.onClick((action: { item: MenuItem }) => {
+      switch (action.item.title) {
+        case "Open Settings":
+          openBrowser(_settingsUrl);
+          break;
+        case "Disable Settings UI":
+          _stopSettingsServerDaemon()
+            .then(() => _rebuildTray())
+            .catch((err: unknown) => logger.warn("Settings disable failed", "MCPServer", err));
+          break;
+        case "Enable Settings UI":
+          _startSettingsServerDaemon()
+            .then(() => _rebuildTray())
+            .catch((err: unknown) => logger.warn("Settings enable failed", "MCPServer", err));
+          break;
+        case "Quit":
+          gracefulShutdown("tray-quit").catch(() => process.exit(1));
+          break;
+      }
+    });
+  } catch (err: unknown) {
+    logger.warn("Tray icon failed to start", "MCPServer", err);
+    _trayInstance = null;
+  }
+}
+
 async function main() {
   // Clear log file from previous run so each session starts fresh
   try { writeFileSync(getLogFilePath(), "", "utf8"); } catch { /* ignore */ }
@@ -3450,6 +3819,8 @@ async function main() {
       config.imap.bridgeCertPath = cn.bridgeCertPath || undefined;
       config.debug              = !!cn.debug;
       config.autoStartBridge    = !!cn.autoStartBridge;
+      config.bridgePath         = cn.bridgePath || undefined;
+      config.settingsPort       = fileConfig.settingsPort ?? 8765;
       logger.setDebugMode(!!cn.debug);
       tracer.setEnabled(!!cn.debug);
 
@@ -3572,6 +3943,15 @@ async function main() {
     const transport = new StdioServerTransport();
     await server.connect(transport);
     logger.info("Proton Mail MCP Server started. Tools, Resources, and Prompts are available.", "MCPServer");
+
+    // ── Daemon: start settings HTTP server + system tray ───────────────────
+    // Both run alongside the MCP stdio transport. stdout is now owned by the
+    // MCP protocol, so startSettingsServer is called with quiet=true.
+    // Skip when running as a respawn child (stdio:ignore, no real MCP session).
+    if (!process.env.PROTONMAIL_MCP_RESPAWN) {
+      await _startSettingsServerDaemon();
+      _initTray().catch((err: unknown) => logger.warn("Tray init error", "MCPServer", err));
+    }
   } catch (error) {
     logger.error("Server startup failed", "MCPServer", error);
     process.exit(1);
@@ -3592,7 +3972,14 @@ process.on("unhandledRejection", (reason) => {
 async function gracefulShutdown(signal: string): Promise<void> {
   logger.info(`Received ${signal}, shutting down gracefully...`, "MCPServer");
   try {
-    // 0. Stop bridge watchdog
+    // 0. Stop settings server + tray
+    await _stopSettingsServerDaemon();
+    if (_trayInstance) {
+      try { _trayInstance.kill(false); } catch { /* ignore */ }
+      _trayInstance = null;
+    }
+
+    // 1. Stop bridge watchdog
     if (bridgeWatchdogTimer) { clearInterval(bridgeWatchdogTimer); bridgeWatchdogTimer = null; }
 
     // 1. Stop scheduler (persists pending items before close)

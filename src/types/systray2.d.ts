@@ -14,17 +14,32 @@ declare module "systray2" {
   }
 
   export interface SysTrayOptions {
-    menu: {
-      icon:    string;
-      title:   string;
-      tooltip: string;
-      items:   MenuItem[];
-    };
+    menu:     SysTrayMenu;
     debug?:   boolean;
     copyDir?: boolean;
   }
 
   export type ClickAction = { item: MenuItem };
+
+  export interface SysTrayMenu {
+    icon:    string;
+    title:   string;
+    tooltip: string;
+    items:   MenuItem[];
+  }
+
+  export interface SendActionUpdateMenu {
+    type: "update-menu";
+    menu: SysTrayMenu;
+  }
+
+  export interface SendActionUpdateItem {
+    type: "update-item";
+    item: MenuItem;
+    seq_id?: number;
+  }
+
+  export type SendAction = SendActionUpdateMenu | SendActionUpdateItem;
 
   export default class SysTray {
     /** A pre-built separator menu item. */
@@ -32,8 +47,14 @@ declare module "systray2" {
 
     constructor(options: SysTrayOptions);
 
-    /** Register a click/activate handler. */
-    onClick(handler: (action: ClickAction) => void): void;
+    /** Resolves when the native tray binary is ready to receive commands. */
+    ready(): Promise<void>;
+
+    /** Register a click/activate handler (awaits ready() internally). */
+    onClick(handler: (action: ClickAction) => void): Promise<this>;
+
+    /** Push a live update to the tray (menu or item). */
+    sendAction(action: SendAction): Promise<this>;
 
     /** Destroy the tray icon. Pass `false` to skip process.exit. */
     kill(exit: boolean): void;

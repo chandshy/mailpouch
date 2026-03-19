@@ -22,7 +22,7 @@ Your emails are decrypted on your own machine by Proton Bridge. This server neve
 
 ## Key Features
 
-- **48 tools** covering reading, search, analytics, sending, scheduling, drafts, folders, labels, and bulk operations
+- **51 tools** covering reading, search, analytics, sending, scheduling, drafts, folders, labels, bulk operations, and Bridge/server lifecycle control (49 permission-managed + 2 always-available escalation tools)
 - **4 permission presets** — read-only by default; write access requires explicit opt-in
 - **Human-gated escalation** — agents request elevated permissions, you approve via browser UI or terminal; the agent cannot approve its own requests
 - **Browser-based settings UI** at `localhost:8765` — setup wizard, live connection test, per-tool toggles, escalation approval panel
@@ -164,7 +164,7 @@ Restart Claude Desktop after saving. The setup wizard (step 5) generates this sn
 
 ## Available Tools
 
-48 tools across 8 categories.
+51 tools across 9 categories.
 
 ### Reading — always available
 
@@ -252,6 +252,16 @@ Restart Claude Desktop after saving. The setup wizard (step 5) generates this sn
 | `bulk_delete_emails` | Permanently delete up to 200 emails |
 | `bulk_delete` | Alias for `bulk_delete_emails` |
 
+### Bridge & Server Control
+
+| Tool | Description | Permission |
+|---|---|---|
+| `start_bridge` | Launch Proton Mail Bridge if it is not running; waits up to 15 s for SMTP/IMAP ports to become reachable | Always available |
+| `shutdown_server` | Gracefully shut down the MCP server — terminates Bridge, disconnects IMAP/SMTP, scrubs credentials from memory | `supervised` or `full` (capped at 2/hr in supervised) |
+| `restart_server` | Terminate Bridge, shut down the current process, and spawn a fresh MCP server process; Bridge is re-launched automatically if `autoStartBridge` is enabled | `supervised` or `full` (capped at 2/hr in supervised) |
+
+> **Auto-start & watchdog:** If `autoStartBridge` is enabled in settings, the server launches Bridge automatically on startup and runs a background watchdog every 30 s that will attempt up to 3 restarts if Bridge becomes unreachable.
+
 ### Escalation — always available
 
 | Tool | Description |
@@ -279,10 +289,10 @@ Pre-built prompt templates for common tasks:
 
 | Preset | What's allowed | Best for |
 |---|---|---|
-| **Read-Only** *(default)* | Read, search, analytics, connection status | Starting out; untrusted or new agents |
-| **Supervised** | All 48 tools; deletion capped at 5/hr, sending at 20/hr, bulk actions at 10/hr | Day-to-day agentic use |
-| **Send-Only** | Reading + sending only; no deletion or folder writes | Agents that only need to compose and send |
-| **Full Access** | All 48 tools, no rate limits | Trusted workflows where you review actions |
+| **Read-Only** *(default)* | Read, search, analytics, connection status, Bridge start | Starting out; untrusted or new agents |
+| **Supervised** | All tools; deletion 5/hr, sending 20/hr, bulk actions 10/hr, server lifecycle 2/hr; read-heavy tools also rate-limited (`get_emails` 60/hr, `search_emails` 30/hr, `get_email_by_id` 200/hr) | Day-to-day agentic use |
+| **Send-Only** | Reading + sending + drafts + scheduling + Bridge start; no deletion, no folder writes, no server lifecycle | Agents that only need to compose and send |
+| **Full Access** | All tools, no rate limits | Trusted workflows where you review actions |
 
 Change the preset at any time from the **Permissions** tab in the settings UI.
 
@@ -423,7 +433,7 @@ npm run settings       # start settings UI (after build)
 
 ```
 src/
-  index.ts                    # MCP server entry point (48 tools, resources, prompts)
+  index.ts                    # MCP server entry point (51 tools, resources, prompts)
   settings-main.ts            # Settings UI CLI entry point
   config/
     schema.ts                 # Config types, tool names, category definitions

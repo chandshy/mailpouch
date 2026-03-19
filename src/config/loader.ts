@@ -82,6 +82,7 @@ export function buildPermissions(preset: PermissionPreset): ServerConfig["permis
       ...TOOL_CATEGORIES.analytics.tools,
       ...TOOL_CATEGORIES.system.tools,
       "get_folders",
+      "start_bridge",  // needed to bring Bridge up before reading
     ]);
     for (const tool of ALL_TOOLS) {
       tools[tool].enabled = allowed.has(tool);
@@ -100,13 +101,18 @@ export function buildPermissions(preset: PermissionPreset): ServerConfig["permis
     tools["get_emails"].rateLimit = 60;
     tools["search_emails"].rateLimit = 30;
     tools["get_email_by_id"].rateLimit = 200;
+    // Rate-limit server lifecycle tools — destructive but allowed in supervised
+    tools["shutdown_server"].rateLimit = 2;
+    tools["restart_server"].rateLimit = 2;
   } else if (preset === "send_only") {
     const allowed = new Set<string>([
       ...TOOL_CATEGORIES.sending.tools,
+      ...TOOL_CATEGORIES.drafts.tools,
       ...TOOL_CATEGORIES.reading.tools,
       "get_folders",
       "get_connection_status",
       "get_logs",
+      "start_bridge",  // needed to bring Bridge up before sending
     ]);
     for (const tool of ALL_TOOLS) {
       tools[tool].enabled = allowed.has(tool);
@@ -129,6 +135,7 @@ export function defaultConfig(): ServerConfig {
       password: "",
       smtpToken: "",
       bridgeCertPath: "",
+      bridgePath: "",
       debug: false,
     },
     // Safe default: read-only. Users must explicitly grant write/send/delete

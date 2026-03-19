@@ -29,9 +29,9 @@ understand context before attempting any action that modifies email state.
 
 | Preset | What you can do |
 |---|---|
-| `read_only` | Read, search, analytics, system status only |
-| `send_only` | Read + send (no deletion, no folder writes) |
-| `supervised` | All tools; deletion capped at 5/hr, sending at 20/hr |
+| `read_only` | Read, search, analytics, system status, Bridge start only |
+| `send_only` | Read + send + drafts + scheduling + Bridge start; no deletion, no folder writes, no server lifecycle |
+| `supervised` | All tools; deletion 5/hr, sending 20/hr, bulk actions 10/hr, server lifecycle 2/hr; read-heavy tools also rate-limited: `get_emails` 60/hr, `search_emails` 30/hr, `get_email_by_id` 200/hr |
 | `full` | All tools, no rate limits |
 
 The current preset is enforced server-side — you cannot bypass it. If a tool
@@ -440,6 +440,39 @@ Returns `{ success, failed, errors }`.
 
 #### `bulk_delete`
 Alias for `bulk_delete_emails`. Same input/output.
+
+---
+
+### Bridge & Server Control
+
+#### `start_bridge`
+Launch Proton Mail Bridge if it is not already running. Always available in all presets.
+Waits up to 15 s for SMTP (port 1025) and IMAP (port 1143) to become reachable before returning.
+
+Returns `{ success: true }` if ports are up, or `{ success: false, reason: "..." }` if Bridge
+did not become reachable within the window (may still be starting).
+
+**Use this when:** `get_connection_status` shows IMAP/SMTP unreachable and you want to
+attempt to bring Bridge up without asking the human to do it manually.
+
+#### `shutdown_server`
+Gracefully shut down the MCP server. Requires `supervised` or `full` (capped at 2/hr in supervised).
+
+Sequence: terminates Proton Bridge → disconnects IMAP/SMTP → scrubs credentials from memory → exits.
+The MCP server will not be available after this call completes.
+
+Returns `{ success: true }` immediately; shutdown begins asynchronously so the response is delivered
+before the process exits.
+
+#### `restart_server`
+Restart the MCP server. Requires `supervised` or `full` (capped at 2/hr in supervised).
+
+Sequence: terminates Proton Bridge → spawns a fresh copy of the server process → graceful shutdown
+of the current process. If `autoStartBridge` is enabled in settings, the new process will
+re-launch Bridge automatically.
+
+Returns `{ success: true }` if the replacement process was spawned successfully.
+Throws an MCP error if spawning the replacement fails (current server remains running in that case).
 
 ---
 

@@ -27,6 +27,8 @@ export const ALL_TOOLS = [
   "get_email_stats", "get_email_analytics", "get_contacts", "get_volume_trends",
   // System
   "get_connection_status", "sync_emails", "clear_cache", "get_logs",
+  // Bridge & server control
+  "start_bridge", "shutdown_server", "restart_server",
 ] as const;
 
 export type ToolName = (typeof ALL_TOOLS)[number];
@@ -96,6 +98,12 @@ export const TOOL_CATEGORIES: Record<string, ToolCategory> = {
     tools: ["get_connection_status", "sync_emails", "clear_cache", "get_logs"],
     risk: "safe",
   },
+  bridge_control: {
+    label: "Bridge & Server Control",
+    description: "Start Proton Bridge, shut down, or restart the MCP server",
+    tools: ["start_bridge", "shutdown_server", "restart_server"],
+    risk: "destructive",
+  },
 };
 
 // ─── Permission Types ──────────────────────────────────────────────────────────
@@ -137,6 +145,8 @@ export interface ConnectionSettings {
   tlsMode?: 'starttls' | 'ssl';
   /** Automatically launch Proton Bridge if it is not reachable on MCP server start. */
   autoStartBridge?: boolean;
+  /** Explicit path to the Proton Bridge executable. Leave blank to auto-detect. */
+  bridgePath?: string;
   debug: boolean;
 }
 

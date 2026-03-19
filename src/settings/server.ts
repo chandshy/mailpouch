@@ -108,10 +108,23 @@ function safeConfig(cfg: ServerConfig): unknown {
 
 // ─── Embedded HTML UI ─────────────────────────────────────────────────────────
 
-function buildHtml(configPath: string, csrfToken: string): string {
+function buildHtml(configPath: string, csrfToken: string, runningPort = 8765): string {
   const toolsJson = JSON.stringify(ALL_TOOLS);
   const categoriesJson = JSON.stringify(TOOL_CATEGORIES);
   const distIndexPath = JSON.stringify(nodePath.resolve(process.cwd(), "dist", "index.js"));
+
+  // Read version + name from package.json at the project root
+  let pkgVersion = "unknown";
+  let pkgName = "protonmail-agentic-mcp";
+  try {
+    const pkgPath = nodePath.resolve(process.cwd(), "package.json");
+    const pkgJson = JSON.parse(readFileSync(pkgPath, "utf-8")) as { version?: string; name?: string };
+    if (pkgJson.version) pkgVersion = pkgJson.version;
+    if (pkgJson.name)    pkgName    = pkgJson.name;
+  } catch { /* use defaults */ }
+  const pkgVersionJson  = JSON.stringify(pkgVersion);
+  const pkgNameJson     = JSON.stringify(pkgName);
+  const runningPortJson = JSON.stringify(runningPort);
 
   // Platform-specific Bridge cert hint — only show the relevant OS path
   const certDefaultPath =
@@ -1008,6 +1021,18 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
           </div>
         </div>
 
+        <div style="margin-bottom:20px">
+          <div class="field">
+            <label>Proton Bridge executable path <span style="color:var(--muted);font-weight:400">(optional — leave blank to auto-detect)</span></label>
+            <div style="display:flex;gap:8px;align-items:center">
+              <input type="text" id="wiz-bridge-path" placeholder="Auto-detect" style="flex:1"
+                aria-label="Path to the Proton Bridge executable">
+              <button class="btn btn-ghost" type="button" id="wiz-search-bridge-btn" onclick="wizSearchBridgePath()" style="white-space:nowrap">Search</button>
+            </div>
+            <div class="hint" id="wiz-bridge-path-hint">Click Search to auto-detect, or enter the path manually if not found.</div>
+          </div>
+        </div>
+
         <div class="field" style="margin-bottom:20px">
           <label class="toggle-wrap" style="width:fit-content">
             <span class="toggle"><input type="checkbox" id="wiz-auto-start-bridge"><span class="slider"></span></span>
@@ -1390,6 +1415,14 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
             ${certPlatformHint}
           </div>
         </div>
+        <div class="field" style="margin-top:12px">
+          <label for="bridge-path">Proton Bridge executable path <span style="color:var(--muted);font-weight:400">(optional — leave blank to auto-detect)</span></label>
+          <div style="display:flex;gap:8px;align-items:center">
+            <input type="text" id="bridge-path" placeholder="Auto-detect" style="flex:1">
+            <button class="btn btn-ghost" type="button" id="search-bridge-btn" onclick="searchBridgePath()" style="white-space:nowrap">Search</button>
+          </div>
+          <div class="hint" id="bridge-path-hint">Used when auto-start is enabled. Click Search to detect automatically, or enter the path manually.</div>
+        </div>
         <div class="field" style="margin-top:6px">
           <label class="toggle-wrap" style="width:fit-content">
             <span class="toggle"><input type="checkbox" id="debug-mode"><span class="slider"></span></span>
@@ -1405,8 +1438,12 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
         </div>
         <div class="field" style="margin-top:14px">
           <label for="settings-port">Settings UI port</label>
-          <input type="number" id="settings-port" min="1" max="65535" placeholder="8765" style="width:120px">
+          <input type="number" id="settings-port" min="1" max="65535" placeholder="8765" style="width:120px"
+            oninput="checkPortMismatch()">
           <div class="hint">Port the settings web UI listens on. Takes effect on the next launch. Default: 8765.</div>
+          <div id="port-mismatch-warn" style="display:none;margin-top:4px;font-size:12px;color:var(--warn,#f59e0b)">
+            ⚠ Currently running on port ${runningPort}. Save and restart settings for the new port to take effect.
+          </div>
         </div>
       </fieldset>
     </div>
@@ -1458,6 +1495,7 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
     <div class="card-title">Server Information</div>
     <table class="info-table">
       <tr><td>Config file</td><td><code id="info-config-path">${safeConfigPath}</code></td></tr>
+      <tr><td>Settings UI port</td><td><code>${runningPort}</code> <span style="color:var(--muted);font-size:12px">(currently running)</span></td></tr>
       <tr><td>Config exists</td><td id="info-config-exists">—</td></tr>
       <tr><td>Active preset</td><td id="info-preset">—</td></tr>
       <tr><td>Disabled tools</td><td id="info-disabled">—</td></tr>
@@ -1494,6 +1532,22 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
         </div>
       </div>
     </div>
+  </div>
+
+  <div class="card" id="update-card">
+    <div class="card-title">Updates</div>
+    <div class="card-desc">Check npm for a newer version of this package and install it.</div>
+    <table class="info-table" style="margin-bottom:14px">
+      <tr><td>Installed version</td><td><code id="update-current">—</code></td></tr>
+      <tr><td>Latest version</td><td><code id="update-latest">—</code></td></tr>
+      <tr><td>Status</td><td id="update-status" style="color:var(--muted)">Not checked</td></tr>
+    </table>
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <button class="btn btn-ghost" id="check-update-btn" onclick="checkForUpdates()">Check for Updates</button>
+      <button class="btn btn-primary" id="install-update-btn" onclick="installUpdate()" style="display:none">Install Update</button>
+      <span id="update-action-status" style="font-size:13px;color:var(--muted)"></span>
+    </div>
+    <pre id="update-output" style="display:none;margin-top:14px;background:var(--surface2);padding:12px;border-radius:6px;font-size:12px;overflow-x:auto;white-space:pre-wrap;max-height:200px;overflow-y:auto"></pre>
   </div>
 
   <div class="card">
@@ -1595,6 +1649,9 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
   const ALL_TOOLS  = ${toolsJson};
   const CATEGORIES = ${categoriesJson};
   window.__distIndexPath = ${distIndexPath};
+  const PKG_VERSION   = ${pkgVersionJson};
+  const PKG_NAME      = ${pkgNameJson};
+  const RUNNING_PORT  = ${runningPortJson};
 
   // ── State ─────────────────────────────────────────────────────────────────
   let cfg         = null;
@@ -1723,10 +1780,11 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
     imapSt.className = 'conn-row-status idle'; imapSt.textContent = 'Checking…';
     smtpRow.className = 'conn-row'; imapRow.className = 'conn-row';
 
-    // Save cert path
-    W.certPath = document.getElementById('wiz-cert-path').value.trim();
+    // Save cert path and bridge path
+    W.certPath   = document.getElementById('wiz-cert-path').value.trim();
+    W.bridgePath = document.getElementById('wiz-bridge-path').value.trim();
 
-    try {
+    async function _wizRunTest() {
       const r = await fetch('/api/test-connection', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
@@ -1735,7 +1793,34 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
           imapHost: W.imapHost, imapPort: W.imapPort,
         }),
       });
-      const d = await r.json();
+      return r.json();
+    }
+
+    try {
+      let d = await _wizRunTest();
+
+      // If not reachable, attempt to start Bridge then re-test
+      if (!d.smtp || !d.imap) {
+        smtpSt.textContent = imapSt.textContent = 'Starting Bridge…';
+        smtpSt.className = imapSt.className = 'conn-row-status idle';
+        btn.innerHTML = '<span class="spinner"></span> Starting Bridge…';
+
+        const startR = await fetch('/api/start-bridge', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
+          body: '{}',
+        });
+        const startD = await startR.json();
+
+        if (startD.error) {
+          hint.textContent = startD.error;
+          hint.style.display = '';
+        }
+
+        btn.innerHTML = '<span class="spinner"></span> Re-testing…';
+        d = await _wizRunTest();
+      }
+
       smtpSt.textContent = d.smtp ? '✅ Reachable' : '❌ Unreachable';
       smtpSt.className   = 'conn-row-status ' + (d.smtp ? 'ok' : 'fail');
       imapSt.textContent = d.imap ? '✅ Reachable' : '❌ Unreachable';
@@ -1789,6 +1874,7 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
             smtpHost: W.smtpHost, smtpPort: W.smtpPort,
             imapHost: W.imapHost, imapPort: W.imapPort,
             bridgeCertPath:  W.certPath,
+            bridgePath:      W.bridgePath || '',
             smtpToken,
             debug,
             autoStartBridge: document.getElementById('wiz-auto-start-bridge')?.checked || false,
@@ -2021,9 +2107,11 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
     set('imap-host',   cn.imapHost || 'localhost');
     set('imap-port',   cn.imapPort || 1143);
     set('bridge-cert', cn.bridgeCertPath || '');
+    set('bridge-path', cn.bridgePath || '');
     document.getElementById('debug-mode').checked = !!cn.debug;
     document.getElementById('auto-start-bridge').checked = !!cn.autoStartBridge;
     set('settings-port', c.settingsPort || 8765);
+    checkPortMismatch();
     const logsTabBtn = document.getElementById('logs-tab-btn'); if (logsTabBtn) logsTabBtn.style.display = cn.debug ? '' : 'none';
     const isDirect = (cn.smtpHost || '').includes('protonmail');
     setMode(isDirect ? 'direct' : 'bridge');
@@ -2061,6 +2149,12 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
   };
 
 
+  window.checkPortMismatch = function() {
+    const val  = parseInt(document.getElementById('settings-port').value, 10);
+    const warn = document.getElementById('port-mismatch-warn');
+    if (warn) warn.style.display = (!isNaN(val) && val !== RUNNING_PORT) ? '' : 'none';
+  };
+
   window.updateSmtpTokenVisibility = function() {
     var smtpHost = get('smtp-host').trim().toLowerCase();
     var isBridge = (smtpHost === 'localhost' || smtpHost === '127.0.0.1');
@@ -2084,6 +2178,7 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
           imapPort:       parseInt(get('imap-port'), 10),
           smtpToken:      get('smtp-token'),
           bridgeCertPath: get('bridge-cert'),
+          bridgePath:       get('bridge-path'),
           tlsMode:          tlsModeVal,
           debug:            document.getElementById('debug-mode').checked,
           autoStartBridge:  document.getElementById('auto-start-bridge').checked,
@@ -2105,12 +2200,46 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
     }
   };
 
+  // ── Bridge executable search ──────────────────────────────────────────────
+  async function _doSearchBridge(inputId, hintId, btnId) {
+    const btn  = document.getElementById(btnId);
+    const hint = document.getElementById(hintId);
+    btn.disabled = true; btn.textContent = 'Searching…';
+    try {
+      const r = await fetch('/api/search-bridge', { headers: { 'X-CSRF-Token': CSRF } });
+      const d = await r.json();
+      if (d.found) {
+        set(inputId, d.path);
+        hint.textContent = 'Found: ' + d.path;
+        hint.style.color = 'var(--ok, #22c55e)';
+      } else {
+        set(inputId, '');
+        hint.textContent = 'Not found in common locations. Enter the path manually.';
+        hint.style.color = 'var(--warn, #f59e0b)';
+      }
+    } catch(e) {
+      hint.textContent = 'Search failed: ' + e.message;
+      hint.style.color = 'var(--err, #ef4444)';
+    } finally {
+      btn.disabled = false; btn.textContent = 'Search';
+    }
+  }
+
+  window.searchBridgePath = function() {
+    return _doSearchBridge('bridge-path', 'bridge-path-hint', 'search-bridge-btn');
+  };
+
+  window.wizSearchBridgePath = function() {
+    return _doSearchBridge('wiz-bridge-path', 'wiz-bridge-path-hint', 'wiz-search-bridge-btn');
+  };
+
   window.testConnections = async function() {
     const btn = document.getElementById('test-btn');
     const res = document.getElementById('test-result');
     btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>';
     res.textContent = 'Testing…';
-    try {
+
+    async function _runTest() {
       const r = await fetch('/api/test-connection', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
@@ -2119,7 +2248,31 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
           imapHost: get('imap-host'), imapPort: parseInt(get('imap-port'), 10),
         }),
       });
-      const data = await r.json();
+      return r.json();
+    }
+
+    try {
+      let data = await _runTest();
+
+      // If not reachable, try to start Bridge then re-test
+      if (!data.smtp || !data.imap) {
+        res.textContent = 'Bridge not running — starting…';
+        res.style.color = 'var(--muted)';
+        const startR = await fetch('/api/start-bridge', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
+          body: '{}',
+        });
+        const startD = await startR.json();
+        if (startD.error) {
+          res.textContent = '⚠️ ' + startD.error;
+          res.style.color = 'var(--danger)';
+          return;
+        }
+        res.textContent = 'Re-testing…';
+        data = await _runTest();
+      }
+
       res.textContent = (data.smtp ? '✅ SMTP' : '❌ SMTP') + '  ' + (data.imap ? '✅ IMAP' : '❌ IMAP');
       res.style.color = (data.smtp && data.imap) ? 'var(--success)' : 'var(--danger)';
     } catch(e) {
@@ -2304,6 +2457,99 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
     const text = document.getElementById('claude-snippet').textContent;
     navigator.clipboard.writeText(text).then(() => toast('Copied to clipboard.', 'ok'));
   };
+
+  // ══ UPDATES ═══════════════════════════════════════════════════════════════
+
+  // Seed installed version immediately from injected constant
+  document.getElementById('update-current').textContent = PKG_VERSION;
+
+  window.checkForUpdates = async function() {
+    const btn    = document.getElementById('check-update-btn');
+    const status = document.getElementById('update-status');
+    const installBtn = document.getElementById('install-update-btn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> Checking…';
+    status.textContent = 'Checking npm registry…';
+    status.style.color = 'var(--muted)';
+    installBtn.style.display = 'none';
+    try {
+      const r = await fetch('/api/check-update');
+      const d = await r.json();
+      if (d.error) {
+        status.textContent = '⚠️ ' + d.error;
+        status.style.color = 'var(--danger)';
+        return;
+      }
+      document.getElementById('update-current').textContent = d.current;
+      document.getElementById('update-latest').textContent  = d.latest;
+      if (d.updateAvailable) {
+        status.textContent = '🆕 Update available!';
+        status.style.color = 'var(--success, #22c55e)';
+        installBtn.style.display = '';
+      } else {
+        status.textContent = '✅ Up to date';
+        status.style.color = 'var(--success, #22c55e)';
+      }
+    } catch(e) {
+      status.textContent = '⚠️ Check failed: ' + e.message;
+      status.style.color = 'var(--danger)';
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Check for Updates';
+    }
+  };
+
+  window.installUpdate = async function() {
+    const installBtn   = document.getElementById('install-update-btn');
+    const actionStatus = document.getElementById('update-action-status');
+    const output       = document.getElementById('update-output');
+    installBtn.disabled = true;
+    installBtn.innerHTML = '<span class="spinner"></span> Installing…';
+    actionStatus.textContent = 'Running npm install -g …';
+    actionStatus.style.color = 'var(--muted)';
+    output.style.display = 'none';
+    output.textContent  = '';
+    try {
+      const r = await fetch('/api/install-update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
+        body: '{}',
+      });
+      const d = await r.json();
+      output.textContent  = d.output || d.error || '';
+      output.style.display = '';
+      if (d.ok) {
+        actionStatus.textContent = '✅ Update installed. Restart the MCP server to use the new version.';
+        actionStatus.style.color = 'var(--success, #22c55e)';
+        installBtn.style.display = 'none';
+        // Re-check to show updated version
+        await checkForUpdates();
+      } else {
+        actionStatus.textContent = '❌ Install failed — see output below.';
+        actionStatus.style.color = 'var(--danger)';
+        installBtn.disabled = false;
+        installBtn.textContent = 'Retry Install';
+      }
+    } catch(e) {
+      actionStatus.textContent = '❌ ' + e.message;
+      actionStatus.style.color = 'var(--danger)';
+      installBtn.disabled = false;
+      installBtn.textContent = 'Retry Install';
+    }
+  };
+
+  // Auto-check for updates when the Status tab is first opened
+  (function() {
+    let checked = false;
+    const observer = new MutationObserver(() => {
+      const statusSection = document.getElementById('status');
+      if (!checked && statusSection && statusSection.style.display !== 'none' && statusSection.offsetParent !== null) {
+        checked = true;
+        checkForUpdates();
+      }
+    });
+    observer.observe(document.body, { attributes: true, subtree: true, attributeFilter: ['style', 'class'] });
+  })();
 
   // ══ LOGS TAB ══════════════════════════════════════════════════════════════
 
@@ -2756,7 +3002,7 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
     try {
       // ── Serve UI ────────────────────────────────────────────────────────
       if (method === "GET" && path === "/") {
-        const html = buildHtml(configPath, csrfToken);
+        const html = buildHtml(configPath, csrfToken, port);
         res.writeHead(200, {
           "Content-Type":             "text/html; charset=utf-8",
           "Content-Security-Policy":  "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'",
@@ -2825,6 +3071,7 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
             imapPort:       c.imapPort       ?? current.connection.imapPort,
             username:       typeof c.username === "string" ? c.username : current.connection.username,
             bridgeCertPath:  typeof c.bridgeCertPath === "string" ? c.bridgeCertPath : current.connection.bridgeCertPath,
+            bridgePath:      typeof c.bridgePath === "string" ? c.bridgePath.trim().replace(/^["']|["']$/g, "") : current.connection.bridgePath,
             debug:           typeof c.debug === "boolean" ? c.debug : current.connection.debug,
             autoStartBridge: typeof c.autoStartBridge === "boolean" ? c.autoStartBridge : current.connection.autoStartBridge,
             // Only overwrite credentials if a non-empty, non-placeholder string was sent
@@ -2927,6 +3174,225 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
           tcpCheck(imapHost, imapPort),
         ]);
         json(res, 200, { smtp, imap });
+        return;
+      }
+
+      // ── POST /api/start-bridge ────────────────────────────────────────────
+      // Checks if Bridge is reachable; if not, locates and launches the
+      // executable then waits up to 15 s for SMTP/IMAP ports to come up.
+      if (method === "POST" && path === "/api/start-bridge") {
+        if (!requireCsrf(req, res)) return;
+        const cfg = loadConfig() ?? defaultConfig();
+        const smtpHost = cfg.connection.smtpHost || "localhost";
+        const smtpPort = cfg.connection.smtpPort || 1025;
+        const imapHost = cfg.connection.imapHost || "localhost";
+        const imapPort = cfg.connection.imapPort || 1143;
+
+        // If already up, nothing to do
+        const [smtpAlready, imapAlready] = await Promise.all([
+          tcpCheck(smtpHost, smtpPort, 2000),
+          tcpCheck(imapHost, imapPort, 2000),
+        ]);
+        if (smtpAlready && imapAlready) {
+          json(res, 200, { launched: false, alreadyRunning: true, reachable: true });
+          return;
+        }
+
+        // Resolve executable path: config override → known locations → OS fallback
+        const home = os.homedir();
+        const platform = process.platform;
+        // Strip surrounding quotes that users sometimes paste in (e.g. from Explorer)
+        let bridgeExe: string | null = (cfg.connection.bridgePath || "").trim().replace(/^["']|["']$/g, "") || null;
+        if (bridgeExe && !existsSync(bridgeExe)) bridgeExe = null;
+
+        if (!bridgeExe) {
+          let candidates: string[];
+          if (platform === "win32") {
+            candidates = [
+              `${home}\\AppData\\Local\\Programs\\Proton Mail Bridge\\bridge.exe`,
+              `${home}\\AppData\\Local\\Programs\\bridge\\bridge.exe`,
+              "C:\\Program Files\\Proton AG\\Proton Mail Bridge\\proton-bridge.exe",
+              "C:\\Program Files\\Proton Mail\\Proton Mail Bridge\\bridge.exe",
+              "C:\\Program Files\\Proton\\Proton Mail Bridge\\bridge.exe",
+              "C:\\Program Files (x86)\\Proton Mail\\Proton Mail Bridge\\bridge.exe",
+            ];
+          } else if (platform === "darwin") {
+            candidates = [
+              "/Applications/Proton Mail Bridge.app/Contents/MacOS/Proton Mail Bridge",
+              `${home}/Applications/Proton Mail Bridge.app/Contents/MacOS/Proton Mail Bridge`,
+            ];
+          } else {
+            candidates = [
+              "/usr/bin/proton-bridge",
+              "/usr/local/bin/proton-bridge",
+              `${home}/.local/bin/proton-bridge`,
+              "/opt/proton-bridge/proton-bridge",
+            ];
+          }
+          bridgeExe = candidates.find(p => existsSync(p)) ?? null;
+        }
+
+        // Launch — error out if executable wasn't found rather than guessing
+        if (!bridgeExe) {
+          json(res, 200, { launched: false, alreadyRunning: false, reachable: false,
+            error: "Proton Bridge not found. Please set the executable path in Settings → Bridge TLS Certificate." });
+          return;
+        }
+        try {
+          if (bridgeExe) {
+            spawn(bridgeExe, [], { stdio: "ignore", detached: true, shell: false }).unref();
+          }
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e);
+          json(res, 200, { launched: false, alreadyRunning: false, reachable: false,
+            error: `Failed to launch Bridge: ${msg}` });
+          return;
+        }
+
+        // Poll up to 15 s
+        const deadline = Date.now() + 15_000;
+        let reachable = false;
+        while (Date.now() < deadline) {
+          await new Promise<void>(r => setTimeout(r, 1500));
+          const [s, i] = await Promise.all([
+            tcpCheck(smtpHost, smtpPort, 2000),
+            tcpCheck(imapHost, imapPort, 2000),
+          ]);
+          if (s && i) { reachable = true; break; }
+        }
+        json(res, 200, { launched: true, alreadyRunning: false, reachable });
+        return;
+      }
+
+      // ── GET /api/search-bridge ────────────────────────────────────────────
+      // Searches well-known install locations for the Proton Bridge executable.
+      // Returns the first found path (or null) plus the full candidate list.
+      if (method === "GET" && path === "/api/search-bridge") {
+        const home = os.homedir();
+        const platform = process.platform;
+        let candidates: string[];
+        if (platform === "win32") {
+          candidates = [
+            `${home}\\AppData\\Local\\Programs\\Proton Mail Bridge\\bridge.exe`,
+            `${home}\\AppData\\Local\\Programs\\bridge\\bridge.exe`,
+            "C:\\Program Files\\Proton AG\\Proton Mail Bridge\\proton-bridge.exe",
+            "C:\\Program Files\\Proton Mail\\Proton Mail Bridge\\bridge.exe",
+            "C:\\Program Files\\Proton\\Proton Mail Bridge\\bridge.exe",
+            "C:\\Program Files (x86)\\Proton Mail\\Proton Mail Bridge\\bridge.exe",
+          ];
+        } else if (platform === "darwin") {
+          candidates = [
+            "/Applications/Proton Mail Bridge.app/Contents/MacOS/Proton Mail Bridge",
+            `${home}/Applications/Proton Mail Bridge.app/Contents/MacOS/Proton Mail Bridge`,
+          ];
+        } else {
+          candidates = [
+            "/usr/bin/proton-bridge",
+            "/usr/local/bin/proton-bridge",
+            `${home}/.local/bin/proton-bridge`,
+            "/opt/proton-bridge/proton-bridge",
+          ];
+        }
+        const found = candidates.find(p => existsSync(p)) ?? null;
+        json(res, 200, { found: found !== null, path: found, candidates });
+        return;
+      }
+
+      // ── GET /api/check-update ─────────────────────────────────────────────
+      // Fetches the latest version from the npm registry and compares it
+      // with the currently installed version from package.json.
+      if (method === "GET" && path === "/api/check-update") {
+        try {
+          const pkgPath = nodePath.resolve(process.cwd(), "package.json");
+          const pkgJson = JSON.parse(readFileSync(pkgPath, "utf-8")) as { version?: string; name?: string };
+          const current = pkgJson.version ?? "0.0.0";
+          const name    = pkgJson.name    ?? "protonmail-agentic-mcp";
+
+          const latest = await new Promise<string>((resolve, reject) => {
+            const isWin = process.platform === "win32";
+            const [viewCmd, viewArgs] = isWin
+              ? ["cmd.exe", ["/c", "npm", "view", name, "version", "--json"]]
+              : ["npm",     ["view", name, "version", "--json"]];
+            const proc = spawn(viewCmd, viewArgs, {
+              stdio: ["ignore", "pipe", "pipe"],
+              shell: false,
+            });
+            let out = "";
+            let err = "";
+            proc.stdout?.on("data", (d: Buffer) => { out += d.toString(); });
+            proc.stderr?.on("data", (d: Buffer) => { err += d.toString(); });
+            const timer = setTimeout(() => { proc.kill(); reject(new Error("npm view timed out")); }, 15_000);
+            proc.on("close", (code) => {
+              clearTimeout(timer);
+              if (code !== 0) {
+                const msg = err.trim() || out.trim();
+                if (msg.includes("E404") || msg.includes("Not found") || msg.includes("404")) {
+                  reject(new Error(`Package '${name}' is not yet published on npm. Publish it first to enable auto-update.`));
+                } else {
+                  reject(new Error(msg || `npm view exited ${code}`));
+                }
+                return;
+              }
+              try {
+                // npm --json returns a quoted string e.g. "2.1.0" or an array for multiple versions
+                const raw = out.trim();
+                const parsed = JSON.parse(raw);
+                const version = Array.isArray(parsed) ? parsed[parsed.length - 1] : parsed;
+                if (typeof version !== "string") { reject(new Error("Unexpected npm view output")); return; }
+                resolve(version);
+              } catch { reject(new Error(`Could not parse npm view output: ${out.trim()}`)); }
+            });
+            proc.on("error", (e) => { clearTimeout(timer); reject(e); });
+          });
+
+          // Simple semver comparison: split on dots and compare integers
+          const toNum = (v: string) => v.split(".").map(Number);
+          const [ca, cb, cc] = toNum(current);
+          const [la, lb, lc] = toNum(latest);
+          const updateAvailable =
+            la > ca || (la === ca && lb > cb) || (la === ca && lb === cb && lc > cc);
+
+          json(res, 200, { current, latest, updateAvailable, name });
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e);
+          json(res, 500, { error: `Update check failed: ${msg}` });
+        }
+        return;
+      }
+
+      // ── POST /api/install-update ──────────────────────────────────────────
+      // Runs `npm install -g <package>@latest` and streams output back.
+      if (method === "POST" && path === "/api/install-update") {
+        if (!requireCsrf(req, res)) return;
+        try {
+          const pkgPath = nodePath.resolve(process.cwd(), "package.json");
+          const pkgJson = JSON.parse(readFileSync(pkgPath, "utf-8")) as { name?: string };
+          const name    = pkgJson.name ?? "protonmail-agentic-mcp";
+
+          const output = await new Promise<string>((resolve, reject) => {
+            const isWin = process.platform === "win32";
+            const [instCmd, instArgs] = isWin
+              ? ["cmd.exe", ["/c", "npm", "install", "-g", `${name}@latest`]]
+              : ["npm",     ["install", "-g", `${name}@latest`]];
+            const proc  = spawn(instCmd, instArgs, {
+              stdio: ["ignore", "pipe", "pipe"],
+              shell: false,
+            });
+            let out = "";
+            proc.stdout?.on("data", (d: Buffer) => { out += d.toString(); });
+            proc.stderr?.on("data", (d: Buffer) => { out += d.toString(); });
+            proc.on("close", (code) => {
+              if (code === 0) resolve(out);
+              else reject(new Error(`npm exited with code ${code}:\n${out}`));
+            });
+            proc.on("error", reject);
+          });
+
+          json(res, 200, { ok: true, output });
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e);
+          json(res, 200, { ok: false, error: msg });
+        }
         return;
       }
 
@@ -3223,18 +3689,19 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
  * @param lan   Enable LAN mode (bind 0.0.0.0 + token + optional TLS)
  */
 export async function startSettingsServer(
-  port = 8765,
-  lan  = false,
-): Promise<{ scheme: "http" | "https" }> {
+  port  = 8765,
+  lan   = false,
+  quiet = false,
+): Promise<{ scheme: "http" | "https"; stop: () => Promise<void> }> {
   const bindHost    = lan ? "0.0.0.0" : "127.0.0.1";
   const lanIP       = lan ? getPrimaryLanIP() : "";
   const accessToken = lan ? generateAccessToken() : null;
   let   tls: TlsCredentials | null = null;
 
   if (lan) {
-    process.stdout.write("  Generating TLS certificate for LAN mode… ");
+    if (!quiet) process.stdout.write("  Generating TLS certificate for LAN mode… ");
     tls = tryGenerateSelfSignedCert();
-    process.stdout.write(tls ? "done.\n" : "openssl not found — using HTTP + access token.\n");
+    if (!quiet) process.stdout.write(tls ? "done.\n" : "openssl not found — using HTTP + access token.\n");
   }
 
   const scheme: "http" | "https" = tls ? "https" : "http";
@@ -3246,7 +3713,8 @@ export async function startSettingsServer(
   // accept it — both http.Server and https.Server share net.Server.listen().
   type AnyServer = { headersTimeout?: number; requestTimeout?: number; maxConnections?: number;
                      on(e: string, l: (...a: unknown[]) => unknown): unknown;
-                     listen(port: number, host: string, cb: () => void): unknown; };
+                     listen(port: number, host: string, cb: () => void): unknown;
+                     close(cb?: (err?: Error) => void): void; };
   let server: AnyServer;
 
   if (tls) {
@@ -3269,72 +3737,79 @@ export async function startSettingsServer(
   });
 
   // ── Startup banner ────────────────────────────────────────────────────────
-  const localUrl  = `${scheme}://localhost:${port}`;
-  const lanUrl    = lan && lanIP ? `${scheme}://${lanIP}:${port}` : null;
-  const tokenUrl  = lanUrl && accessToken
-    ? `${lanUrl}?token=${accessToken.value}`
-    : null;
-  const w = 52; // banner inner width
+  if (!quiet) {
+    const localUrl  = `${scheme}://localhost:${port}`;
+    const lanUrl    = lan && lanIP ? `${scheme}://${lanIP}:${port}` : null;
+    const tokenUrl  = lanUrl && accessToken
+      ? `${lanUrl}?token=${accessToken.value}`
+      : null;
+    const w = 52; // banner inner width
 
-  const line  = (s: string) => console.log(`  │ ${s.padEnd(w)} │`);
-  const blank = ()           => console.log(`  │ ${" ".repeat(w)} │`);
-  const rule  = (ch: string) => console.log(`  ├${"─".repeat(w + 2)}┤`);
-  void rule; // used below
+    const line  = (s: string) => console.log(`  │ ${s.padEnd(w)} │`);
+    const blank = ()           => console.log(`  │ ${" ".repeat(w)} │`);
+    const rule  = (ch: string) => console.log(`  ├${"─".repeat(w + 2)}┤`);
+    void rule; // used below
 
-  console.log("");
-  console.log(`  ┌${"─".repeat(w + 2)}┐`);
-  line("ProtonMail MCP — Settings UI");
-  blank();
-  line(`Local:   ${localUrl}`);
-
-  if (lanUrl) {
+    console.log("");
+    console.log(`  ┌${"─".repeat(w + 2)}┐`);
+    line("ProtonMail MCP — Settings UI");
     blank();
-    line(`Network: ${lanUrl}`);
-    if (tokenUrl) {
-      line(`(with token) ${tokenUrl.slice(0, w - 13)}`);
+    line(`Local:   ${localUrl}`);
+
+    if (lanUrl) {
+      blank();
+      line(`Network: ${lanUrl}`);
+      if (tokenUrl) {
+        line(`(with token) ${tokenUrl.slice(0, w - 13)}`);
+      }
+      line("↑ Open on phone/tablet to approve escalations");
     }
-    line("↑ Open on phone/tablet to approve escalations");
-  }
 
-  blank();
-  line(`Config:  ${getConfigPath().slice(0, w - 9)}`);
-  blank();
-
-  if (accessToken) {
-    console.log(`  ├${"─".repeat(w + 2)}┤`);
-    line("ACCESS TOKEN (share only with trusted devices):");
-    line(`  Fingerprint: ${accessToken.fingerprint}`);
-    line("  Full token shown once — copy it now:");
-    // Show full token split for readability
-    const tok = accessToken.value;
-    line(`  ${tok.slice(0, 32)}`);
-    line(`  ${tok.slice(32)}`);
     blank();
-  }
-
-  if (tls) {
-    console.log(`  ├${"─".repeat(w + 2)}┤`);
-    line("TLS CERTIFICATE FINGERPRINT (SHA-256):");
-    // Split 95-char fingerprint across two lines
-    const fp = tls.fingerprint;
-    const mid = Math.ceil(fp.length / 2);
-    line(`  ${fp.slice(0, mid)}`);
-    line(`  ${fp.slice(mid)}`);
-    line("Verify this in your browser before trusting the page.");
+    line(`Config:  ${getConfigPath().slice(0, w - 9)}`);
     blank();
+
+    if (accessToken) {
+      console.log(`  ├${"─".repeat(w + 2)}┤`);
+      line("ACCESS TOKEN (share only with trusted devices):");
+      line(`  Fingerprint: ${accessToken.fingerprint}`);
+      line("  Full token shown once — copy it now:");
+      // Show full token split for readability
+      const tok = accessToken.value;
+      line(`  ${tok.slice(0, 32)}`);
+      line(`  ${tok.slice(32)}`);
+      blank();
+    }
+
+    if (tls) {
+      console.log(`  ├${"─".repeat(w + 2)}┤`);
+      line("TLS CERTIFICATE FINGERPRINT (SHA-256):");
+      // Split 95-char fingerprint across two lines
+      const fp = tls.fingerprint;
+      const mid = Math.ceil(fp.length / 2);
+      line(`  ${fp.slice(0, mid)}`);
+      line(`  ${fp.slice(mid)}`);
+      line("Verify this in your browser before trusting the page.");
+      blank();
+    }
+
+    console.log(`  ├${"─".repeat(w + 2)}┤`);
+    line("Press Ctrl+C to stop.");
+    console.log(`  └${"─".repeat(w + 2)}┘`);
+    console.log("");
+
+    if (lan && !tls) {
+      console.log("  ⚠  WARNING: LAN mode is running over plain HTTP.");
+      console.log("     Traffic is NOT encrypted. Use --lan only on a");
+      console.log("     trusted private network, or install openssl to");
+      console.log("     enable automatic TLS.\n");
+    }
   }
 
-  console.log(`  ├${"─".repeat(w + 2)}┤`);
-  line("Press Ctrl+C to stop.");
-  console.log(`  └${"─".repeat(w + 2)}┘`);
-  console.log("");
+  const stop = (): Promise<void> =>
+    new Promise((resolve, reject) =>
+      server.close((err) => (err ? reject(err) : resolve()))
+    );
 
-  if (lan && !tls) {
-    console.log("  ⚠  WARNING: LAN mode is running over plain HTTP.");
-    console.log("     Traffic is NOT encrypted. Use --lan only on a");
-    console.log("     trusted private network, or install openssl to");
-    console.log("     enable automatic TLS.\n");
-  }
-
-  return { scheme };
+  return { scheme, stop };
 }

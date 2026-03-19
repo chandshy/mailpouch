@@ -31,6 +31,8 @@ export interface ProtonMailConfig {
   autoSync?: boolean;
   syncInterval?: number;
   autoStartBridge?: boolean;
+  bridgePath?: string;
+  settingsPort?: number;
 }
 
 export interface EmailMessage {
