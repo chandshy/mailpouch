@@ -438,21 +438,38 @@ describe('escalation workflow', () => {
     expect(pending.length).toBeGreaterThanOrEqual(1);
   });
 
-  it('requestEscalation() evicts expired entries (evictExpired → savePendingFile path in requestEscalation)', () => {
+  it('requestEscalation() evicts expired-status entries (pre-resolved, no eviction triggered)', () => {
     const req1 = requestEscalation('supervised', 'read_only', 'Will expire');
     if (!req1.ok) throw new Error('request failed');
 
-    // Back-date the first escalation to expired
+    // Back-date AND pre-set status=expired so evictExpired does NOT trigger (entry already resolved)
     const { readFileSync, writeFileSync } = require('fs');
     const fileData = JSON.parse(readFileSync(pendingPath, 'utf-8'));
     fileData.escalations[0].expiresAt = new Date(Date.now() - 1000).toISOString();
-    fileData.escalations[0].status = 'expired'; // mark as expired so MAX_PENDING check doesn't block
+    fileData.escalations[0].status = 'expired';
     fileData.escalations[0].resolvedAt = new Date().toISOString();
     fileData.escalations[0].resolvedBy = 'timeout';
     writeFileSync(pendingPath, JSON.stringify(fileData), 'utf-8');
 
-    // requestEscalation loads the file → evictExpired runs → returns true → savePendingFile called
+    // No pending entries block the new request; evictExpired finds nothing to evict
     const req2 = requestEscalation('supervised', 'read_only', 'New request after expiry');
+    expect(req2.ok).toBe(true);
+  });
+
+  it('requestEscalation() triggers evictExpired+savePendingFile when pending entry has expired (line 280 branch0)', () => {
+    const req1 = requestEscalation('supervised', 'read_only', 'Pending but expired');
+    if (!req1.ok) throw new Error('request failed');
+
+    // Back-date ONLY expiresAt — leave status as 'pending' so evictExpired picks it up
+    const { readFileSync, writeFileSync } = require('fs');
+    const fileData = JSON.parse(readFileSync(pendingPath, 'utf-8'));
+    fileData.escalations[0].expiresAt = new Date(Date.now() - 1000).toISOString();
+    // status remains 'pending' → evictExpired will change it to 'expired' and return true
+    writeFileSync(pendingPath, JSON.stringify(fileData), 'utf-8');
+
+    // requestEscalation: loadPendingFile → evictExpired(data) returns true → savePendingFile called (line 280)
+    // Then MAX_PENDING check finds 0 pending → new request allowed
+    const req2 = requestEscalation('supervised', 'read_only', 'New after real expiry');
     expect(req2.ok).toBe(true);
   });
 

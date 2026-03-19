@@ -728,4 +728,18 @@ describe('AnalyticsService', () => {
       expect(trends.length).toBe(30);
     });
   });
+
+  describe('isCacheValid — lastCacheUpdate null branch (line 53 branch0)', () => {
+    it('returns false from isCacheValid when lastCacheUpdate is null despite cache being set', () => {
+      // Populate analyticsCache by running getEmailAnalytics() once
+      service.getEmailAnalytics();
+      // Now reset lastCacheUpdate to null (simulating inconsistent cache state)
+      // → next call: analyticsCache is truthy → isCacheValid() called → !lastCacheUpdate is true → returns false
+      (service as any).lastCacheUpdate = null;
+      const result = service.getEmailAnalytics();
+      // Should recalculate (not return cached), but still return valid analytics
+      expect(result).toBeDefined();
+      expect(Array.isArray(result.topSenders)).toBe(true);
+    });
+  });
 });

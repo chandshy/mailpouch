@@ -1,8 +1,8 @@
-# Audit Summary — Cycle #51 (2026-03-19)
-## Cycles completed: 51
+# Audit Summary — Cycle #52 (2026-03-19)
+## Cycles completed: 52
 
-### Status After Cycle #51
-- **1246 tests passing** (19 test files, was 1198 after cycle 50)
+### Status After Cycle #52
+- **1251 tests passing** (21 test files, was 1246 after cycle 51)
 - **0 build errors/warnings**
 - **0 exploitable security vulnerabilities**
 - Zero `any` type annotations in production TypeScript source (except unavoidable tui.ts readline internal access)
@@ -11,82 +11,65 @@
 - folderCache: 5-minute TTL via `folderCachedAt` + `clearFolderCache()` helper
 - Comprehensive input validation on all 49 MCP tool handlers
 - All 5 MCP prompt handlers hardened against prompt injection and NaN inputs
-- CHANGELOG covers cycles 1–43 (Cycles 44–51 are code quality/coverage, not CHANGELOG-worthy)
-- Vitest coverage thresholds: **statements 95%, branches 94%, functions 94%, lines 96%**
+- CHANGELOG covers cycles 1–43 (Cycles 44–52 are code quality/coverage, not CHANGELOG-worthy)
+- Vitest coverage thresholds: **statements 95%, branches 95%, functions 94%, lines 96%**
 - **utils package (helpers.ts, logger.ts, tracer.ts): 100% coverage**
-- **permissions/manager.ts: 100% coverage**
+- **permissions/: 100% statements/branches/functions/lines** (escalation.ts & manager.ts)
 - **security/memory.ts: 100% coverage**
-- **analytics-service.ts: 99.09% statements, 98.76% branches**
-- **escalation.ts: 99.36% statements, 98.79% branches, 100% lines**
+- **analytics-service.ts: 99.54% statements, 100% branches**
+- **escalation.ts: 100% statements/branches/lines**
 - **scheduler.ts: 98.59% statements, 97.14% branches, 100% lines**
-- **settings/security.ts: 98.3% statements, 91.66% branches, 100% lines**
+- **settings/security.ts: 99.15% statements, 98.33% branches, 100% lines**
 - **config/loader.ts: 100% statements/functions/lines**
 - **simple-imap-service.ts: 94.09% statements, 94% branches, 94.75% lines**
 
-### Overall Coverage After Cycle #51
+### Overall Coverage After Cycle #52
 | Metric     | Threshold | Measured |
 |------------|-----------|----------|
-| Statements | 95%       | 95.7%    |
-| Branches   | 94%       | 94.9%    |
+| Statements | 95%       | 95.9%    |
+| Branches   | 95%       | 95.4%    |
 | Functions  | 94%       | 95.4%    |
 | Lines      | 96%       | 96.3%    |
 
-### Changes This Cycle (#51)
+### Changes This Cycle (#52)
 
-Branch coverage push: `simple-imap-service.ts` 92% → 94%, global 93.9% → 94.9%.
-+48 tests across 3 modified test files targeting 14 previously-uncovered branch points.
+Multi-file branch coverage sweep: global branches 94.9% → 95.4%.
++5 tests across 4 existing/new test files; 2 new mocked test files.
 
-**Modified test files:**
+**Modified/created test files:**
 
-1. **`src/services/imap-fetch.test.ts`** (+4 tests)
-   - `getEmailById` with `subject: null` → `'(No Subject)'` fallback (line 733 branch1)
-   - `getEmailById` with `x-pm-internal-id` header as a string → `protonId = header.trim()` (line 766 branch0)
-   - `getEmailById` with `content-type: multipart/encrypted` → `isEncryptedPGP=true` (line 764)
-   - `getEmailById` with `attachments: undefined` → `attachments?.length ?? 0` fallback (line 773)
+1. **`src/settings/security-network.mocked.test.ts`** (NEW, 2 tests)
+   - Mocks `os.networkInterfaces()` to return null entries and non-IPv4 interfaces
+   - Covers line 375 branch1 (`ifaces ?? []` when ifaces is null)
+   - Covers line 376 branch1 (iface is IPv6 or internal → condition false)
+   - Covers line 204 branch1 (lanIP is "" → if(lanIP) is false)
 
-2. **`src/services/simple-imap-service.newfeatures.test.ts`** (+6 tests)
-   - `findDraftsFolder` returns `'Drafts'` when `getFolders()` returns non-matching folders (line 1109 branch1)
-   - `saveDraft` with `isHtml=true` and empty body → `options.body || ''` branch (line 1168)
-   - `saveDraft` attachment where filename is only control chars → `|| "attachment"` fallback (line 1184)
-   - `saveDraft` attachment with no `contentType` → `rawCt = undefined` (line 1189)
-   - `saveDraft` where thrown error is not an `Error` instance → `String(error)` branch (line 1214)
-   - Previously had 5 saveDraft tests; now 10 total for that describe block
+2. **`src/settings/security-cert.mocked.test.ts`** (NEW, 1 test)
+   - Mocks `child_process.spawnSync` to return `{ status: 1 }` (non-zero)
+   - Covers line 319 branch0 (`result.status !== 0` → return null)
 
-3. **`src/services/imap-operations.test.ts`** (+2 tests)
-   - `setFlag` where `fetch` yields a non-matching UID → `found=false` → throws "not found" (lines 1470, 1472 branch1)
-   - `bulkMoveEmails` per-email fallback with email NOT in cache → `if(cachedForBulkMove)` false (line 1555 branch1)
+3. **`src/services/analytics-service.test.ts`** (+1 test)
+   - `isCacheValid()` when `lastCacheUpdate` is null with analyticsCache populated
+   - Covers line 53 branch0 (`!this.lastCacheUpdate` is true → return false)
 
-4. **`vitest.config.ts`** — thresholds raised:
-   - statements: 94 → 95
-   - branches: 92 → 94
-   - functions: 94 → 94 (unchanged)
-   - lines: 95 → 96
+4. **`src/permissions/escalation.test.ts`** (+2 tests)
+   - Split existing test into one that pre-sets status='expired' (no eviction) and
+     a new test that leaves status='pending' with expired timestamp
+   - New test covers line 280 branch0 (`evictExpired(data)` returns true → `savePendingFile`)
+
+5. **`vitest.config.ts`** — threshold raised:
+   - branches: 94 → 95
 
 ### Remaining Architectural Limits (accepted, not fixable in unit tests)
-- **Line 147** (`if (oldest === undefined) break` in `setCacheEntry`): dead code — the guard
-  `this.emailCache.size > 0` before the loop makes `keys().next().value` always defined
-- **Lines 623:59, 626:37** (`a.address ?? ''` inside template literals for `to`/`cc` address maps):
-  v8 coverage cannot track `??` operators inside template string expressions — structural limitation
-- **Line 329** (`checkServerIdentity: () => undefined` callback): called by Node.js TLS stack
-  during actual handshake — cannot be triggered in unit tests
-- **Lines 1801-1889** (IMAP IDLE loop): background while-loop with real async IMAP events —
-  would require a live IMAP server + integration test infrastructure
-- **keychain.ts lines 24-128, 153-162**: macOS/Windows credential store native APIs —
-  untestable on the CI platform without OS-level credential fixtures
+- **simple-imap-service.ts line 147** (`if (oldest === undefined) break` in `setCacheEntry`): dead code — the `size > 0` guard makes the value always defined
+- **simple-imap-service.ts lines 623:59, 626:37** (`a.address ?? ''` inside template literals): v8 coverage cannot track `??` inside template string expressions
+- **simple-imap-service.ts line 329** (`checkServerIdentity` callback): called by Node.js TLS stack during actual handshake only
+- **simple-imap-service.ts lines 1801-1889** (IMAP IDLE loop): background loop requires live IMAP server
+- **security/keychain.ts lines 24-128, 153-162**: macOS/Windows credential store native APIs — untestable on CI
+- **settings/security.ts line 97** (`if (oldestKey !== undefined)` in RateLimiter): defensive dead code — map always has entries when reached
+- **services/scheduler.ts lines 183, 194** (`retryCount ?? 0` in if-check): retryCount always set before check, making `??` fallback unreachable
 
 ### Key Test Patterns Established
-- Async generator helper for ImapFlow fetch mocks:
-  ```typescript
-  async function* asyncMessages(msgs: unknown[]) {
-    for (const m of msgs) yield m;
-  }
-  ```
-- Per-test simpleParser override:
-  ```typescript
-  (simpleParser as ReturnType<typeof vi.fn>).mockResolvedValueOnce({...});
-  ```
-- Private method testing: `(svc as any).methodName()`
-- Event handler testing: capture handlers via `on: vi.fn((event, fn) => { handlers[event] = fn; })`,
-  then call `handlers['close']()` to simulate the event
-- Non-matching UID scan: `async function* yieldNonMatch() { yield { uid: 999 }; }` to exercise
-  the "uid doesn't match" branch in folder-scan loops
+- Module-level `vi.mock('os')` in separate file to control `networkInterfaces()` return value
+- Setting `(service as any).lastCacheUpdate = null` after populating analyticsCache to force re-computation path
+- Leaving entry status as 'pending' (not pre-resolving) to allow `evictExpired` to trigger

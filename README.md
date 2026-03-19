@@ -6,7 +6,7 @@
 [![Node.js](https://img.shields.io/badge/node-%3E%3D20.0.0-brightgreen.svg)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.7-blue.svg)](https://www.typescriptlang.org/)
 [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-1.27+-green.svg)](https://github.com/modelcontextprotocol/sdk)
-[![Tests](https://img.shields.io/badge/tests-1%2C246%20passing-brightgreen.svg)](#development)
+[![Tests](https://img.shields.io/badge/tests-1%2C251%20passing-brightgreen.svg)](#development)
 
 **Read, compose, and manage your encrypted ProtonMail inbox from any AI assistant — with human-controlled permissions.**
 
@@ -31,7 +31,7 @@ Your emails are decrypted on your own machine by Proton Bridge. This server neve
 - **MCP Resources** — individual emails and folders addressable via `email://` and `folder://` URIs
 - **Scheduled email delivery** — queue emails for future sending, survives server restarts
 - **10-layer security model** — CSRF protection, origin validation, CRLF injection prevention, path traversal guards, rate limiting, audit log
-- **1,246 tests passing** — comprehensive unit coverage (96% line coverage, 95% branch coverage) including all security validation paths
+- **1,251 tests passing** — comprehensive unit coverage (96% line coverage, 95% branch coverage) including all security validation paths
 - **Zero `any` type annotations** in production TypeScript source
 
 ---
