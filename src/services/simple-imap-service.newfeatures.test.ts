@@ -419,3 +419,83 @@ describe("SimpleIMAPService cache byte-size limit", () => {
     expect(bytesAfterUpdate).toBeGreaterThan(bytesAfterFirst);
   });
 });
+
+// ─── wipeCache ────────────────────────────────────────────────────────────────
+
+describe("SimpleIMAPService.wipeCache", () => {
+  function makeEmail(id: string): import("../types/index.js").EmailMessage {
+    return {
+      id, folder: "INBOX", from: "from@example.com", to: ["to@example.com"],
+      subject: "Subject", date: new Date().toISOString(), isRead: false,
+      body: "email body content", attachments: [], isAnswered: false, isForwarded: false,
+    };
+  }
+
+  it("overwrites sensitive fields in cached emails and clears the cache", () => {
+    const svc = new SimpleIMAPService();
+    // Populate the cache with an email that has body and subject
+    (svc as any).setCacheEntry("msg1", makeEmail("msg1"));
+    expect((svc as any).emailCache.size).toBe(1);
+
+    svc.wipeCache();
+
+    // Cache should be empty after wipe
+    expect((svc as any).emailCache.size).toBe(0);
+    expect((svc as any).cacheByteEstimate).toBe(0);
+  });
+
+  it("wipes attachment buffer content (sets to zero) if present", () => {
+    const svc = new SimpleIMAPService();
+    const email = makeEmail("msg2");
+    const buf = Buffer.from("sensitive attachment data");
+    email.attachments = [{ filename: "file.txt", size: buf.length, contentType: "text/plain", contentId: undefined, content: buf }];
+    (svc as any).emailCache.set("msg2", { email, cachedAt: Date.now() });
+
+    svc.wipeCache();
+
+    expect((svc as any).emailCache.size).toBe(0);
+  });
+
+  it("clears connectionConfig credentials on wipe", () => {
+    const svc = new SimpleIMAPService();
+    // Set a fake connection config with credentials
+    (svc as any).connectionConfig = { host: "localhost", port: 1143, username: "user", password: "secret" };
+
+    svc.wipeCache();
+
+    expect((svc as any).connectionConfig).toBeNull();
+  });
+
+  it("handles wipeCache gracefully when cache is already empty", () => {
+    const svc = new SimpleIMAPService();
+    // Should not throw even with empty cache and null connectionConfig
+    expect(() => svc.wipeCache()).not.toThrow();
+  });
+});
+
+// ─── stopIdle ─────────────────────────────────────────────────────────────────
+
+describe("SimpleIMAPService.stopIdle", () => {
+  it("sets idleClient to null and clears idleActive flag", () => {
+    const svc = new SimpleIMAPService();
+    // Simulate a fake idle client
+    const mockIdleClient = {
+      logout: vi.fn().mockResolvedValue(undefined),
+    };
+    (svc as any).idleClient = mockIdleClient;
+    (svc as any).idleActive = true;
+
+    svc.stopIdle();
+
+    expect((svc as any).idleClient).toBeNull();
+    expect((svc as any).idleActive).toBe(false);
+    expect(mockIdleClient.logout).toHaveBeenCalled();
+  });
+
+  it("handles stopIdle gracefully when idleClient is null", () => {
+    const svc = new SimpleIMAPService();
+    (svc as any).idleClient = null;
+    (svc as any).idleActive = false;
+    expect(() => svc.stopIdle()).not.toThrow();
+  });
+});
