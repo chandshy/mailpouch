@@ -7,8 +7,8 @@ import {
 } from "./schema.js";
 
 describe("ALL_TOOLS", () => {
-  it("has exactly 46 entries", () => {
-    expect(ALL_TOOLS).toHaveLength(46);
+  it("has exactly 49 entries", () => {
+    expect(ALL_TOOLS).toHaveLength(49);
   });
 
   it("contains no duplicates", () => {
@@ -33,14 +33,14 @@ describe("ALL_TOOLS", () => {
 });
 
 describe("TOOL_CATEGORIES", () => {
-  it("has exactly 8 categories", () => {
-    expect(Object.keys(TOOL_CATEGORIES)).toHaveLength(8);
+  it("has exactly 9 categories", () => {
+    expect(Object.keys(TOOL_CATEGORIES)).toHaveLength(9);
   });
 
   it("has the expected category names", () => {
     const keys = Object.keys(TOOL_CATEGORIES).sort();
     expect(keys).toEqual(
-      ["actions", "analytics", "deletion", "drafts", "folders", "reading", "sending", "system"].sort(),
+      ["actions", "analytics", "bridge_control", "deletion", "drafts", "folders", "reading", "sending", "system"].sort(),
     );
   });
 
