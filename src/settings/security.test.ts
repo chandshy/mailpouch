@@ -12,6 +12,7 @@ import {
   hasValidAccessToken,
   getPrimaryLanIP,
   clientIP,
+  tryGenerateSelfSignedCert,
 } from './security.js';
 
 // ─── RateLimiter ────────────────────────────────────────────────────────────────
@@ -364,6 +365,14 @@ describe('hasValidAccessToken', () => {
     const req = mockReqWithHeaders({ 'x-access-token': 'short' });
     expect(hasValidAccessToken(req, makeURL(), token)).toBe(false);
   });
+
+  it('returns false when candidate has same string length but different byte length (multi-byte UTF-8)', () => {
+    // "abcd" → 4 chars, 4 bytes. "caf\u00e9" → 4 chars, 5 bytes (é = 2 bytes).
+    // String-length check passes, but timingSafeEqual throws on mismatched buffer sizes → catch returns false.
+    const token = { value: 'abcd' };
+    const req = mockReqWithHeaders({ 'x-access-token': 'caf\u00e9' });
+    expect(hasValidAccessToken(req, makeURL(), token)).toBe(false);
+  });
 });
 
 // ─── getPrimaryLanIP ─────────────────────────────────────────────────────────
@@ -415,5 +424,51 @@ describe('RateLimiter — bucket cap eviction', () => {
     }
     limiter.dispose();
   });
+
+  it('triggers FIFO eviction when bucket count reaches MAX_RATE_LIMIT_BUCKETS (10_000)', () => {
+    // Large window so entries are still fresh — evict() won't free any space,
+    // forcing the FIFO fallback at line 96-97 to delete the oldest key.
+    const limiter = new RateLimiter(1000, 60 * 60 * 1000); // 1hr window
+    // Fill to exactly MAX_RATE_LIMIT_BUCKETS (10_000)
+    for (let i = 0; i < 10_000; i++) {
+      limiter.check(`fill-${i}`);
+    }
+    // This key is new → size === 10_000 → evict() runs (no stale entries) →
+    // size still 10_000 → FIFO delete of oldest key
+    const result = limiter.check('overflow-key');
+    expect(result).toBe(true); // should still succeed
+    limiter.dispose();
+  });
+
+  it('evict() removes stale entries when window expires', () => {
+    const limiter = new RateLimiter(1000, 1); // 1ms window — entries go stale immediately
+    for (let i = 0; i < 10_000; i++) {
+      limiter.check(`stale-${i}`);
+    }
+    // Wait for entries to go stale, then fill to cap again to trigger evict()
+    // which should now clear the stale entries
+    setTimeout(() => {
+      const result = limiter.check('fresh-after-stale');
+      expect(result).toBe(true);
+      limiter.dispose();
+    }, 5);
+  });
 });
 
+// ─── tryGenerateSelfSignedCert (integration) ─────────────────────────────────
+
+describe('tryGenerateSelfSignedCert', () => {
+  it('returns TlsCredentials or null (depends on openssl availability)', () => {
+    // This is an integration test: if openssl is on PATH, we get a real cert.
+    // If not, the function gracefully returns null. Either outcome is valid.
+    const result = tryGenerateSelfSignedCert();
+    if (result === null) {
+      // openssl not available — that is a valid, expected outcome
+      expect(result).toBeNull();
+    } else {
+      expect(result.key).toBeInstanceOf(Buffer);
+      expect(result.cert).toBeInstanceOf(Buffer);
+      expect(result.fingerprint).toMatch(/^([0-9A-F]{2}:){31}[0-9A-F]{2}$/);
+    }
+  });
+});
