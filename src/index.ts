@@ -7,7 +7,15 @@
  * tool annotations, progress notifications, cursor-based pagination.
  */
 
-import { writeFileSync, existsSync } from "fs";
+import { writeFileSync, existsSync, readFileSync } from "fs";
+import { fileURLToPath as _fileURLToPath } from "url";
+import nodePath from "path";
+const _pkgVersion = (() => {
+  try {
+    const dir = nodePath.dirname(_fileURLToPath(import.meta.url));
+    return (JSON.parse(readFileSync(nodePath.resolve(dir, "../package.json"), "utf-8")) as { version: string }).version;
+  } catch { return "0.0.0"; }
+})();
 import { homedir } from "os";
 import { deflateSync } from "zlib";
 import { createRequire as _createRequire } from "module";
@@ -278,7 +286,7 @@ const BULK_RESULT_SCHEMA = {
 // ─── MCP Server ───────────────────────────────────────────────────────────────
 
 const server = new Server(
-  { name: "protonmail-mcp-server", version: "2.0.0" },
+  { name: "protonmail-mcp-server", version: _pkgVersion },
   {
     capabilities: {
       tools: { listChanged: false },
