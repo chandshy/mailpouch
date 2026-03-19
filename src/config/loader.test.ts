@@ -262,6 +262,20 @@ describe("loadConfig", () => {
     expect(cfg!.connection.smtpHost).toBe("localhost");
   });
 
+  it("handles config file without configVersion, connection, or tools fields (undefined ?? fallbacks)", () => {
+    mockedExistsSync.mockReturnValue(true);
+    // Minimal config with no configVersion, no connection, no tools → exercises ?? fallbacks
+    const sparse = JSON.stringify({
+      permissions: { preset: "full" }, // no tools field → ?? {} fallback
+      // no configVersion → ?? base fallback
+      // no connection → ?? {} fallback
+    });
+    mockedReadFileSync.mockReturnValue(sparse as unknown as Buffer);
+    const cfg = loadConfig();
+    expect(cfg).not.toBeNull();
+    expect(cfg!.permissions.preset).toBe("full");
+  });
+
   it("falls back to read_only preset when config has an unknown preset value", () => {
     mockedExistsSync.mockReturnValue(true);
     const malicious = JSON.stringify({
@@ -398,6 +412,19 @@ describe("loadCredentialsFromKeychain", () => {
     mockedReadFileSync.mockReturnValue(cfgJson as unknown as Buffer);
     const result = await loadCredentialsFromKeychain();
     expect(result).toEqual({ password: "cfg-pass", smtpToken: "cfg-token", storage: "config" });
+  });
+
+  it("falls back to config with smtpToken only (password empty — || smtpToken branch)", async () => {
+    mockedLoad.mockResolvedValue({ password: "", smtpToken: "" });
+    mockedExistsSync.mockReturnValue(true);
+    const cfgJson = JSON.stringify({
+      configVersion: 1,
+      connection: { smtpHost: "localhost", smtpPort: 1025, imapHost: "localhost", imapPort: 1143, username: "u", password: "", smtpToken: "smtp-only", bridgeCertPath: "", debug: false },
+      permissions: { preset: "full", tools: {} },
+    });
+    mockedReadFileSync.mockReturnValue(cfgJson as unknown as Buffer);
+    const result = await loadCredentialsFromKeychain();
+    expect(result).toEqual({ password: "", smtpToken: "smtp-only", storage: "config" });
   });
 
   it("returns null when both keychain and config have no credentials", async () => {
