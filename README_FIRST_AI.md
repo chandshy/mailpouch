@@ -36,7 +36,7 @@ understand context before attempting any action that modifies email state.
 
 The current preset is enforced server-side — you cannot bypass it. If a tool
 returns `"Blocked: ..."`, the human needs to change the preset in the settings
-UI (`npx protonmail-mcp-settings`) or approve an escalation request.
+UI (`http://localhost:8765`) or approve an escalation request.
 
 ---
 

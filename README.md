@@ -25,7 +25,8 @@ Your emails are decrypted on your own machine by Proton Bridge. This server neve
 - **51 tools** covering reading, search, analytics, sending, scheduling, drafts, folders, labels, bulk operations, and Bridge/server lifecycle control (49 permission-managed + 2 always-available escalation tools)
 - **4 permission presets** — read-only by default; write access requires explicit opt-in
 - **Human-gated escalation** — agents request elevated permissions, you approve via browser UI or terminal; the agent cannot approve its own requests
-- **Browser-based settings UI** at `localhost:8765` — setup wizard, live connection test, per-tool toggles, escalation approval panel
+- **Browser-based settings UI** at `localhost:8765` — auto-starts with the daemon; setup wizard, live connection test, per-tool toggles, escalation approval panel
+- **System tray icon** — always visible; toggle the settings UI on/off or quit from the tray without touching the terminal
 - **5 MCP prompts** — triage inbox, compose reply, daily briefing, find subscriptions, thread summary
 - **MCP Resources** — individual emails and folders addressable via `email://` and `folder://` URIs
 - **Scheduled email delivery** — queue emails for future sending, survives server restarts
@@ -322,6 +323,10 @@ The escalation system lets an agent request broader permissions without permanen
 
 ## Settings UI
 
+The settings UI starts automatically on `http://localhost:8765` whenever Claude Desktop runs the MCP server. A system tray icon (purple envelope) appears in your taskbar — right-click it to open the UI, disable it temporarily, or quit.
+
+To run the settings UI standalone (useful for initial setup before Claude Desktop is configured, or on headless/SSH systems):
+
 ```bash
 npx protonmail-agentic-mcp-settings
 # Opens http://localhost:8765
@@ -426,15 +431,15 @@ npm run dev            # watch mode (recompiles on save)
 npm run test           # run test suite (Vitest, 1,021 tests)
 npm run test:coverage  # coverage report
 npm run lint           # TypeScript type check (tsc --noEmit)
-npm run settings       # start settings UI (after build)
+npm run settings       # start standalone settings UI (after build)
 ```
 
 ### Project structure
 
 ```
 src/
-  index.ts                    # MCP server entry point (51 tools, resources, prompts)
-  settings-main.ts            # Settings UI CLI entry point
+  index.ts                    # Unified daemon: MCP server (51 tools, resources, prompts) + settings HTTP server + system tray
+  settings-main.ts            # Standalone settings UI CLI (for headless/SSH environments)
   config/
     schema.ts                 # Config types, tool names, category definitions
     loader.ts                 # Config file load/save, preset builder
