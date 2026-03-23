@@ -71,7 +71,7 @@
     "@modelcontextprotocol/sdk": "~1.27.1",
     "imapflow": "~1.2.15",
     "mailparser": "~3.9.4",
-    "nodemailer": "~8.0.2"
+    "nodemailer": "~8.0.3"
   },
   "optionalDependencies": {
     "@napi-rs/keyring": "~1.2.0",
