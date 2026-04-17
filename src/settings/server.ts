@@ -1852,12 +1852,17 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
       const lastCall = g.lastCallAt ? new Date(g.lastCallAt).toLocaleString() : 'never';
       const expiry = g.conditions && g.conditions.expiresAt
         ? 'expires ' + new Date(g.conditions.expiresAt).toLocaleString() : 'no expiry';
+      const cidEsc = esc(g.clientId);
+      const nameEsc = esc(g.clientName);
+      const condArg = g.conditions ? JSON.stringify(g.conditions).replace(/'/g, "\\'") : 'null';
       const buttons = g.status === 'pending'
-        ? '<button class="btn btn-primary" onclick="approveGrant(\'' + esc(g.clientId) + '\',\'read_only\')">Approve read-only</button>' +
-          '<button class="btn btn-primary" onclick="approveGrant(\'' + esc(g.clientId) + '\',\'supervised\')">Approve supervised</button>' +
-          '<button class="btn btn-ghost"   onclick="denyGrant(\''    + esc(g.clientId) + '\')">Deny</button>'
+        ? '<button class="btn btn-primary" onclick="approveGrant(\'' + cidEsc + '\',\'read_only\')">Approve read-only</button>' +
+          '<button class="btn btn-primary" onclick="approveGrant(\'' + cidEsc + '\',\'supervised\')">Approve supervised</button>' +
+          '<button class="btn btn-ghost"   onclick="openGrantModal(\'' + cidEsc + '\',\'' + nameEsc + '\',null)">Customize\u2026</button>' +
+          '<button class="btn btn-ghost"   onclick="denyGrant(\''    + cidEsc + '\')">Deny</button>'
         : g.status === 'active'
-        ? '<button class="btn btn-ghost"   onclick="revokeGrant(\''  + esc(g.clientId) + '\')">Revoke</button>'
+        ? '<button class="btn btn-ghost"   onclick="openGrantModal(\'' + cidEsc + '\',\'' + nameEsc + '\',' + condArg + ')">Extend / modify\u2026</button>' +
+          '<button class="btn btn-ghost"   onclick="revokeGrant(\''  + cidEsc + '\')">Revoke</button>'
         : '';
       return (
         '<div class="card" style="padding:12px;border:1px solid #333;border-radius:8px">' +
@@ -3120,6 +3125,133 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
     toastTimer = setTimeout(() => { el.className = ''; }, 3500);
   }
 
+})();
+</script>
+
+<!-- ══ APPROVE-WITH-CONDITIONS MODAL (Agents tab) ═════════════════════════ -->
+<div id="grant-modal-backdrop" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:100">
+  <div id="grant-modal" style="max-width:520px;margin:8vh auto;background:#1b1b1e;border-radius:12px;padding:22px;color:#eee;font-family:system-ui,sans-serif">
+    <div style="font-size:16px;font-weight:700;margin-bottom:6px">Approve with conditions</div>
+    <div style="font-size:12px;color:#888;margin-bottom:16px" id="gm-subtitle"></div>
+    <div class="field" style="margin-bottom:12px">
+      <label style="font-size:12px;color:#aaa">Preset</label>
+      <select id="gm-preset" style="width:100%;padding:6px;margin-top:4px;background:#222;color:#eee;border:1px solid #444;border-radius:6px">
+        <option value="read_only">read_only</option>
+        <option value="send_only">send_only</option>
+        <option value="supervised" selected>supervised</option>
+        <option value="full">full</option>
+      </select>
+    </div>
+    <div class="field" style="margin-bottom:12px">
+      <label style="font-size:12px;color:#aaa">Duration</label>
+      <div style="margin-top:4px;display:flex;gap:8px;flex-wrap:wrap">
+        <label><input type="radio" name="gm-dur" value="never"> never expires</label>
+        <label><input type="radio" name="gm-dur" value="1h" checked> 1 hour</label>
+        <label><input type="radio" name="gm-dur" value="24h"> 24 hours</label>
+        <label><input type="radio" name="gm-dur" value="7d"> 7 days</label>
+        <label><input type="radio" name="gm-dur" value="custom"> custom…</label>
+      </div>
+      <input type="datetime-local" id="gm-custom-expiry" style="display:none;margin-top:6px;padding:6px;background:#222;color:#eee;border:1px solid #444;border-radius:6px">
+    </div>
+    <div class="field" style="margin-bottom:12px">
+      <label style="font-size:12px;color:#aaa">Folder allowlist (optional, comma-separated)</label>
+      <input type="text" id="gm-folders" placeholder="INBOX, Sent" style="width:100%;padding:6px;margin-top:4px;background:#222;color:#eee;border:1px solid #444;border-radius:6px;box-sizing:border-box">
+    </div>
+    <div class="field" style="margin-bottom:12px">
+      <label style="font-size:12px;color:#aaa">IP pin (optional)</label>
+      <input type="text" id="gm-ip" placeholder="e.g. 10.0.0.23" style="width:100%;padding:6px;margin-top:4px;background:#222;color:#eee;border:1px solid #444;border-radius:6px;box-sizing:border-box">
+    </div>
+    <div class="field" style="margin-bottom:12px">
+      <label style="font-size:12px;color:#aaa">Advanced</label>
+      <div style="margin-top:4px;display:flex;flex-direction:column;gap:4px">
+        <label><input type="checkbox" id="gm-deny-delete"> Disable deletion tools (delete_email / bulk_delete*)</label>
+        <label><input type="checkbox" id="gm-deny-send"> Disable sending (send_email / reply_to_email / forward_email)</label>
+      </div>
+    </div>
+    <div class="field" style="margin-bottom:16px">
+      <label style="font-size:12px;color:#aaa">Note (optional)</label>
+      <input type="text" id="gm-note" maxlength="240" style="width:100%;padding:6px;margin-top:4px;background:#222;color:#eee;border:1px solid #444;border-radius:6px;box-sizing:border-box">
+    </div>
+    <div style="display:flex;justify-content:flex-end;gap:8px">
+      <button class="btn btn-ghost" onclick="closeGrantModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="submitGrantModal()">Save and approve</button>
+    </div>
+  </div>
+</div>
+<script>
+(function() {
+  let currentClientId = null;
+  document.addEventListener('change', (e) => {
+    const t = e.target;
+    if (t && t.name === 'gm-dur') {
+      document.getElementById('gm-custom-expiry').style.display = (t.value === 'custom') ? '' : 'none';
+    }
+  });
+  window.openGrantModal = function(clientId, clientName, currentConditions) {
+    currentClientId = clientId;
+    document.getElementById('gm-subtitle').textContent = clientName + ' (' + clientId + ')';
+    document.getElementById('gm-preset').value = 'supervised';
+    document.getElementById('gm-folders').value = '';
+    document.getElementById('gm-ip').value = '';
+    document.getElementById('gm-note').value = '';
+    document.getElementById('gm-deny-delete').checked = false;
+    document.getElementById('gm-deny-send').checked = false;
+    (document.querySelector('input[name="gm-dur"][value="1h"]') || {}).checked = true;
+    if (currentConditions && currentConditions.folderAllowlist) {
+      document.getElementById('gm-folders').value = (currentConditions.folderAllowlist || []).join(', ');
+    }
+    if (currentConditions && currentConditions.ipPins) {
+      document.getElementById('gm-ip').value = (currentConditions.ipPins || []).join(', ');
+    }
+    document.getElementById('grant-modal-backdrop').style.display = 'block';
+  };
+  window.closeGrantModal = function() {
+    document.getElementById('grant-modal-backdrop').style.display = 'none';
+    currentClientId = null;
+  };
+  window.submitGrantModal = async function() {
+    if (!currentClientId) return;
+    const preset = document.getElementById('gm-preset').value;
+    const dur = (document.querySelector('input[name="gm-dur"]:checked') || {}).value || 'never';
+    let expiresAt;
+    if (dur === '1h')   expiresAt = new Date(Date.now() + 60*60*1000).toISOString();
+    else if (dur === '24h') expiresAt = new Date(Date.now() + 24*60*60*1000).toISOString();
+    else if (dur === '7d')  expiresAt = new Date(Date.now() + 7*24*60*60*1000).toISOString();
+    else if (dur === 'custom') {
+      const v = document.getElementById('gm-custom-expiry').value;
+      if (v) expiresAt = new Date(v).toISOString();
+    }
+    const foldersRaw = document.getElementById('gm-folders').value.trim();
+    const folderAllowlist = foldersRaw ? foldersRaw.split(',').map(s => s.trim()).filter(Boolean) : undefined;
+    const ipRaw = document.getElementById('gm-ip').value.trim();
+    const ipPins = ipRaw ? ipRaw.split(',').map(s => s.trim()).filter(Boolean) : undefined;
+    const toolOverrides = {};
+    if (document.getElementById('gm-deny-delete').checked) {
+      toolOverrides.delete_email = false;
+      toolOverrides.bulk_delete = false;
+      toolOverrides.bulk_delete_emails = false;
+    }
+    if (document.getElementById('gm-deny-send').checked) {
+      toolOverrides.send_email = false;
+      toolOverrides.reply_to_email = false;
+      toolOverrides.forward_email = false;
+    }
+    const note = document.getElementById('gm-note').value.trim() || undefined;
+    const body = {
+      preset,
+      conditions: (expiresAt || folderAllowlist || ipPins) ? { expiresAt, folderAllowlist, ipPins } : undefined,
+      toolOverrides: Object.keys(toolOverrides).length > 0 ? toolOverrides : undefined,
+      note,
+    };
+    const r = await fetch('/api/agents/' + encodeURIComponent(currentClientId) + '/approve', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': window.CSRF || '' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) { alert('Approve failed: ' + (await r.text())); return; }
+    closeGrantModal();
+    if (typeof refreshAgents === 'function') refreshAgents();
+  };
 })();
 </script>
 </body>
