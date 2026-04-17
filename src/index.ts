@@ -54,7 +54,7 @@ import {
 } from "./permissions/escalation.js";
 import { loadConfig, defaultConfig, migrateCredentials, loadCredentialsFromKeychain } from "./config/loader.js";
 import type { ToolName, PermissionPreset } from "./config/schema.js";
-import { DESTRUCTIVE_TOOLS } from "./config/schema.js";
+import { DESTRUCTIVE_TOOLS, toolsForTier, parseToolTier } from "./config/schema.js";
 
 /**
  * Build a short, user-readable preview of what a destructive tool call would
@@ -326,10 +326,24 @@ const server = new Server(
 // TOOLS
 // ═════════════════════════════════════════════════════════════════════════════
 
+/**
+ * Resolve the active tool tier at the moment of the ListTools call. Order:
+ *   1. PM_BRIDGE_MCP_TIER env var (per-launch override)
+ *   2. config.toolTier (persisted)
+ *   3. "complete" (default — preserves pre-tiering behavior)
+ */
+function activeToolTier(): ReturnType<typeof parseToolTier> {
+  const envTier = process.env.PM_BRIDGE_MCP_TIER;
+  if (envTier) return parseToolTier(envTier);
+  const cfg = loadConfig();
+  return parseToolTier(cfg?.toolTier);
+}
+
 server.setRequestHandler(ListToolsRequestSchema, async () => {
-  logger.debug("Listing tools", "MCPServer");
-  return {
-    tools: [
+  const tier = activeToolTier();
+  const visible = toolsForTier(tier);
+  logger.debug(`Listing tools (tier=${tier}, visible=${visible.size})`, "MCPServer");
+  const allTools = [
       // ── Sending ────────────────────────────────────────────────────────────
       {
         name: "send_email",
@@ -1530,8 +1544,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           },
         },
       },
-    ],
-  };
+    ];
+  return { tools: allTools.filter(t => visible.has(t.name)) };
 });
 
 // ─── Tool Handlers ────────────────────────────────────────────────────────────

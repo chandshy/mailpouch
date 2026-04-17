@@ -4,6 +4,9 @@ import {
   TOOL_CATEGORIES,
   CONFIG_VERSION,
   DEFAULT_RESPONSE_LIMITS,
+  toolsForTier,
+  parseToolTier,
+  ALWAYS_AVAILABLE_TOOLS,
 } from "./schema.js";
 
 describe("ALL_TOOLS", () => {
@@ -111,5 +114,69 @@ describe("DEFAULT_RESPONSE_LIMITS", () => {
 
   it("warnOnLargeResponse defaults to true", () => {
     expect(DEFAULT_RESPONSE_LIMITS.warnOnLargeResponse).toBe(true);
+  });
+});
+
+describe("Tool tiering", () => {
+  describe("toolsForTier", () => {
+    it("'core' returns only reading/sending/analytics/system tools + always-available ones", () => {
+      const core = toolsForTier("core");
+      expect(core.has("get_emails")).toBe(true);          // reading
+      expect(core.has("send_email")).toBe(true);          // sending
+      expect(core.has("get_email_stats")).toBe(true);     // analytics
+      expect(core.has("get_connection_status")).toBe(true); // system
+      expect(core.has("request_permission_escalation")).toBe(true); // always available
+      // Not in core:
+      expect(core.has("delete_email")).toBe(false);       // deletion → complete
+      expect(core.has("save_draft")).toBe(false);         // drafts → extended
+      expect(core.has("create_folder")).toBe(false);      // folders → extended
+      expect(core.has("start_bridge")).toBe(false);       // bridge_control → complete
+    });
+
+    it("'extended' adds drafts, folders, and actions to core", () => {
+      const ext = toolsForTier("extended");
+      expect(ext.has("save_draft")).toBe(true);
+      expect(ext.has("create_folder")).toBe(true);
+      expect(ext.has("mark_email_read")).toBe(true);
+      expect(ext.has("move_to_trash")).toBe(true);
+      // Still not extended: deletion / bridge control
+      expect(ext.has("delete_email")).toBe(false);
+      expect(ext.has("shutdown_server")).toBe(false);
+    });
+
+    it("'complete' exposes every tool in every registered category", () => {
+      const full = toolsForTier("complete");
+      for (const def of Object.values(TOOL_CATEGORIES)) {
+        for (const tool of def.tools) {
+          expect(full.has(tool)).toBe(true);
+        }
+      }
+      for (const always of ALWAYS_AVAILABLE_TOOLS) {
+        expect(full.has(always)).toBe(true);
+      }
+    });
+
+    it("core tier is strictly smaller than extended; extended is strictly smaller than complete", () => {
+      const core = toolsForTier("core");
+      const ext = toolsForTier("extended");
+      const full = toolsForTier("complete");
+      expect(core.size).toBeLessThan(ext.size);
+      expect(ext.size).toBeLessThan(full.size);
+    });
+  });
+
+  describe("parseToolTier", () => {
+    it("accepts the three known tier strings", () => {
+      expect(parseToolTier("core")).toBe("core");
+      expect(parseToolTier("extended")).toBe("extended");
+      expect(parseToolTier("complete")).toBe("complete");
+    });
+
+    it("defaults to 'complete' for unknown, null, or undefined input", () => {
+      expect(parseToolTier("bogus")).toBe("complete");
+      expect(parseToolTier(undefined)).toBe("complete");
+      expect(parseToolTier(null)).toBe("complete");
+      expect(parseToolTier(42)).toBe("complete");
+    });
   });
 });

@@ -218,6 +218,15 @@ export interface ServerConfig {
   /** Port the settings UI server listens on (default 8765). */
   settingsPort?: number;
   /**
+   * Progressive tool-disclosure tier. Controls how many tools appear in the
+   * ListTools response — reduces context bloat when only a subset is needed.
+   *   "core"     — reading / sending / analytics / system (~20 tools)
+   *   "extended" — core + drafts / folders / actions
+   *   "complete" — all tools (default, preserves current behavior)
+   * Override per-launch with PM_BRIDGE_MCP_TIER.
+   */
+  toolTier?: ToolTier;
+  /**
    * Require an explicit { confirmed: true } argument on destructive tool calls.
    * Default true. Intended to keep the workflow user-initiated (per Proton
    * ToS §2.10 on automated access) — the agent must surface each destructive
@@ -240,3 +249,62 @@ export const DESTRUCTIVE_TOOLS: ReadonlySet<string> = new Set<string>([
   "move_to_trash",
   "move_to_spam",
 ]);
+
+// ─── Tool Tiers ────────────────────────────────────────────────────────────────
+//
+// Every connected MCP server contributes its ListTools response to the client's
+// system-prompt context. At 50+ tools this is measurable — multiple servers can
+// burn tens of thousands of tokens before the user types anything.
+//
+// Tiering lets operators expose only the tools they actually use. Activate via
+// the PM_BRIDGE_MCP_TIER env var (core|extended|complete; default complete) or
+// the `toolTier` field in the config file.
+
+export type ToolTier = "core" | "extended" | "complete";
+
+/** Where each category surfaces first. */
+export const TOOL_CATEGORY_TIER: Record<string, ToolTier> = {
+  reading:        "core",     // reading is the 80 % use case
+  sending:        "core",     // sending needs to be available in core too — common ask
+  analytics:      "core",     // analytics is read-only and small
+  system:         "core",     // connection status, cache, logs
+  drafts:         "extended",
+  folders:        "extended",
+  actions:        "extended",
+  deletion:       "complete", // destructive + rarely needed by casual agents
+  bridge_control: "complete", // server lifecycle
+};
+
+/**
+ * Escalation tools (request_permission_escalation, check_escalation_status)
+ * are always available — they bypass the permission gate and sit outside the
+ * category registry. They are also outside the tiering system.
+ */
+export const ALWAYS_AVAILABLE_TOOLS: ReadonlySet<string> = new Set<string>([
+  "request_permission_escalation",
+  "check_escalation_status",
+]);
+
+/** Resolve the set of tools that should be exposed by ListTools for a given tier. */
+export function toolsForTier(tier: ToolTier): Set<string> {
+  const tiersIncluded: ToolTier[] =
+    tier === "core"     ? ["core"] :
+    tier === "extended" ? ["core", "extended"] :
+                          ["core", "extended", "complete"];
+  const result = new Set<string>();
+  for (const [cat, catTier] of Object.entries(TOOL_CATEGORY_TIER)) {
+    if (tiersIncluded.includes(catTier)) {
+      const def = TOOL_CATEGORIES[cat];
+      if (def) for (const tool of def.tools) result.add(tool);
+    }
+  }
+  // Always-available tools are added regardless of tier.
+  for (const tool of ALWAYS_AVAILABLE_TOOLS) result.add(tool);
+  return result;
+}
+
+/** Parse a value into a ToolTier, defaulting to "complete" on anything else. */
+export function parseToolTier(value: unknown): ToolTier {
+  if (value === "core" || value === "extended" || value === "complete") return value;
+  return "complete";
+}
