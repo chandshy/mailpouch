@@ -1162,6 +1162,15 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                 port: { type: "number" },
                 lastCheck: { type: "string", format: "date-time" },
                 insecureTls: { type: "boolean" },
+                backoff: {
+                  type: "object",
+                  description: "Abuse-signal backoff state. When active, sends are held back until remainingMs elapses.",
+                  properties: {
+                    active: { type: "boolean" },
+                    failureCount: { type: "number", description: "Consecutive throttle responses since the last success" },
+                    remainingMs: { type: "number", description: "Milliseconds remaining on the current backoff window" },
+                  },
+                },
                 error: { type: "string", description: "Last SMTP error message, if any" },
               },
             },
@@ -2820,6 +2829,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "get_connection_status": {
         const { configExists, getConfigPath } = await import("./config/loader.js");
+        const smtpBackoffMs = smtpService.backoff.delayUntilMs();
         const status = {
           smtp: {
             connected: smtpStatus.connected,
@@ -2827,6 +2837,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             port: config.smtp.port,
             lastCheck: smtpStatus.lastCheck.toISOString(),
             insecureTls: smtpService.insecureTls,
+            backoff: {
+              active: smtpService.backoff.isBlocked(),
+              failureCount: smtpService.backoff.failureCount,
+              remainingMs: smtpBackoffMs,
+            },
             ...(smtpStatus.error ? { error: smtpStatus.error } : {}),
           },
           imap: {
@@ -2842,7 +2857,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const insecureTlsWarning = (smtpService.insecureTls || imapService.insecureTls)
           ? "\n\u26a0 TLS certificate validation is DISABLED \u2014 configure Bridge Certificate Path in Settings."
           : "";
-        return ok(status, JSON.stringify(status) + insecureTlsWarning);
+        const backoffWarning = smtpService.backoff.isBlocked()
+          ? `\n\u26a0 SMTP is in abuse-signal backoff (${smtpService.backoff.failureCount} consecutive throttle responses, ${smtpBackoffMs} ms remaining). Wait or have the user trigger a manual retry.`
+          : "";
+        return ok(status, JSON.stringify(status) + insecureTlsWarning + backoffWarning);
       }
 
       case "start_bridge": {

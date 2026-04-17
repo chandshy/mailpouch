@@ -348,6 +348,46 @@ describe("SMTPService.reinitialize", () => {
   });
 });
 
+describe("SMTPService abuse-signal backoff", () => {
+  it("arms backoff on SMTP 421 and short-circuits subsequent sends", async () => {
+    const svc = new SMTPService(makeConfig());
+    // First send hits a 421 (throttle) — outcome is recorded as "abuse"
+    sendMailMock.mockRejectedValueOnce(Object.assign(new Error("421 4.7.0 throttled"), { responseCode: 421 }));
+    const first = await svc.sendEmail({ to: "a@example.com", subject: "S", body: "B" });
+    expect(first.success).toBe(false);
+    expect(svc.backoff.isBlocked()).toBe(true);
+    expect(svc.backoff.failureCount).toBe(1);
+
+    // Second send must be short-circuited (no nodemailer call) while blocked
+    sendMailMock.mockClear();
+    const second = await svc.sendEmail({ to: "a@example.com", subject: "S", body: "B" });
+    expect(second.success).toBe(false);
+    expect(second.error).toMatch(/backoff active/i);
+    expect(sendMailMock).not.toHaveBeenCalled();
+  });
+
+  it("clears backoff on a successful send", async () => {
+    const svc = new SMTPService(makeConfig());
+    svc.backoff.record("abuse");
+    expect(svc.backoff.isBlocked()).toBe(true);
+    svc.backoff.reset();
+
+    const res = await svc.sendEmail({ to: "a@example.com", subject: "S", body: "B" });
+    expect(res.success).toBe(true);
+    expect(svc.backoff.isBlocked()).toBe(false);
+    expect(svc.backoff.failureCount).toBe(0);
+  });
+
+  it("does not arm backoff on a terminal (non-throttle) error", async () => {
+    const svc = new SMTPService(makeConfig());
+    sendMailMock.mockRejectedValueOnce(new Error("Invalid login"));
+    const res = await svc.sendEmail({ to: "a@example.com", subject: "S", body: "B" });
+    expect(res.success).toBe(false);
+    expect(svc.backoff.isBlocked()).toBe(false);
+    expect(svc.backoff.failureCount).toBe(0);
+  });
+});
+
 describe("SMTPService.sendEmail optional fields", () => {
   it("passes a priority through to nodemailer when supplied", async () => {
     const svc = new SMTPService(makeConfig());
