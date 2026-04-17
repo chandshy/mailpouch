@@ -9,6 +9,7 @@ import { ProtonMailConfig, SendEmailOptions } from "../types/index.js";
 import { logger } from "../utils/logger.js";
 import { parseEmails, isValidEmail } from "../utils/helpers.js";
 import { tracer } from "../utils/tracer.js";
+import { BackoffTracker, isTransientAbuseError } from "../utils/backoff.js";
 
 /**
  * Strip CRLF and null bytes from a header-like string value to prevent
@@ -40,6 +41,13 @@ export class SMTPService {
   private config: ProtonMailConfig;
   /** True when TLS certificate validation is disabled (no Bridge cert configured). */
   insecureTls = false;
+  /**
+   * Tracks consecutive abuse-signal failures (SMTP 421/450/454 etc.) and
+   * holds back sends during the exponential-backoff window. Surfaced via
+   * getBackoffState() so get_connection_status can report throttling to
+   * the agent rather than letting it keep hammering.
+   */
+  readonly backoff = new BackoffTracker();
 
   constructor(config: ProtonMailConfig) {
     this.config = config;
@@ -199,6 +207,20 @@ export class SMTPService {
 
     if (!this.transporter) {
       throw new Error("SMTP transporter not initialized");
+    }
+
+    // Abuse-signal backoff gate — if a prior send tripped a 4xx throttle
+    // response, hold this one until the exponential-backoff window elapses.
+    if (this.backoff.isBlocked()) {
+      const waitMs = this.backoff.delayUntilMs();
+      logger.warn(
+        `SMTP: send is in abuse-signal backoff (${this.backoff.failureCount} consecutive failures, ${waitMs} ms remaining). Skipping.`,
+        "SMTPService"
+      );
+      return {
+        success: false,
+        error: `SMTP backoff active — ${waitMs} ms remaining after ${this.backoff.failureCount} consecutive throttle responses. Wait or call reset to clear.`,
+      };
     }
 
     // Parse and validate recipients
@@ -371,12 +393,23 @@ export class SMTPService {
         messageId: info.messageId,
       });
 
+      this.backoff.record("success");
       return {
         success: true,
         messageId: info.messageId,
       };
     } catch (error: unknown) {
-      logger.error("Failed to send email", "SMTPService", error);
+      if (isTransientAbuseError(error)) {
+        this.backoff.record("abuse");
+        logger.warn(
+          `SMTP: send hit a throttle/abuse signal (${this.backoff.failureCount} consecutive). Backing off ${this.backoff.delayUntilMs()} ms.`,
+          "SMTPService",
+          error
+        );
+      } else {
+        this.backoff.record("terminal");
+        logger.error("Failed to send email", "SMTPService", error);
+      }
       return {
         success: false,
         error: error instanceof Error ? error.message : "Unknown error",
