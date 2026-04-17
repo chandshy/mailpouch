@@ -41,7 +41,7 @@ function clamp(value: number, min: number, max: number): number {
 // ─── Config path ───────────────────────────────────────────────────────────────
 
 export function getConfigPath(): string {
-  const envPath = process.env.PROTONMAIL_MCP_CONFIG;
+  const envPath = process.env.PM_BRIDGE_MCP_CONFIG ?? process.env.PROTONMAIL_MCP_CONFIG;
   if (envPath) {
     // Resolve to absolute path and ensure it stays within the user's home
     // directory — prevents path-traversal attacks (e.g. "../../etc/passwd").
@@ -49,12 +49,17 @@ export function getConfigPath(): string {
     const home = homedir();
     if (!resolved.startsWith(home + "/") && !resolved.startsWith(home + "\\") && resolved !== home) {
       throw new Error(
-        `PROTONMAIL_MCP_CONFIG must point to a path within the home directory (${home}). Got: ${resolved}`
+        `PM_BRIDGE_MCP_CONFIG must point to a path within the home directory (${home}). Got: ${resolved}`
       );
     }
     return resolved;
   }
-  return join(homedir(), ".protonmail-mcp.json");
+  // Prefer the new path, but fall back to the legacy ~/.protonmail-mcp.json
+  // if it exists and the new one doesn't — keeps existing installs working.
+  const preferred = join(homedir(), ".pm-bridge-mcp.json");
+  const legacy = join(homedir(), ".protonmail-mcp.json");
+  if (!existsSync(preferred) && existsSync(legacy)) return legacy;
+  return preferred;
 }
 
 // ─── Default values ────────────────────────────────────────────────────────────

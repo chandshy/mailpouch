@@ -430,12 +430,12 @@ export class SMTPService {
   ): Promise<{ success: boolean; messageId?: string; error?: string }> {
     logger.debug("Sending test email", "SMTPService", { to });
 
-    const subject = "Test Email from ProtonMail MCP";
+    const subject = "Test Email from pm-bridge-mcp";
     const body =
       customMessage ||
       `
       <h2>Test Email Successful</h2>
-      <p>This is a test email from the ProtonMail MCP Server.</p>
+      <p>This is a test email from the pm-bridge-mcp server.</p>
       <p><strong>Timestamp:</strong> ${new Date().toISOString()}</p>
       <p><strong>From:</strong> ${escapeHtml(this.config.smtp.username)}</p>
       <p>If you received this email, your SMTP configuration is working correctly.</p>

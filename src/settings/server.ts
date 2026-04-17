@@ -157,7 +157,7 @@ function buildHtml(configPath: string, csrfToken: string, runningPort = 8765): s
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="csrf-token" content="${csrfToken}">
-<title>ProtonMail MCP — Settings</title>
+<title>pm-bridge-mcp — Settings</title>
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -836,7 +836,7 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
   <div class="logo-wrap">
     <div class="logo-icon">✉</div>
     <div>
-      <div class="header-title">ProtonMail MCP</div>
+      <div class="header-title">pm-bridge-mcp</div>
       <div class="header-subtitle">Settings</div>
     </div>
   </div>
@@ -909,9 +909,9 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
 
       <!-- ══ Step 1: Welcome ══ -->
       <div class="wiz-panel active" id="wpanel-0" role="tabpanel" aria-label="Welcome">
-        <div class="wiz-title">Welcome to ProtonMail MCP</div>
+        <div class="wiz-title">Welcome to pm-bridge-mcp</div>
         <div class="wiz-subtitle">
-          Give Claude secure, permission-controlled access to your ProtonMail inbox
+          Give Claude secure, permission-controlled access to your Proton Mail inbox
           via Proton Bridge. Setup takes about 3 minutes.
         </div>
 
@@ -1065,12 +1065,12 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
       <div class="wiz-panel" id="wpanel-2" role="tabpanel" aria-label="Account credentials">
         <div class="wiz-title">Connect Your Account</div>
         <div class="wiz-subtitle">
-          Enter your ProtonMail address and your <strong style="color:var(--text)">Bridge password</strong>
-          — this is shown inside the Proton Bridge app, not your ProtonMail login password.
+          Enter your Proton Mail address and your <strong style="color:var(--text)">Bridge password</strong>
+          — this is shown inside the Proton Bridge app, not your Proton Mail login password.
         </div>
 
         <div class="field">
-          <label for="wiz-username">ProtonMail email address</label>
+          <label for="wiz-username">Proton Mail email address</label>
           <input type="email" id="wiz-username" placeholder="you@proton.me"
             autocomplete="username" aria-required="true"
             oninput="wizClearError('wiz-username')">
@@ -1247,7 +1247,7 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
         <div class="done-hero">
           <div class="done-check">✓</div>
           <h2>You're all set!</h2>
-          <p>ProtonMail MCP is configured. The last step is registering it with your MCP host.</p>
+          <p>pm-bridge-mcp is configured. The last step is registering it with your MCP host.</p>
         </div>
 
         <div id="done-write-section">
@@ -1294,7 +1294,7 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
 
         <div id="done-complete" style="display:none" class="done-complete-msg">
           <div class="done-check-small">✓</div>
-          <strong>Done!</strong> Claude Desktop is restarting. Open it in a few seconds and ProtonMail will be available.
+          <strong>Done!</strong> Claude Desktop is restarting. Open it in a few seconds and Proton Mail tools will be available.
         </div>
 
         <div class="wiz-actions" style="margin-top:24px">
@@ -1339,7 +1339,7 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
         <legend>Account</legend>
         <div class="row-2">
           <div class="field">
-            <label for="username">ProtonMail username / email</label>
+            <label for="username">Proton Mail username / email</label>
             <input type="email" id="username" placeholder="user@proton.me" autocomplete="username">
             <div class="hint">Use your full Proton address (e.g. user@proton.me or user@protonmail.com). The @proton.me and @protonmail.com forms are not interchangeable — use the exact primary address shown in your Proton account.</div>
             <div class="hint" style="margin-top:4px">
@@ -2098,7 +2098,7 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
     document.getElementById('done-write-section').style.display = 'none';
     document.getElementById('done-complete').style.display = 'flex';
     document.getElementById('done-complete').querySelector('strong').textContent = 'Done!';
-    document.getElementById('done-complete').querySelector('strong').nextSibling.textContent = ' Restart Claude Desktop when you\\'re ready — ProtonMail will be available after it loads.';
+    document.getElementById('done-complete').querySelector('strong').nextSibling.textContent = ' Restart Claude Desktop when you\\'re ready — Proton Mail tools will be available after it loads.';
   };
 
   // ── Shutdown server ───────────────────────────────────────────────────────
@@ -3797,7 +3797,7 @@ export async function startSettingsServer(
 
     console.log("");
     console.log(`  ┌${"─".repeat(w + 2)}┐`);
-    line("ProtonMail MCP — Settings UI");
+    line("pm-bridge-mcp — Settings UI");
     blank();
     line(`Local:   ${localUrl}`);
 

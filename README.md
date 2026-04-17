@@ -1,7 +1,9 @@
-# ProtonMail Agentic MCP
+# pm-bridge-mcp
+
+**MCP server for Proton Mail via Proton Bridge.** An unofficial, user-initiated bridge between agentic MCP clients and Proton Bridge's local IMAP/SMTP surface.
 
 [![CI](https://github.com/chandshy/protonmail-agentic-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/chandshy/protonmail-agentic-mcp/actions/workflows/ci.yml)
-[![npm version](https://img.shields.io/badge/npm-v2.0.4-blue.svg)](https://www.npmjs.com/package/protonmail-agentic-mcp)
+[![npm version](https://img.shields.io/badge/npm-v2.1.0-blue.svg)](https://www.npmjs.com/package/pm-bridge-mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D20.0.0-brightgreen.svg)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.7-blue.svg)](https://www.typescriptlang.org/)
@@ -118,7 +120,7 @@ npm run build
 Run the settings server to complete first-time setup:
 
 ```bash
-npx protonmail-agentic-mcp-settings
+npx pm-bridge-mcp-settings
 # Then open http://localhost:8765
 ```
 
@@ -152,7 +154,7 @@ The generated entry looks like this (your path will differ):
   "mcpServers": {
     "protonmail": {
       "command": "node",
-      "args": ["/path/to/node_modules/protonmail-agentic-mcp/dist/index.js"]
+      "args": ["/path/to/node_modules/pm-bridge-mcp/dist/index.js"]
     }
   }
 }
@@ -330,7 +332,7 @@ The escalation system lets an agent request broader permissions without permanen
 - CSRF-protected: the approval API requires a session token embedded only in the rendered HTML page
 - Rate-limited: max 5 escalation requests per hour, max 1 pending at a time
 - Audit trail: every request, approval, and denial is appended to `~/.protonmail-mcp.audit.jsonl`
-- Approve from another device: `npx protonmail-agentic-mcp-settings --lan`
+- Approve from another device: `npx pm-bridge-mcp-settings --lan`
 
 ---
 
@@ -341,13 +343,13 @@ The settings UI starts automatically on `http://localhost:8765` whenever Claude 
 To run the settings UI standalone (useful for initial setup before Claude Desktop is configured, or on headless/SSH systems):
 
 ```bash
-npx protonmail-agentic-mcp-settings           # auto-detects display; opens browser if available
-npx protonmail-agentic-mcp-settings --port 9000   # custom port (default: 8765)
-npx protonmail-agentic-mcp-settings --lan         # bind to 0.0.0.0 (approve from phone/other device)
-npx protonmail-agentic-mcp-settings --browser     # force browser UI even if no display detected
-npx protonmail-agentic-mcp-settings --tui         # force interactive terminal UI
-npx protonmail-agentic-mcp-settings --plain       # plain readline menus (no ANSI colors/escapes)
-npx protonmail-agentic-mcp-settings --no-open     # start server but don't auto-open browser
+npx pm-bridge-mcp-settings           # auto-detects display; opens browser if available
+npx pm-bridge-mcp-settings --port 9000   # custom port (default: 8765)
+npx pm-bridge-mcp-settings --lan         # bind to 0.0.0.0 (approve from phone/other device)
+npx pm-bridge-mcp-settings --browser     # force browser UI even if no display detected
+npx pm-bridge-mcp-settings --tui         # force interactive terminal UI
+npx pm-bridge-mcp-settings --plain       # plain readline menus (no ANSI colors/escapes)
+npx pm-bridge-mcp-settings --no-open     # start server but don't auto-open browser
 ```
 
 The port can also be overridden with the `PORT` environment variable, or saved persistently via the settings UI itself.
@@ -429,7 +431,7 @@ This server gives AI agents *controlled* access to sensitive email data. The sec
 - Confirm the `mcpServers` block is valid JSON (no trailing commas).
 - Fully quit and reopen Claude Desktop.
 - Check MCP logs: **Help → Show Logs**.
-- Verify the server starts manually: `npx protonmail-agentic-mcp` — it should stay running silently.
+- Verify the server starts manually: `npx pm-bridge-mcp` — it should stay running silently.
 
 ### Analytics show zero or empty data
 

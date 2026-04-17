@@ -134,7 +134,7 @@ switch (mode) {
       if (!noOpen) {
         const opened = openBrowser(url);
         if (!opened) {
-          process.stdout.write(`\n  ProtonMail MCP Settings\n`);
+          process.stdout.write(`\n  pm-bridge-mcp Settings\n`);
           process.stdout.write(`  Could not auto-open browser. Open manually:\n`);
           process.stdout.write(`  ${url}\n\n`);
         }

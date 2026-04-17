@@ -169,15 +169,36 @@ describe("defaultConfig", () => {
 });
 
 describe("getConfigPath", () => {
-  it("returns default path when no env var is set", () => {
+  it("returns default path when no env var is set and no legacy file exists", () => {
+    const existsMock = vi.mocked(existsSync);
     const saved = process.env.PROTONMAIL_MCP_CONFIG;
+    const saved2 = process.env.PM_BRIDGE_MCP_CONFIG;
     delete process.env.PROTONMAIL_MCP_CONFIG;
+    delete process.env.PM_BRIDGE_MCP_CONFIG;
+    existsMock.mockReturnValue(false);
     try {
-      expect(getConfigPath()).toBe(join(homedir(), ".protonmail-mcp.json"));
+      expect(getConfigPath()).toBe(join(homedir(), ".pm-bridge-mcp.json"));
     } finally {
-      if (saved !== undefined) {
-        process.env.PROTONMAIL_MCP_CONFIG = saved;
-      }
+      if (saved !== undefined) process.env.PROTONMAIL_MCP_CONFIG = saved;
+      if (saved2 !== undefined) process.env.PM_BRIDGE_MCP_CONFIG = saved2;
+      existsMock.mockReset();
+    }
+  });
+
+  it("falls back to the legacy ~/.protonmail-mcp.json when the new path doesn't exist and the legacy one does", () => {
+    const existsMock = vi.mocked(existsSync);
+    const saved = process.env.PROTONMAIL_MCP_CONFIG;
+    const saved2 = process.env.PM_BRIDGE_MCP_CONFIG;
+    delete process.env.PROTONMAIL_MCP_CONFIG;
+    delete process.env.PM_BRIDGE_MCP_CONFIG;
+    const legacy = join(homedir(), ".protonmail-mcp.json");
+    existsMock.mockImplementation((p: unknown) => p === legacy);
+    try {
+      expect(getConfigPath()).toBe(legacy);
+    } finally {
+      if (saved !== undefined) process.env.PROTONMAIL_MCP_CONFIG = saved;
+      if (saved2 !== undefined) process.env.PM_BRIDGE_MCP_CONFIG = saved2;
+      existsMock.mockReset();
     }
   });
 

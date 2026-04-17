@@ -1,12 +1,12 @@
 {
-  "name": "protonmail-agentic-mcp",
-  "version": "2.0.4",
-  "description": "ProtonMail Agentic MCP — 51 tools, Resources, and Prompts for agentic email management, folder operations, analytics, and Proton Bridge integration.",
+  "name": "pm-bridge-mcp",
+  "version": "2.1.0",
+  "description": "MCP server that exposes Proton Mail via Proton Bridge — 51 tools, Resources, and Prompts for agentic email management with user-initiated permission controls.",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "protonmail-agentic-mcp": "dist/index.js",
-    "protonmail-agentic-mcp-settings": "dist/settings-main.js"
+    "pm-bridge-mcp": "dist/index.js",
+    "pm-bridge-mcp-settings": "dist/settings-main.js"
   },
   "scripts": {
     "build": "tsc",
@@ -25,8 +25,8 @@
     "typecheck": "tsc --noEmit"
   },
   "keywords": [
-    "protonmail",
-    "proton",
+    "proton-mail",
+    "proton-bridge",
     "mcp",
     "model-context-protocol",
     "email",

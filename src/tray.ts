@@ -163,7 +163,7 @@ async function main(): Promise<void> {
     // systray2 not installed — start server and open browser, no tray icon
     openBrowser(settingsUrl);
     process.stdout.write(
-      `\nProtonMail MCP Settings: ${settingsUrl}\nPress Ctrl+C to stop.\n\n`
+      `\npm-bridge-mcp Settings: ${settingsUrl}\nPress Ctrl+C to stop.\n\n`
     );
     return;
   }
@@ -176,9 +176,9 @@ async function main(): Promise<void> {
     menu: {
       icon:    ICON_B64,
       title:   "",
-      tooltip: "ProtonMail MCP",
+      tooltip: "pm-bridge-mcp",
       items: [
-        item("ProtonMail MCP", "ProtonMail MCP Server", false),
+        item("pm-bridge-mcp", "Proton Mail via Proton Bridge", false),
         sep,
         item(`\u25CF Connected`,    "", false),
         item(email || "Not configured", "", false),
@@ -205,7 +205,7 @@ async function main(): Promise<void> {
   });
 
   process.stdout.write(
-    `\nProtonMail MCP tray icon active.\nSettings: ${settingsUrl}\nRight-click the tray icon to manage.\n\n`
+    `\npm-bridge-mcp tray icon active.\nSettings: ${settingsUrl}\nRight-click the tray icon to manage.\n\n`
   );
 }
 

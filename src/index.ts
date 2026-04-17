@@ -335,7 +335,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         name: "send_email",
         title: "Send Email",
         description:
-          "Send an email via ProtonMail SMTP. Supports To/CC/BCC (comma-separated), plain text or HTML body, priority (high/normal/low), reply-to, and base64-encoded attachments. Returns messageId on success.",
+          "Send an email via Proton Mail SMTP (through Proton Bridge). Supports To/CC/BCC (comma-separated), plain text or HTML body, priority (high/normal/low), reply-to, and base64-encoded attachments. Returns messageId on success.",
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
         inputSchema: {
           type: "object",
@@ -572,7 +572,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         name: "list_labels",
         title: "List Labels",
         description:
-          "List all ProtonMail labels with message counts. Returns only labels (Labels/ prefix), not regular folders.",
+          "List all Proton Mail labels with message counts. Returns only labels (Labels/ prefix), not regular folders.",
         annotations: { readOnlyHint: true, openWorldHint: true },
         inputSchema: { type: "object", properties: {} },
         outputSchema: {
@@ -3218,7 +3218,7 @@ server.setRequestHandler(GetPromptRequestSchema, async (request) => {
             role: "user" as const,
             content: {
               type: "text" as const,
-              text: `You are managing a ProtonMail inbox. ${focus ? `Prioritise emails from/about: ${focus}.` : ""}
+              text: `You are managing a Proton Mail inbox. ${focus ? `Prioritise emails from/about: ${focus}.` : ""}
 
 ${unread.length > 0
   ? `Here are ${unread.length} unread emails to review:\n\n${JSON.stringify(
@@ -3645,7 +3645,7 @@ function startBridgeWatchdog(): void {
         "MCPServer"
       );
       process.stderr.write(
-        `[ProtonMail MCP] CRITICAL: Proton Bridge did not recover after ${BRIDGE_MAX_RESTARTS} restart attempts. ` +
+        `[pm-bridge-mcp] CRITICAL: Proton Bridge did not recover after ${BRIDGE_MAX_RESTARTS} restart attempts. ` +
         "Start Bridge manually and restart the MCP server.\n"
       );
       if (bridgeWatchdogTimer) { clearInterval(bridgeWatchdogTimer); bridgeWatchdogTimer = null; }
@@ -3801,7 +3801,7 @@ function _buildTrayMenu(): SysTrayMenu {
   const statusLabel   = smtpStatus.connected ? "\u25CF Connected" : "\u25CB Disconnected";
   const emailLabel    = config.smtp.username || "Not configured";
   const items: MenuItem[] = [
-    { title: "ProtonMail MCP", tooltip: "ProtonMail MCP Daemon", enabled: false, checked: false },
+    { title: "pm-bridge-mcp", tooltip: "pm-bridge-mcp daemon", enabled: false, checked: false },
     sep,
     { title: statusLabel, tooltip: "", enabled: false, checked: false },
     { title: emailLabel,  tooltip: "", enabled: false, checked: false },
@@ -3819,7 +3819,7 @@ function _buildTrayMenu(): SysTrayMenu {
     sep,
     { title: "Quit", tooltip: "Stop the MCP daemon", enabled: true, checked: false },
   ];
-  return { icon: TRAY_ICON_B64, title: "", tooltip: "ProtonMail MCP", items };
+  return { icon: TRAY_ICON_B64, title: "", tooltip: "pm-bridge-mcp", items };
 }
 
 async function _rebuildTray(): Promise<void> {
@@ -3989,7 +3989,7 @@ async function main() {
       }).catch((e: unknown) => {
         smtpStatus = { connected: false, lastCheck: new Date(), error: diagnosticErrorMessage(e) };
         logger.warn("SMTP connection failed — sending features limited", "MCPServer", e);
-        logger.info("Use your Proton Bridge password (not your ProtonMail account password)", "MCPServer");
+        logger.info("Use your Proton Bridge password (not your Proton Mail account password)", "MCPServer");
       }),
       imapService.connect(
         config.imap.host,

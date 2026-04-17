@@ -186,7 +186,7 @@ export function printNonInteractive(): void {
   const cfg = loadConfig();
   const path = getConfigPath();
 
-  process.stdout.write("\nProtonMail MCP Server — Settings\n");
+  process.stdout.write("\npm-bridge-mcp — Settings\n");
   process.stdout.write("─".repeat(48) + "\n");
 
   if (cfg) {
@@ -317,7 +317,7 @@ function ansiDraw(st: AnsiState): void {
   out.push(C.clrScr + C.hideCur);
 
   // Header
-  const title = "  ✉  ProtonMail MCP — Settings";
+  const title = "  ✉  pm-bridge-mcp — Settings";
   out.push(C.bgNav + C.bCyan + C.bold + title.padEnd(w) + C.reset + "\n");
 
   const cfgExists = configExists();
@@ -739,7 +739,7 @@ export async function runPlainTUI(serverPort: number, startServerFn: (port: numb
   function hr() { process.stdout.write("─".repeat(48) + "\n"); }
 
   function printHeader() {
-    process.stdout.write("\nProtonMail MCP Server — Settings\n");
+    process.stdout.write("\npm-bridge-mcp — Settings\n");
     hr();
     const cfg = loadConfig();
     const path = getConfigPath();
