@@ -244,8 +244,38 @@ export const DEFAULT_RESPONSE_LIMITS: ResponseLimits = {
  *        silently disabled when no cert was configured).
  *   v2 → 2026-04 hardening — allowInsecureBridge is required to keep the legacy
  *        behavior. v1 configs are grandfathered in the loader with a warning.
+ *   v3 → 2026-04 multi-account — adds accounts[] + activeAccountId. Legacy
+ *        configs auto-migrate: the top-level connection fields are promoted
+ *        into a "primary" account on first read and mirrored back on each
+ *        save so single-account consumers keep working during the transition.
  */
-export const CONFIG_VERSION = 2;
+export const CONFIG_VERSION = 3;
+
+/** Shape-only declaration for schema.ts — see src/accounts/types.ts AccountSpec. */
+export interface AccountSpecShape {
+  id: string;
+  name: string;
+  providerType: "proton-bridge" | "imap";
+  smtpHost: string;
+  smtpPort: number;
+  imapHost: string;
+  imapPort: number;
+  username: string;
+  password: string;
+  smtpToken?: string;
+  bridgeCertPath?: string;
+  allowInsecureBridge?: boolean;
+  tlsMode?: "starttls" | "ssl";
+  autoStartBridge?: boolean;
+  bridgePath?: string;
+  lastCheckedAt?: string;
+  lastCheckResult?: string;
+}
+
+// The schema module stays dependency-free; AccountSpec is defined alongside
+// the registry in src/accounts/types.ts and is structurally compatible with
+// what we persist. We type it as `unknown[]` here to avoid a circular
+// import; the accounts registry validates the shape on read.
 
 export interface ServerConfig {
   configVersion: number;
@@ -257,6 +287,16 @@ export interface ServerConfig {
   responseLimits?: ResponseLimits;
   /** Port the settings UI server listens on (default 8765). */
   settingsPort?: number;
+  /**
+   * Multi-account registry. When present, the active account's connection
+   * fields are mirrored back into `connection` on save so the singleton
+   * IMAP/SMTP services continue to read from the familiar location while
+   * the UI manages the list. Shape matches src/accounts/types.ts
+   * AccountSpec; validated on read.
+   */
+  accounts?: AccountSpecShape[];
+  /** Which entry in `accounts` drives the singleton IMAP/SMTP services. */
+  activeAccountId?: string;
   /**
    * Require an explicit { confirmed: true } argument on destructive tool calls.
    * Default true. Intended to keep the workflow user-initiated (per Proton

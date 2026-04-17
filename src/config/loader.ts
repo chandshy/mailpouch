@@ -234,6 +234,8 @@ export function loadConfig(): ServerConfig | null {
       // set the field.
       requireDestructiveConfirm: parsed.requireDestructiveConfirm !== false,
       tosAcknowledged: parsed.tosAcknowledged,
+      accounts: Array.isArray(parsed.accounts) ? parsed.accounts : undefined,
+      activeAccountId: typeof parsed.activeAccountId === "string" ? parsed.activeAccountId : undefined,
     };
     tags.found = true;
     return result;

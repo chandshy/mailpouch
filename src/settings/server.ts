@@ -67,6 +67,14 @@ import {
 import { getLogFilePath } from "../utils/logger.js";
 import { getAgentGrantStore, getAgentAuditLog } from "../agents/registry.js";
 import { notifications as agentNotifications } from "../agents/notifications.js";
+import {
+  readRegistry,
+  createAccount,
+  updateAccount,
+  deleteAccount,
+  setActiveAccount,
+} from "../accounts/registry.js";
+import type { AccountSpecShape } from "../config/schema.js";
 
 // ─── TCP connectivity test ─────────────────────────────────────────────────────
 
@@ -3996,6 +4004,84 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
         }
 
         json(res, 404, { error: "Unknown agent endpoint." });
+        return;
+      }
+
+      // ══ ACCOUNTS (A4 — CRUD + active-account switch) ══════════════════════
+      if (path === "/api/accounts" || path.startsWith("/api/accounts/")) {
+        // GET /api/accounts — list (sanitized, no passwords)
+        if (method === "GET" && path === "/api/accounts") {
+          const reg = readRegistry();
+          const sanitized = reg.accounts.map(a => ({ ...a, password: a.password ? "••••••••" : "" }));
+          json(res, 200, { accounts: sanitized, activeAccountId: reg.activeAccountId });
+          return;
+        }
+
+        // POST /api/accounts — create
+        if (method === "POST" && path === "/api/accounts") {
+          if (!requireCsrf(req, res)) return;
+          let body: Record<string, unknown>;
+          try { body = JSON.parse(await readBodySafe(req)) as Record<string, unknown>; }
+          catch { json(res, 400, { error: "Body must be JSON." }); return; }
+          if (typeof body.name !== "string" || !body.name) { json(res, 400, { error: "name is required" }); return; }
+          if (body.providerType !== "proton-bridge" && body.providerType !== "imap") {
+            json(res, 400, { error: "providerType must be 'proton-bridge' or 'imap'" }); return;
+          }
+          const created = createAccount({
+            name: body.name,
+            providerType: body.providerType,
+            smtpHost: String(body.smtpHost ?? ""),
+            smtpPort: Number(body.smtpPort ?? 0),
+            imapHost: String(body.imapHost ?? ""),
+            imapPort: Number(body.imapPort ?? 0),
+            username: String(body.username ?? ""),
+            password: String(body.password ?? ""),
+            smtpToken: typeof body.smtpToken === "string" ? body.smtpToken : undefined,
+            bridgeCertPath: typeof body.bridgeCertPath === "string" ? body.bridgeCertPath : undefined,
+            allowInsecureBridge: typeof body.allowInsecureBridge === "boolean" ? body.allowInsecureBridge : undefined,
+            tlsMode: body.tlsMode === "ssl" || body.tlsMode === "starttls" ? body.tlsMode : undefined,
+            autoStartBridge: typeof body.autoStartBridge === "boolean" ? body.autoStartBridge : undefined,
+            bridgePath: typeof body.bridgePath === "string" ? body.bridgePath : undefined,
+          });
+          json(res, 201, { account: { ...created, password: created.password ? "••••••••" : "" } });
+          return;
+        }
+
+        // PATCH /api/accounts/:id
+        const patchMatch = /^\/api\/accounts\/([A-Za-z0-9_\-]+)$/.exec(path);
+        if (method === "PATCH" && patchMatch) {
+          if (!requireCsrf(req, res)) return;
+          let body: Record<string, unknown>;
+          try { body = JSON.parse(await readBodySafe(req)) as Record<string, unknown>; }
+          catch { json(res, 400, { error: "Body must be JSON." }); return; }
+          // Strip placeholder passwords — only overwrite when a real value arrives.
+          if (body.password === "" || body.password === "••••••••") delete body.password;
+          const updated = updateAccount(patchMatch[1], body as Partial<AccountSpecShape>);
+          if (!updated) { json(res, 404, { error: "Account not found." }); return; }
+          json(res, 200, { account: { ...updated, password: updated.password ? "••••••••" : "" } });
+          return;
+        }
+
+        // DELETE /api/accounts/:id
+        if (method === "DELETE" && patchMatch) {
+          if (!requireCsrf(req, res)) return;
+          const ok = deleteAccount(patchMatch[1]);
+          if (!ok) { json(res, 400, { error: "Cannot delete — unknown account id or last remaining account." }); return; }
+          json(res, 200, { ok: true });
+          return;
+        }
+
+        // POST /api/accounts/:id/activate
+        const activateMatch = /^\/api\/accounts\/([A-Za-z0-9_\-]+)\/activate$/.exec(path);
+        if (method === "POST" && activateMatch) {
+          if (!requireCsrf(req, res)) return;
+          const set = setActiveAccount(activateMatch[1]);
+          if (!set) { json(res, 404, { error: "Account not found." }); return; }
+          json(res, 200, { account: { ...set, password: set.password ? "••••••••" : "" }, restartRequired: true });
+          return;
+        }
+
+        json(res, 404, { error: "Unknown account endpoint." });
         return;
       }
 

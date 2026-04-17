@@ -389,7 +389,7 @@ describe("loadConfig", () => {
     const cfg = loadConfig();
     expect(cfg!.connection.allowInsecureBridge).toBe(true);
     // Loaded config is migrated to the current schema version
-    expect(cfg!.configVersion).toBe(2);
+    expect(cfg!.configVersion).toBe(3);
   });
 
   it("does NOT grandfather v1 configs that already set allowInsecureBridge explicitly", () => {
