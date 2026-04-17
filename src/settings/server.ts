@@ -861,6 +861,7 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
 <!-- ══ POST-SETUP NAV (hidden until config saved) ══ -->
 <nav id="main-nav" style="display:none">
   <button class="active" onclick="showTab('setup',this)">Setup</button>
+  <button onclick="showTab('accounts',this)">Accounts</button>
   <button onclick="showTab('permissions',this)">Permissions</button>
   <button onclick="showTab('agents',this)">
     Agents
@@ -1529,6 +1530,76 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
   </div>
 </section>
 
+<!-- ══ ACCOUNTS TAB ══ -->
+<section id="accounts">
+  <div class="section-heading">Mail accounts</div>
+  <div class="section-subheading">
+    Manage the mail providers this server talks to. The active account
+    drives the singleton IMAP/SMTP services — switching accounts requires
+    a server restart. Concurrent per-tool account routing is future work.
+  </div>
+
+  <div class="card" style="margin-top:10px">
+    <div id="accounts-list" style="display:flex;flex-direction:column;gap:10px">
+      <div class="hint" style="text-align:center;padding:30px">Loading…</div>
+    </div>
+    <div style="margin-top:16px;display:flex;gap:8px">
+      <button class="btn btn-primary" onclick="openAccountForm('proton-bridge', null)">+ Add Proton Bridge account</button>
+      <button class="btn btn-primary" onclick="openAccountForm('imap', null)">+ Add IMAP account</button>
+    </div>
+  </div>
+
+  <div id="account-form-backdrop" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:100">
+    <div style="max-width:560px;margin:6vh auto;background:#1b1b1e;border-radius:12px;padding:22px;color:#eee;font-family:system-ui,sans-serif;max-height:86vh;overflow:auto">
+      <div style="font-size:16px;font-weight:700;margin-bottom:6px" id="af-title">Add account</div>
+      <div style="font-size:12px;color:#888;margin-bottom:16px" id="af-subtitle"></div>
+
+      <div class="field" style="margin-bottom:10px">
+        <label style="font-size:12px;color:#aaa">Display name</label>
+        <input type="text" id="af-name" style="width:100%;padding:6px;margin-top:4px;background:#222;color:#eee;border:1px solid #444;border-radius:6px;box-sizing:border-box">
+      </div>
+      <div class="field" style="margin-bottom:10px;display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        <div>
+          <label style="font-size:12px;color:#aaa">IMAP host</label>
+          <input type="text" id="af-imap-host" style="width:100%;padding:6px;margin-top:4px;background:#222;color:#eee;border:1px solid #444;border-radius:6px;box-sizing:border-box">
+        </div>
+        <div>
+          <label style="font-size:12px;color:#aaa">IMAP port</label>
+          <input type="number" id="af-imap-port" style="width:100%;padding:6px;margin-top:4px;background:#222;color:#eee;border:1px solid #444;border-radius:6px;box-sizing:border-box">
+        </div>
+      </div>
+      <div class="field" style="margin-bottom:10px;display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        <div>
+          <label style="font-size:12px;color:#aaa">SMTP host</label>
+          <input type="text" id="af-smtp-host" style="width:100%;padding:6px;margin-top:4px;background:#222;color:#eee;border:1px solid #444;border-radius:6px;box-sizing:border-box">
+        </div>
+        <div>
+          <label style="font-size:12px;color:#aaa">SMTP port</label>
+          <input type="number" id="af-smtp-port" style="width:100%;padding:6px;margin-top:4px;background:#222;color:#eee;border:1px solid #444;border-radius:6px;box-sizing:border-box">
+        </div>
+      </div>
+      <div class="field" style="margin-bottom:10px">
+        <label style="font-size:12px;color:#aaa">Username / email</label>
+        <input type="text" id="af-username" style="width:100%;padding:6px;margin-top:4px;background:#222;color:#eee;border:1px solid #444;border-radius:6px;box-sizing:border-box">
+      </div>
+      <div class="field" style="margin-bottom:10px">
+        <label style="font-size:12px;color:#aaa">Password</label>
+        <input type="password" id="af-password" placeholder="Leave blank to keep existing" style="width:100%;padding:6px;margin-top:4px;background:#222;color:#eee;border:1px solid #444;border-radius:6px;box-sizing:border-box">
+      </div>
+      <div class="field" style="margin-bottom:10px" id="af-cert-row">
+        <label style="font-size:12px;color:#aaa">Bridge TLS cert path (Bridge accounts only)</label>
+        <input type="text" id="af-cert" placeholder="~/.config/protonmail/bridge-v3/cert.pem" style="width:100%;padding:6px;margin-top:4px;background:#222;color:#eee;border:1px solid #444;border-radius:6px;box-sizing:border-box">
+      </div>
+      <input type="hidden" id="af-id">
+      <input type="hidden" id="af-provider">
+      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px">
+        <button class="btn btn-ghost" onclick="closeAccountForm()">Cancel</button>
+        <button class="btn btn-primary" onclick="saveAccountForm()" id="af-save-btn">Save account</button>
+      </div>
+    </div>
+  </div>
+</section>
+
 <!-- ══ AGENTS TAB ══ -->
 <section id="agents">
   <div class="section-heading">Connected agents</div>
@@ -1795,10 +1866,145 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
     document.querySelectorAll('#main-nav button').forEach(b => b.classList.remove('active'));
     document.getElementById(id).classList.add('active');
     btn.classList.add('active');
-    if (id === 'status') { populateStatus(cfg); loadAuditLog(); }
-    if (id === 'agents') { refreshAgents(); }
-    if (id === 'logs')   { logInit(); }
-    else                 { logStopFollow(); }
+    if (id === 'status')   { populateStatus(cfg); loadAuditLog(); }
+    if (id === 'agents')   { refreshAgents(); }
+    if (id === 'accounts') { refreshAccounts(); }
+    if (id === 'logs')     { logInit(); }
+    else                   { logStopFollow(); }
+  };
+
+  // ══ ACCOUNTS TAB LOGIC ═══════════════════════════════════════════════════
+  async function refreshAccounts() {
+    const r = await fetch('/api/accounts');
+    const body = await r.json();
+    const list = document.getElementById('accounts-list');
+    const rows = body.accounts || [];
+    const activeId = body.activeAccountId;
+    if (!rows.length) {
+      list.innerHTML = '<div class="hint" style="text-align:center;padding:30px">No accounts configured.</div>';
+      return;
+    }
+    const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
+    list.innerHTML = rows.map(a => {
+      const active = a.id === activeId;
+      const buttons =
+        (active ? '' : '<button class="btn btn-primary" onclick="activateAccount(\'' + esc(a.id) + '\')">Activate</button>') +
+        '<button class="btn btn-ghost" onclick="editAccount(\'' + esc(a.id) + '\')">Edit</button>' +
+        (!active ? '<button class="btn btn-ghost" onclick="deleteAccountConfirm(\'' + esc(a.id) + '\')">Delete</button>' : '');
+      const last = a.lastCheckedAt ? ' · last check ' + new Date(a.lastCheckedAt).toLocaleString() + ' · ' + esc(a.lastCheckResult || '') : '';
+      return (
+        '<div class="card" style="padding:12px;border:1px solid #333;border-radius:8px;' + (active ? 'border-color:#6D4AFF' : '') + '">' +
+          '<div style="display:flex;justify-content:space-between;align-items:start;gap:12px">' +
+            '<div>' +
+              '<div style="font-weight:600">' + (active ? '🟣 ' : '') + esc(a.name) + ' <span style="color:#888;font-size:12px">(' + esc(a.providerType) + ')</span></div>' +
+              '<div style="font-size:12px;color:#888;margin-top:4px">' +
+                'IMAP ' + esc(a.imapHost) + ':' + esc(a.imapPort) + ' · SMTP ' + esc(a.smtpHost) + ':' + esc(a.smtpPort) +
+                ' · ' + esc(a.username) + last +
+              '</div>' +
+            '</div>' +
+            '<div style="display:flex;gap:6px;flex-wrap:wrap">' + buttons + '</div>' +
+          '</div>' +
+        '</div>'
+      );
+    }).join('');
+    window._accountsById = {};
+    for (const a of rows) window._accountsById[a.id] = a;
+  }
+
+  window.openAccountForm = function(providerType, id) {
+    const isEdit = !!id;
+    document.getElementById('af-title').textContent = isEdit ? 'Edit account' : 'Add account';
+    document.getElementById('af-id').value = id || '';
+    document.getElementById('af-provider').value = providerType;
+    document.getElementById('af-cert-row').style.display = providerType === 'proton-bridge' ? '' : 'none';
+
+    if (isEdit && window._accountsById && window._accountsById[id]) {
+      const a = window._accountsById[id];
+      document.getElementById('af-name').value = a.name || '';
+      document.getElementById('af-imap-host').value = a.imapHost || '';
+      document.getElementById('af-imap-port').value = a.imapPort || '';
+      document.getElementById('af-smtp-host').value = a.smtpHost || '';
+      document.getElementById('af-smtp-port').value = a.smtpPort || '';
+      document.getElementById('af-username').value = a.username || '';
+      document.getElementById('af-password').value = '';
+      document.getElementById('af-cert').value = a.bridgeCertPath || '';
+    } else {
+      // Pre-fill sensible defaults for the chosen provider.
+      document.getElementById('af-name').value = '';
+      document.getElementById('af-username').value = '';
+      document.getElementById('af-password').value = '';
+      document.getElementById('af-cert').value = '';
+      if (providerType === 'proton-bridge') {
+        document.getElementById('af-imap-host').value = '127.0.0.1';
+        document.getElementById('af-imap-port').value = '1143';
+        document.getElementById('af-smtp-host').value = '127.0.0.1';
+        document.getElementById('af-smtp-port').value = '1025';
+      } else {
+        document.getElementById('af-imap-host').value = '';
+        document.getElementById('af-imap-port').value = '993';
+        document.getElementById('af-smtp-host').value = '';
+        document.getElementById('af-smtp-port').value = '587';
+      }
+    }
+    document.getElementById('account-form-backdrop').style.display = 'block';
+  };
+
+  window.editAccount = function(id) {
+    const a = (window._accountsById || {})[id];
+    if (!a) return;
+    openAccountForm(a.providerType, id);
+  };
+
+  window.closeAccountForm = function() {
+    document.getElementById('account-form-backdrop').style.display = 'none';
+  };
+
+  window.saveAccountForm = async function() {
+    const id = document.getElementById('af-id').value;
+    const isEdit = !!id;
+    const body = {
+      name: document.getElementById('af-name').value.trim(),
+      providerType: document.getElementById('af-provider').value,
+      imapHost: document.getElementById('af-imap-host').value.trim(),
+      imapPort: parseInt(document.getElementById('af-imap-port').value, 10) || 0,
+      smtpHost: document.getElementById('af-smtp-host').value.trim(),
+      smtpPort: parseInt(document.getElementById('af-smtp-port').value, 10) || 0,
+      username: document.getElementById('af-username').value.trim(),
+      password: document.getElementById('af-password').value,
+      bridgeCertPath: document.getElementById('af-cert').value.trim() || undefined,
+    };
+    if (!body.name) { alert('Name is required.'); return; }
+    const url = isEdit ? '/api/accounts/' + encodeURIComponent(id) : '/api/accounts';
+    const method = isEdit ? 'PATCH' : 'POST';
+    const r = await fetch(url, {
+      method,
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': window.CSRF || '' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) { alert('Save failed: ' + (await r.text())); return; }
+    closeAccountForm();
+    refreshAccounts();
+  };
+
+  window.activateAccount = async function(id) {
+    if (!confirm('Switching the active account requires a server restart. Continue?')) return;
+    const r = await fetch('/api/accounts/' + encodeURIComponent(id) + '/activate', {
+      method: 'POST',
+      headers: { 'X-CSRF-Token': window.CSRF || '' },
+    });
+    if (!r.ok) { alert('Activate failed: ' + (await r.text())); return; }
+    alert('Active account switched. Restart the MCP server to apply (Tray → Quit then relaunch, or restart_server tool).');
+    refreshAccounts();
+  };
+
+  window.deleteAccountConfirm = async function(id) {
+    if (!confirm('Delete this account? This removes the server\u2019s ability to connect to it. Active account cannot be deleted.')) return;
+    const r = await fetch('/api/accounts/' + encodeURIComponent(id), {
+      method: 'DELETE',
+      headers: { 'X-CSRF-Token': window.CSRF || '' },
+    });
+    if (!r.ok) { alert('Delete failed: ' + (await r.text())); return; }
+    refreshAccounts();
   };
 
   // ══ AGENTS TAB LOGIC ══════════════════════════════════════════════════════
