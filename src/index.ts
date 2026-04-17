@@ -1662,6 +1662,61 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ["filename", "contentType", "size", "content", "encoding"],
         },
       },
+      {
+        name: "get_thread",
+        title: "Get Email Thread",
+        description:
+          "Return all messages that look like they belong to the same thread as the given email. Uses the normalized Subject (Re:/Fwd: stripped) to collect related messages from INBOX + Sent. Useful for summarising long conversations in one call.",
+        annotations: { readOnlyHint: true },
+        inputSchema: {
+          type: "object",
+          properties: {
+            email_id: { type: "string", description: "IMAP UID of any message in the thread" },
+            max_messages: { type: "number", description: "Max messages to return (default 50, cap 200)" },
+          },
+          required: ["email_id"],
+        },
+        outputSchema: {
+          type: "object",
+          properties: {
+            subject: { type: "string", description: "Normalized subject line for the thread" },
+            messages: {
+              type: "array",
+              items: EMAIL_SUMMARY_SCHEMA,
+              description: "Messages in the thread, oldest-first",
+            },
+          },
+          required: ["subject", "messages"],
+        },
+      },
+      {
+        name: "get_correspondence_profile",
+        title: "Get Correspondence Profile",
+        description:
+          "Return relationship statistics for a single email address — volume sent/received, first and last interaction, average response time (if computable). Useful before drafting so the agent can match tone and recall context.",
+        annotations: { readOnlyHint: true },
+        inputSchema: {
+          type: "object",
+          properties: {
+            email: { type: "string", description: "Email address to look up" },
+          },
+          required: ["email"],
+        },
+        outputSchema: {
+          type: "object",
+          properties: {
+            email: { type: "string" },
+            name: { type: "string" },
+            emailsSent: { type: "number" },
+            emailsReceived: { type: "number" },
+            firstInteraction: { type: ["string", "null"], format: "date-time" },
+            lastInteraction: { type: ["string", "null"], format: "date-time" },
+            averageResponseTime: { type: ["number", "null"], description: "Minutes; null when not computable" },
+            isFavorite: { type: "boolean" },
+          },
+          required: ["email", "emailsSent", "emailsReceived"],
+        },
+      },
 
       // ── Permission Escalation (always-available meta-tools) ────────────────
       {
@@ -2706,6 +2761,68 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           };
         }
         return ok(attResult, `Attachment: ${attResult.filename} (${attResult.contentType}, ${attResult.size} bytes)`);
+      }
+
+      case "get_thread": {
+        const threadEmailId = requireNumericEmailId(args.email_id, "email_id");
+        const maxMsgs = typeof args.max_messages === "number"
+          ? Math.min(Math.max(1, args.max_messages), 200)
+          : 50;
+        const seed = await imapService.getEmailById(threadEmailId);
+        if (!seed) {
+          return { content: [{ type: "text" as const, text: "Seed message not found" }], isError: true, structuredContent: { success: false, reason: "Seed message not found" } };
+        }
+        // Normalize the subject by stripping all Re:/Fwd: prefixes — case-insensitive,
+        // trimming whitespace. "Re: Fwd: hello" → "hello".
+        const normalizeSubject = (s: string) => s.replace(/^(\s*(re|fwd|fw):\s*)+/i, "").trim();
+        const normalized = normalizeSubject(seed.subject || "");
+        // Search INBOX + Sent for messages with the same normalized subject.
+        const [inbox, sent] = await Promise.all([
+          imapService.searchEmails({ folder: "INBOX", subject: normalized, limit: maxMsgs }),
+          imapService.searchEmails({ folder: "Sent",  subject: normalized, limit: maxMsgs }).catch(() => [] as EmailMessage[]),
+        ]);
+        const byId = new Map<string, EmailMessage>();
+        for (const m of [seed, ...inbox, ...sent]) {
+          const normSubj = normalizeSubject(m.subject || "");
+          if (normSubj !== normalized) continue;
+          byId.set(m.id, m);
+        }
+        const messages = Array.from(byId.values())
+          .sort((a, b) => (a.date?.getTime?.() ?? 0) - (b.date?.getTime?.() ?? 0))
+          .slice(0, maxMsgs);
+        return ok({ subject: normalized, messages });
+      }
+
+      case "get_correspondence_profile": {
+        const emailArg = typeof args.email === "string" ? args.email.trim().toLowerCase() : "";
+        if (!emailArg || !isValidEmail(emailArg)) {
+          throw new McpError(ErrorCode.InvalidParams, "email must be a valid address.");
+        }
+        // Ensure analytics cache is warm before we filter contacts.
+        await getAnalyticsEmails().catch(() => null);
+        const contacts = analyticsService.getContacts(500);
+        const found = contacts.find(c => c.email.toLowerCase() === emailArg);
+        if (!found) {
+          return ok({
+            email: emailArg,
+            emailsSent: 0,
+            emailsReceived: 0,
+            firstInteraction: null,
+            lastInteraction: null,
+            averageResponseTime: null,
+            isFavorite: false,
+          }, `No prior correspondence with ${emailArg} in the analytics window.`);
+        }
+        return ok({
+          email: found.email,
+          name: found.name ?? "",
+          emailsSent: found.emailsSent,
+          emailsReceived: found.emailsReceived,
+          firstInteraction: found.firstInteraction?.toISOString?.() ?? null,
+          lastInteraction:  found.lastInteraction?.toISOString?.()  ?? null,
+          averageResponseTime: found.averageResponseTime ?? null,
+          isFavorite: !!found.isFavorite,
+        });
       }
 
       // ── Folder Management ─────────────────────────────────────────────────────
