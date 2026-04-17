@@ -49,6 +49,7 @@ import { GrantManager } from "./agents/grant-manager.js";
 import { AgentAuditLog, hashArgs } from "./agents/audit.js";
 import { currentCaller } from "./agents/caller-context.js";
 import { registerAgentServices } from "./agents/registry.js";
+import { notifications as agentNotifications } from "./agents/notifications.js";
 import { logger, getLogFilePath } from "./utils/logger.js";
 import { isValidEmail, validateLabelName, validateFolderName, validateTargetFolder, requireNumericEmailId, validateAttachments } from "./utils/helpers.js";
 import { permissions } from "./permissions/manager.js";
@@ -3908,11 +3909,22 @@ function _buildTrayMenu(): SysTrayMenu {
   const sep: MenuItem = { title: "<SEPARATOR>", tooltip: "", enabled: true, checked: false };
   const statusLabel   = smtpStatus.connected ? "\u25CF Connected" : "\u25CB Disconnected";
   const emailLabel    = config.smtp.username || "Not configured";
+  const pendingCount  = agentGrants.list({ status: "pending" }).length;
+  const activeCount   = agentGrants.list({ status: "active" }).length;
+  const tooltip = pendingCount > 0
+    ? `pm-bridge-mcp · ${pendingCount} agent(s) awaiting approval`
+    : "pm-bridge-mcp";
   const items: MenuItem[] = [
     { title: "pm-bridge-mcp", tooltip: "pm-bridge-mcp daemon", enabled: false, checked: false },
     sep,
     { title: statusLabel, tooltip: "", enabled: false, checked: false },
     { title: emailLabel,  tooltip: "", enabled: false, checked: false },
+    ...(pendingCount > 0
+      ? [{ title: `\u26A0 ${pendingCount} agent(s) pending`, tooltip: "Open Settings → Agents to approve", enabled: false, checked: false }]
+      : []),
+    ...(activeCount > 0
+      ? [{ title: `\u25CF ${activeCount} agent(s) active`, tooltip: "", enabled: false, checked: false }]
+      : []),
     sep,
     ...(_settingsEnabled && _settingsUrl
       ? [{ title: "Open Settings", tooltip: `Open ${_settingsUrl}`, enabled: true, checked: false }]
@@ -3927,7 +3939,7 @@ function _buildTrayMenu(): SysTrayMenu {
     sep,
     { title: "Quit", tooltip: "Stop the MCP daemon", enabled: true, checked: false },
   ];
-  return { icon: TRAY_ICON_B64, title: "", tooltip: "pm-bridge-mcp", items };
+  return { icon: TRAY_ICON_B64, title: "", tooltip, items };
 }
 
 async function _rebuildTray(): Promise<void> {
@@ -3956,6 +3968,13 @@ async function _initTray(): Promise<void> {
     await tray.ready();
     _trayInstance = tray;
     logger.info("System tray icon active", "MCPServer");
+
+    // Keep the tray menu in sync with grant changes (new pending → badge,
+    // approved/revoked → count update). Handler is fire-and-forget; if
+    // rebuild fails we swallow to avoid crashing the daemon.
+    agentNotifications.subscribe(() => {
+      void _rebuildTray().catch(() => { /* swallow */ });
+    });
 
     await tray.onClick((action: { item: MenuItem }) => {
       switch (action.item.title) {

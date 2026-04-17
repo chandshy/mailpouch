@@ -66,6 +66,7 @@ import {
 } from "../permissions/escalation.js";
 import { getLogFilePath } from "../utils/logger.js";
 import { getAgentGrantStore, getAgentAuditLog } from "../agents/registry.js";
+import { notifications as agentNotifications } from "../agents/notifications.js";
 
 // ─── TCP connectivity test ─────────────────────────────────────────────────────
 
@@ -853,6 +854,10 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
 <nav id="main-nav" style="display:none">
   <button class="active" onclick="showTab('setup',this)">Setup</button>
   <button onclick="showTab('permissions',this)">Permissions</button>
+  <button onclick="showTab('agents',this)">
+    Agents
+    <span id="agents-pending-badge" style="display:none;background:#ef4444;color:#fff;border-radius:10px;padding:2px 7px;margin-left:6px;font-size:11px;font-weight:700">0</span>
+  </button>
   <button onclick="showTab('status',this)">Status</button>
   <button id="logs-tab-btn" style="display:none" onclick="showTab('logs',this)">Logs</button>
 </nav>
@@ -1516,6 +1521,40 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
   </div>
 </section>
 
+<!-- ══ AGENTS TAB ══ -->
+<section id="agents">
+  <div class="section-heading">Connected agents</div>
+  <div class="section-subheading">
+    Each MCP client that registers via OAuth gets its own grant. Approve,
+    deny, or revoke access independently. Stdio callers (the local Claude
+    Desktop default) bypass this system and use the global preset above.
+  </div>
+
+  <div class="card" style="margin-top:10px">
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+      <button class="btn btn-ghost" id="ag-filter-pending"  onclick="switchAgentFilter('pending')"  style="font-weight:600">🔴 Pending <span id="ag-count-pending">0</span></button>
+      <button class="btn btn-ghost" id="ag-filter-active"   onclick="switchAgentFilter('active')">🟢 Active <span id="ag-count-active">0</span></button>
+      <button class="btn btn-ghost" id="ag-filter-revoked"  onclick="switchAgentFilter('revoked')">⚪ Revoked <span id="ag-count-revoked">0</span></button>
+      <button class="btn btn-ghost" id="ag-filter-audit"    onclick="switchAgentFilter('audit')">📋 Audit log</button>
+    </div>
+    <div id="agents-list" style="display:flex;flex-direction:column;gap:10px">
+      <div class="hint" style="text-align:center;padding:30px">Loading…</div>
+    </div>
+    <div id="agents-audit" style="display:none">
+      <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <thead><tr>
+          <th style="text-align:left;padding:6px;border-bottom:1px solid #333">Time (ET)</th>
+          <th style="text-align:left;padding:6px;border-bottom:1px solid #333">Agent</th>
+          <th style="text-align:left;padding:6px;border-bottom:1px solid #333">Tool</th>
+          <th style="text-align:left;padding:6px;border-bottom:1px solid #333">Outcome</th>
+          <th style="text-align:right;padding:6px;border-bottom:1px solid #333">ms</th>
+        </tr></thead>
+        <tbody id="agents-audit-body"></tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
 <!-- ══ STATUS TAB ══ -->
 <section id="status">
   <div class="section-heading">Status</div>
@@ -1749,9 +1788,163 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
     document.getElementById(id).classList.add('active');
     btn.classList.add('active');
     if (id === 'status') { populateStatus(cfg); loadAuditLog(); }
+    if (id === 'agents') { refreshAgents(); }
     if (id === 'logs')   { logInit(); }
     else                 { logStopFollow(); }
   };
+
+  // ══ AGENTS TAB LOGIC ══════════════════════════════════════════════════════
+  let agentFilter = 'pending';
+  let agentEventSource = null;
+
+  window.switchAgentFilter = function(which) {
+    agentFilter = which;
+    ['pending','active','revoked','audit'].forEach(f => {
+      const b = document.getElementById('ag-filter-' + f);
+      if (b) b.style.fontWeight = (f === which ? '700' : '500');
+    });
+    document.getElementById('agents-list').style.display = (which === 'audit') ? 'none' : '';
+    document.getElementById('agents-audit').style.display = (which === 'audit') ? '' : 'none';
+    refreshAgents();
+  };
+
+  async function refreshAgents() {
+    if (agentFilter === 'audit') { await loadAgentAudit(); return; }
+    const r = await fetch('/api/agents?status=' + encodeURIComponent(agentFilter));
+    const body = await r.json();
+    renderAgents(body.grants || []);
+    // Also update the counts on the filter buttons.
+    for (const s of ['pending','active','revoked']) {
+      const rr = await fetch('/api/agents?status=' + s);
+      const bb = await rr.json();
+      const el = document.getElementById('ag-count-' + s);
+      if (el) el.textContent = '(' + (bb.grants ? bb.grants.length : 0) + ')';
+    }
+    updatePendingBadge();
+  }
+
+  async function updatePendingBadge() {
+    const r = await fetch('/api/agents?status=pending');
+    const b = await r.json();
+    const n = (b.grants || []).length;
+    const badge = document.getElementById('agents-pending-badge');
+    if (!badge) return;
+    if (n > 0) {
+      badge.textContent = String(n);
+      badge.style.display = '';
+    } else {
+      badge.style.display = 'none';
+    }
+  }
+
+  function renderAgents(grants) {
+    const list = document.getElementById('agents-list');
+    if (!grants.length) {
+      list.innerHTML = '<div class="hint" style="text-align:center;padding:30px">No grants in this view.</div>';
+      return;
+    }
+    const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
+    list.innerHTML = grants.map(g => {
+      const badge = g.status === 'pending' ? '🔴 pending'
+                  : g.status === 'active'  ? '🟢 active'
+                  : g.status === 'revoked' ? '⚪ revoked'
+                  : g.status === 'expired' ? '🟡 expired' : g.status;
+      const lastCall = g.lastCallAt ? new Date(g.lastCallAt).toLocaleString() : 'never';
+      const expiry = g.conditions && g.conditions.expiresAt
+        ? 'expires ' + new Date(g.conditions.expiresAt).toLocaleString() : 'no expiry';
+      const buttons = g.status === 'pending'
+        ? '<button class="btn btn-primary" onclick="approveGrant(\'' + esc(g.clientId) + '\',\'read_only\')">Approve read-only</button>' +
+          '<button class="btn btn-primary" onclick="approveGrant(\'' + esc(g.clientId) + '\',\'supervised\')">Approve supervised</button>' +
+          '<button class="btn btn-ghost"   onclick="denyGrant(\''    + esc(g.clientId) + '\')">Deny</button>'
+        : g.status === 'active'
+        ? '<button class="btn btn-ghost"   onclick="revokeGrant(\''  + esc(g.clientId) + '\')">Revoke</button>'
+        : '';
+      return (
+        '<div class="card" style="padding:12px;border:1px solid #333;border-radius:8px">' +
+          '<div style="display:flex;justify-content:space-between;align-items:start;gap:12px">' +
+            '<div>' +
+              '<div style="font-weight:600">' + esc(g.clientName) + ' <span style="color:#888;font-size:12px">(' + esc(g.clientId) + ')</span></div>' +
+              '<div style="font-size:12px;color:#888;margin-top:4px">' +
+                badge + ' · preset ' + esc(g.preset) + ' · ' + esc(expiry) + ' · ' + g.totalCalls + ' calls · last ' + esc(lastCall) +
+              '</div>' +
+              (g.note ? '<div style="font-size:12px;color:#aaa;margin-top:4px;font-style:italic">' + esc(g.note) + '</div>' : '') +
+            '</div>' +
+            '<div style="display:flex;gap:6px;flex-wrap:wrap">' + buttons + '</div>' +
+          '</div>' +
+        '</div>'
+      );
+    }).join('');
+  }
+
+  async function loadAgentAudit() {
+    const r = await fetch('/api/agents/audit?limit=200');
+    const body = await r.json();
+    const rows = body.rows || [];
+    const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
+    const tbody = document.getElementById('agents-audit-body');
+    if (!rows.length) {
+      tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:30px;color:#888">No calls logged yet.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = rows.slice().reverse().map(r => {
+      const d = new Date(r.ts);
+      const when = d.toLocaleString('en-US', { timeZone: 'America/New_York' });
+      const ok = r.ok ? '<span style="color:#10b981">ok</span>' : '<span style="color:#ef4444">blocked: ' + esc(r.blockedReason || '?') + '</span>';
+      return '<tr>' +
+        '<td style="padding:5px;border-bottom:1px solid #222">' + esc(when) + '</td>' +
+        '<td style="padding:5px;border-bottom:1px solid #222">' + esc(r.clientName || r.clientId) + '</td>' +
+        '<td style="padding:5px;border-bottom:1px solid #222"><code>' + esc(r.tool) + '</code></td>' +
+        '<td style="padding:5px;border-bottom:1px solid #222">' + ok + '</td>' +
+        '<td style="padding:5px;border-bottom:1px solid #222;text-align:right">' + esc(r.durMs) + '</td>' +
+      '</tr>';
+    }).join('');
+  }
+
+  window.approveGrant = async function(clientId, preset) {
+    const r = await fetch('/api/agents/' + encodeURIComponent(clientId) + '/approve', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
+      body: JSON.stringify({ preset })
+    });
+    if (!r.ok) { alert('Approve failed: ' + (await r.text())); return; }
+    refreshAgents();
+  };
+
+  window.denyGrant = async function(clientId) {
+    if (!confirm('Deny this agent? It will be unable to call any tools.')) return;
+    const r = await fetch('/api/agents/' + encodeURIComponent(clientId) + '/deny', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
+      body: '{}'
+    });
+    if (!r.ok) { alert('Deny failed: ' + (await r.text())); return; }
+    refreshAgents();
+  };
+
+  window.revokeGrant = async function(clientId) {
+    if (!confirm('Revoke this agent\u2019s access? Currently running tool calls finish; the next one will be denied.')) return;
+    const r = await fetch('/api/agents/' + encodeURIComponent(clientId) + '/revoke', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF }
+    });
+    if (!r.ok) { alert('Revoke failed: ' + (await r.text())); return; }
+    refreshAgents();
+  };
+
+  // SSE subscription — live-update the Agents tab and the nav badge.
+  function subscribeAgentEvents() {
+    if (agentEventSource) return;
+    try {
+      agentEventSource = new EventSource('/api/notifications');
+      agentEventSource.onerror = () => { /* swallow — browser auto-reconnects */ };
+      const refresh = () => { updatePendingBadge(); if (document.getElementById('agents').classList.contains('active')) refreshAgents(); };
+      for (const kind of ['grant-created','grant-approved','grant-denied','grant-revoked','grant-expired']) {
+        agentEventSource.addEventListener(kind, refresh);
+      }
+    } catch (e) { /* SSE unavailable — poll-on-tab-show still works */ }
+  }
+  subscribeAgentEvents();
+  updatePendingBadge();
 
   // ── Header status ─────────────────────────────────────────────────────────
   function updateHeaderStatus(ok) {
@@ -3565,7 +3758,34 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
         return;
       }
 
-      // ══ AGENT GRANTS (A1 — no UI yet; curl / programmatic access) ══════════
+      // ══ AGENT NOTIFICATIONS — SSE stream for the Agents tab ═══════════════
+      if (method === "GET" && path === "/api/notifications") {
+        res.statusCode = 200;
+        res.setHeader("Content-Type", "text/event-stream");
+        res.setHeader("Cache-Control", "no-cache");
+        res.setHeader("Connection", "keep-alive");
+        res.setHeader("X-Accel-Buffering", "no"); // disable proxy buffering
+        res.write(`: connected\n\n`);
+        const unsub = agentNotifications.subscribe((ev) => {
+          try {
+            res.write(`event: ${ev.kind}\n`);
+            res.write(`id: ${ev.seq}\n`);
+            res.write(`data: ${JSON.stringify(ev.grant)}\n\n`);
+          } catch { /* client disconnected mid-write */ }
+        });
+        // Keep-alive comments every 25 s so proxies don't tear the stream down.
+        const heartbeat = setInterval(() => {
+          try { res.write(`: heartbeat\n\n`); } catch { /* ignore */ }
+        }, 25_000);
+        req.on("close", () => {
+          clearInterval(heartbeat);
+          unsub();
+          try { res.end(); } catch { /* ignore */ }
+        });
+        return; // don't fall through to response cleanup
+      }
+
+      // ══ AGENT GRANTS (REST API — consumed by the Agents tab UI) ═══════════
       if (path === "/api/agents" || path.startsWith("/api/agents/")) {
         const grants = getAgentGrantStore();
         const audit = getAgentAuditLog();

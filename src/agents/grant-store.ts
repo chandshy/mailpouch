@@ -17,6 +17,7 @@ import { randomBytes } from "crypto";
 import type { AgentGrant, AgentGrantStatus, GrantConditions } from "./types.js";
 import type { PermissionPreset, ToolName } from "../config/schema.js";
 import { logger } from "../utils/logger.js";
+import { notifications } from "./notifications.js";
 
 interface StoreFile {
   version: 1;
@@ -92,6 +93,7 @@ export class AgentGrantStore {
     };
     this.grants.set(args.clientId, grant);
     this.persist();
+    notifications.emitGrantChanged("grant-created", grant);
     return grant;
   }
 
@@ -106,16 +108,21 @@ export class AgentGrantStore {
     g.approvedAt = new Date().toISOString();
     g.revokedAt = undefined;
     this.persist();
+    notifications.emitGrantChanged("grant-approved", g);
     return g;
   }
 
   deny(clientId: string, note?: string): AgentGrant | null {
     const g = this.grants.get(clientId);
     if (!g) return null;
+    const wasPending = g.status === "pending";
     g.status = "revoked";
     g.revokedAt = new Date().toISOString();
     g.note = note ?? g.note;
     this.persist();
+    // Distinguish "deny" (never-approved pending grant rejected) from
+    // "revoke" (previously-approved grant taken back) for UI filtering.
+    notifications.emitGrantChanged(wasPending ? "grant-denied" : "grant-revoked", g);
     return g;
   }
 
@@ -133,6 +140,7 @@ export class AgentGrantStore {
     if (g.status === "expired") return g;
     g.status = "expired";
     this.persist();
+    notifications.emitGrantChanged("grant-expired", g);
     return g;
   }
 
