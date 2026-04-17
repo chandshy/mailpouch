@@ -82,7 +82,7 @@ Bridge listens locally on:
 ### Option A — npm (recommended)
 
 ```bash
-npm install -g protonmail-agentic-mcp
+npm install -g github:chandshy/protonmail-agentic-mcp
 ```
 
 ### Option B — From source
