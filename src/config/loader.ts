@@ -88,11 +88,20 @@ export function buildPermissions(preset: PermissionPreset): ServerConfig["permis
       ...TOOL_CATEGORIES.system.tools,
       "get_folders",
       "start_bridge",  // needed to bring Bridge up before reading
+      // SimpleLogin read-only surface: list + activity logs only.
+      "alias_list",
+      "alias_get_activity",
     ]);
     for (const tool of ALL_TOOLS) {
       tools[tool].enabled = allowed.has(tool);
     }
   } else if (preset === "supervised") {
+    // SimpleLogin write tools: cap creation + toggle + delete to keep a human
+    // in the loop even when the preset is otherwise permissive.
+    tools["alias_create_random"].rateLimit = 10;
+    tools["alias_create_custom"].rateLimit = 10;
+    tools["alias_toggle"].rateLimit = 20;
+    tools["alias_delete"].rateLimit = 5;
     for (const tool of TOOL_CATEGORIES.deletion.tools) {
       tools[tool].rateLimit = 5;
     }

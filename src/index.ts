@@ -42,6 +42,7 @@ import {
 import { ProtonMailConfig, EmailMessage, EmailAttachment, EmailFolder } from "./types/index.js";
 import { SMTPService } from "./services/smtp-service.js";
 import { SimpleIMAPService } from "./services/simple-imap-service.js";
+import { SimpleLoginService } from "./services/simplelogin-service.js";
 import { AnalyticsService } from "./services/analytics-service.js";
 import { SchedulerService } from "./services/scheduler.js";
 import { logger, getLogFilePath } from "./utils/logger.js";
@@ -76,6 +77,8 @@ function describeDestructivePreview(tool: string, args: Record<string, unknown>)
       return `Would move email with ID ${String(args.emailId ?? "(missing)")} to Trash.`;
     case "move_to_spam":
       return `Would move email with ID ${String(args.emailId ?? "(missing)")} to Spam.`;
+    case "alias_delete":
+      return `Would permanently delete SimpleLogin alias ${String(args.aliasId ?? "(missing)")}. This cannot be undone.`;
     default:
       return `Would run a destructive operation on the Proton mailbox.`;
   }
@@ -110,6 +113,9 @@ const config: ProtonMailConfig = {
 
 const smtpService = new SMTPService(config);
 const imapService = new SimpleIMAPService();
+// SimpleLogin client is lazy: constructed empty and reconfigured in main() once
+// the API key is loaded. Alias tools check isConfigured() before dispatching.
+let simpleloginService = new SimpleLoginService("");
 const analyticsService = new AnalyticsService();
 
 const SCHEDULER_STORE = process.env.PROTONMAIL_SCHEDULER_STORE
@@ -1318,6 +1324,153 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
         inputSchema: { type: "object", properties: {} },
         outputSchema: ACTION_RESULT_SCHEMA,
+      },
+
+      // ── SimpleLogin aliases (Proton-owned; optional — requires API key) ─────
+      {
+        name: "alias_list",
+        title: "List SimpleLogin Aliases",
+        description: "List aliases on the configured SimpleLogin account. Returns up to pageSize aliases (default 200). Requires simpleloginApiKey in settings.",
+        annotations: { readOnlyHint: true },
+        inputSchema: {
+          type: "object",
+          properties: {
+            pageSize: { type: "number", description: "Max aliases to return (default 200, cap 1000)" },
+          },
+        },
+        outputSchema: {
+          type: "object",
+          properties: {
+            aliases: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  id: { type: "number" },
+                  email: { type: "string" },
+                  enabled: { type: "boolean" },
+                  note: { type: "string" },
+                  nb_forward: { type: "number" },
+                  nb_block: { type: "number" },
+                  nb_reply: { type: "number" },
+                },
+              },
+            },
+          },
+        },
+      },
+      {
+        name: "alias_create_random",
+        title: "Create Random SimpleLogin Alias",
+        description: "Create a new random SimpleLogin alias. mode='uuid' produces a long random hex local-part (hardest to guess, good for sensitive signups); mode='word' is two readable words (easier to type). Optional note lets you tag what the alias is for so you can audit later.",
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+        inputSchema: {
+          type: "object",
+          properties: {
+            mode: { type: "string", enum: ["uuid", "word"], default: "uuid" },
+            note: { type: "string", description: "Free-text note describing what this alias is for" },
+            hostname: { type: "string", description: "Optional hostname the alias is being created for (used by SimpleLogin for analytics)" },
+          },
+        },
+        outputSchema: {
+          type: "object",
+          properties: {
+            id: { type: "number" },
+            email: { type: "string" },
+            enabled: { type: "boolean" },
+            note: { type: "string" },
+          },
+        },
+      },
+      {
+        name: "alias_create_custom",
+        title: "Create Custom SimpleLogin Alias",
+        description: "Create a custom SimpleLogin alias with a user-chosen prefix and a signed suffix (obtain suffixes from SimpleLogin's alias-options endpoint; the UI picker handles this for end users).",
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+        inputSchema: {
+          type: "object",
+          properties: {
+            aliasPrefix: { type: "string", description: "Local-part of the alias (before the suffix)" },
+            signedSuffix: { type: "string", description: "Signed suffix returned by GET /api/v5/alias/options" },
+            mailboxIds: { type: "array", items: { type: "number" }, description: "Mailbox IDs to deliver to" },
+            note: { type: "string" },
+            name: { type: "string", description: "Display name shown in replies sent through the alias" },
+            hostname: { type: "string" },
+          },
+          required: ["aliasPrefix", "signedSuffix"],
+        },
+        outputSchema: {
+          type: "object",
+          properties: {
+            id: { type: "number" },
+            email: { type: "string" },
+            enabled: { type: "boolean" },
+          },
+        },
+      },
+      {
+        name: "alias_toggle",
+        title: "Toggle SimpleLogin Alias",
+        description: "Enable or disable a SimpleLogin alias. Disabled aliases block all incoming mail without deleting the alias record (useful when a service starts abusing an alias).",
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+        inputSchema: {
+          type: "object",
+          properties: {
+            aliasId: { type: "number" },
+          },
+          required: ["aliasId"],
+        },
+        outputSchema: {
+          type: "object",
+          properties: { enabled: { type: "boolean" } },
+        },
+      },
+      {
+        name: "alias_delete",
+        title: "Delete SimpleLogin Alias",
+        description: "Permanently delete a SimpleLogin alias. Irreversible — prefer alias_toggle unless you are certain. Destructive: requires { confirmed: true }.",
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+        inputSchema: {
+          type: "object",
+          properties: {
+            aliasId: { type: "number" },
+            confirmed: { type: "boolean", description: "Must be true to execute." },
+          },
+          required: ["aliasId"],
+        },
+        outputSchema: ACTION_RESULT_SCHEMA,
+      },
+      {
+        name: "alias_get_activity",
+        title: "Get SimpleLogin Alias Activity",
+        description: "Return forward/block/reply activity log for a single SimpleLogin alias (most recent first). Useful for auditing what's hitting a specific alias before you disable or delete it.",
+        annotations: { readOnlyHint: true },
+        inputSchema: {
+          type: "object",
+          properties: {
+            aliasId: { type: "number" },
+            pageSize: { type: "number", description: "Max activity rows (default 50, cap 1000)" },
+          },
+          required: ["aliasId"],
+        },
+        outputSchema: {
+          type: "object",
+          properties: {
+            activities: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  action: { type: "string", enum: ["forward", "block", "reply", "bounced"] },
+                  from: { type: "string" },
+                  to: { type: "string" },
+                  timestamp: { type: "number" },
+                  reverse_alias: { type: "string" },
+                },
+              },
+            },
+          },
+        },
       },
 
       // ── Drafts & Scheduling ────────────────────────────────────────────────
@@ -2976,6 +3129,83 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return ok({ success: true }, "Restart initiated. A new MCP server process is starting.");
       }
 
+      // ── SimpleLogin aliases ────────────────────────────────────────────────
+      case "alias_list": {
+        if (!simpleloginService.isConfigured()) {
+          throw new McpError(ErrorCode.InvalidRequest, "SimpleLogin API key is not configured. Set simpleloginApiKey in Settings → Aliases.");
+        }
+        const pageSize = typeof args.pageSize === "number"
+          ? Math.min(Math.max(1, args.pageSize), 1000)
+          : 200;
+        const aliases = await simpleloginService.listAliases(pageSize);
+        return ok({ aliases });
+      }
+
+      case "alias_create_random": {
+        if (!simpleloginService.isConfigured()) {
+          throw new McpError(ErrorCode.InvalidRequest, "SimpleLogin API key is not configured. Set simpleloginApiKey in Settings → Aliases.");
+        }
+        const mode = args.mode === "word" ? "word" as const : "uuid" as const;
+        const note = typeof args.note === "string" ? args.note : undefined;
+        const hostname = typeof args.hostname === "string" ? args.hostname : undefined;
+        const alias = await simpleloginService.createRandomAlias({ mode, note, hostname });
+        return ok({ id: alias.id, email: alias.email, enabled: alias.enabled, note: alias.note ?? "" });
+      }
+
+      case "alias_create_custom": {
+        if (!simpleloginService.isConfigured()) {
+          throw new McpError(ErrorCode.InvalidRequest, "SimpleLogin API key is not configured. Set simpleloginApiKey in Settings → Aliases.");
+        }
+        if (typeof args.aliasPrefix !== "string" || typeof args.signedSuffix !== "string") {
+          throw new McpError(ErrorCode.InvalidParams, "aliasPrefix and signedSuffix are required.");
+        }
+        const alias = await simpleloginService.createCustomAlias({
+          aliasPrefix: args.aliasPrefix,
+          signedSuffix: args.signedSuffix,
+          mailboxIds: Array.isArray(args.mailboxIds) ? (args.mailboxIds as number[]) : undefined,
+          note: typeof args.note === "string" ? args.note : undefined,
+          name: typeof args.name === "string" ? args.name : undefined,
+          hostname: typeof args.hostname === "string" ? args.hostname : undefined,
+        });
+        return ok({ id: alias.id, email: alias.email, enabled: alias.enabled });
+      }
+
+      case "alias_toggle": {
+        if (!simpleloginService.isConfigured()) {
+          throw new McpError(ErrorCode.InvalidRequest, "SimpleLogin API key is not configured. Set simpleloginApiKey in Settings → Aliases.");
+        }
+        if (typeof args.aliasId !== "number") {
+          throw new McpError(ErrorCode.InvalidParams, "aliasId must be a number.");
+        }
+        const result = await simpleloginService.toggleAlias(args.aliasId);
+        return ok({ enabled: result.enabled });
+      }
+
+      case "alias_delete": {
+        if (!simpleloginService.isConfigured()) {
+          throw new McpError(ErrorCode.InvalidRequest, "SimpleLogin API key is not configured. Set simpleloginApiKey in Settings → Aliases.");
+        }
+        if (typeof args.aliasId !== "number") {
+          throw new McpError(ErrorCode.InvalidParams, "aliasId must be a number.");
+        }
+        await simpleloginService.deleteAlias(args.aliasId);
+        return ok({ success: true });
+      }
+
+      case "alias_get_activity": {
+        if (!simpleloginService.isConfigured()) {
+          throw new McpError(ErrorCode.InvalidRequest, "SimpleLogin API key is not configured. Set simpleloginApiKey in Settings → Aliases.");
+        }
+        if (typeof args.aliasId !== "number") {
+          throw new McpError(ErrorCode.InvalidParams, "aliasId must be a number.");
+        }
+        const pageSize = typeof args.pageSize === "number"
+          ? Math.min(Math.max(1, args.pageSize), 1000)
+          : 50;
+        const activities = await simpleloginService.getAliasActivities(args.aliasId, pageSize);
+        return ok({ activities });
+      }
+
       case "sync_emails": {
         const folder = (args.folder as string) || "INBOX";
         // Validate folder to prevent path traversal via the folder argument.
@@ -3913,6 +4143,15 @@ async function main() {
       config.autoStartBridge    = !!cn.autoStartBridge;
       config.bridgePath         = cn.bridgePath || undefined;
       config.settingsPort       = fileConfig.settingsPort ?? 8765;
+
+      // SimpleLogin client — populated from config; stays empty (isConfigured=false) if no key.
+      if (cn.simpleloginApiKey) {
+        simpleloginService = new SimpleLoginService(
+          cn.simpleloginApiKey,
+          cn.simpleloginBaseUrl || undefined,
+        );
+        logger.info("SimpleLogin client configured (alias_* tools active)", "MCPServer");
+      }
       logger.setDebugMode(!!cn.debug);
       tracer.setEnabled(!!cn.debug);
 
