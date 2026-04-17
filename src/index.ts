@@ -44,6 +44,11 @@ import { SMTPService } from "./services/smtp-service.js";
 import { SimpleIMAPService } from "./services/simple-imap-service.js";
 import { AnalyticsService } from "./services/analytics-service.js";
 import { SchedulerService } from "./services/scheduler.js";
+import { AgentGrantStore } from "./agents/grant-store.js";
+import { GrantManager } from "./agents/grant-manager.js";
+import { AgentAuditLog, hashArgs } from "./agents/audit.js";
+import { currentCaller } from "./agents/caller-context.js";
+import { registerAgentServices } from "./agents/registry.js";
 import { logger, getLogFilePath } from "./utils/logger.js";
 import { isValidEmail, validateLabelName, validateFolderName, validateTargetFolder, requireNumericEmailId, validateAttachments } from "./utils/helpers.js";
 import { permissions } from "./permissions/manager.js";
@@ -115,6 +120,20 @@ const analyticsService = new AnalyticsService();
 const SCHEDULER_STORE = process.env.PROTONMAIL_SCHEDULER_STORE
   || `${process.env.HOME || process.env.USERPROFILE || "."}/.protonmail-mcp-scheduled.json`;
 const schedulerService = new SchedulerService(smtpService, SCHEDULER_STORE);
+
+// ─── Agent-grant system ───────────────────────────────────────────────────────
+// Per-agent permission gating for multi-client deployments. Always-on so the
+// gate is consistent whether the transport is stdio or HTTP — but stdio
+// callers fall through to the global preset (no caller context), which
+// preserves the single-user Claude Desktop default.
+const AGENT_GRANTS_PATH = process.env.PM_BRIDGE_MCP_AGENTS
+  || `${process.env.HOME || process.env.USERPROFILE || "."}/.pm-bridge-mcp-agents.json`;
+const AGENT_AUDIT_PATH = process.env.PM_BRIDGE_MCP_AGENT_AUDIT
+  || `${process.env.HOME || process.env.USERPROFILE || "."}/.pm-bridge-mcp-agent-audit.jsonl`;
+const agentGrants = new AgentGrantStore(AGENT_GRANTS_PATH);
+const grantManager = new GrantManager(agentGrants);
+const agentAudit = new AgentAuditLog({ path: AGENT_AUDIT_PATH });
+registerAgentServices(agentGrants, agentAudit);
 
 // ─── Bridge Auto-Start State ──────────────────────────────────────────────────
 /** Set to true when this process launched Proton Bridge; triggers kill on shutdown. */
@@ -1636,6 +1655,48 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     };
   }
 
+  // ── Agent-grant gate ──────────────────────────────────────────────────────
+  // Runs BEFORE the global permission gate. Only takes effect when the call
+  // carries caller context (i.e. came in through the HTTP transport with an
+  // OAuth client_id). Stdio callers — the Claude Desktop default — fall
+  // through and are gated only by the global preset, preserving single-user
+  // behavior for anyone who hasn't opted into multi-agent mode.
+  const caller = currentCaller();
+  const callStartedAt = Date.now();
+  // Flipped true in the catch so the finally success path is skipped.
+  let auditFailureRecorded = false;
+  if (caller && !caller.staticBearer) {
+    const globalPreset = (loadConfig() ?? defaultConfig()).permissions.preset;
+    const grantResult = grantManager.check({
+      clientId: caller.clientId,
+      tool: name,
+      args: args as Record<string, unknown>,
+      callerIp: caller.ip,
+      globalPreset,
+    });
+    if (!grantResult.allowed) {
+      logger.warn(`Agent grant denied '${name}' for ${caller.clientId}`, "AgentGate", { reason: grantResult.reason });
+      agentAudit.write({
+        ts: new Date(callStartedAt).toISOString(),
+        clientId: caller.clientId,
+        clientName: caller.clientName,
+        tool: name,
+        argHash: hashArgs(args),
+        ok: false,
+        durMs: Date.now() - callStartedAt,
+        blockedReason: grantResult.reason,
+        ip: caller.ip,
+      });
+      // Mark so the finally doesn't write a duplicate "ok" row.
+      auditFailureRecorded = true;
+      return {
+        content: [{ type: "text" as const, text: `Blocked by agent grant: ${grantResult.reason}` }],
+        isError: true,
+        structuredContent: { success: false, reason: grantResult.reason, clientId: caller.clientId },
+      };
+    }
+  }
+
   // ── Permission gate ───────────────────────────────────────────────────────
   // Checked against ~/.protonmail-mcp.json (refreshed every 15 s).
   // If no config file exists the read-only preset is enforced — agents can
@@ -1644,6 +1705,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const permResult = permissions.check(name as ToolName);
   if (!permResult.allowed) {
     logger.warn(`Tool blocked by permission policy: ${name}`, "MCPServer", { reason: permResult.reason });
+    if (caller && !caller.staticBearer) {
+      agentAudit.write({
+        ts: new Date(callStartedAt).toISOString(),
+        clientId: caller.clientId,
+        clientName: caller.clientName,
+        tool: name,
+        argHash: hashArgs(args),
+        ok: false,
+        durMs: Date.now() - callStartedAt,
+        blockedReason: `preset: ${permResult.reason}`,
+        ip: caller.ip,
+      });
+      auditFailureRecorded = true;
+    }
     return {
       content: [{ type: "text" as const, text: `Blocked: ${permResult.reason}` }],
       isError: true,
@@ -3021,11 +3096,44 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   } catch (error: unknown) {
     logger.error(`Tool failed: ${name}`, "MCPServer", error);
     const msg = safeErrorMessage(error);
+    auditFailureRecorded = true;
+    if (caller && !caller.staticBearer) {
+      agentAudit.write({
+        ts: new Date(callStartedAt).toISOString(),
+        clientId: caller.clientId,
+        clientName: caller.clientName,
+        tool: name,
+        argHash: hashArgs(args),
+        ok: false,
+        durMs: Date.now() - callStartedAt,
+        blockedReason: msg,
+        ip: caller.ip,
+      });
+    }
     return {
       content: [{ type: "text" as const, text: `Error: ${msg}` }],
       structuredContent: { success: false, reason: msg },
       isError: true,
     };
+  } finally {
+    // Success audit: when the try block exited via a normal return (no
+    // catch ran), the call completed successfully. We can't observe the
+    // response contents from here (each case returns directly), but the
+    // agent-audit channel intentionally avoids logging response bodies —
+    // we just need the fact of the call and its duration.
+    if (!auditFailureRecorded && caller && !caller.staticBearer) {
+      agentAudit.write({
+        ts: new Date(callStartedAt).toISOString(),
+        clientId: caller.clientId,
+        clientName: caller.clientName,
+        tool: name,
+        argHash: hashArgs(args),
+        ok: true,
+        durMs: Date.now() - callStartedAt,
+        ip: caller.ip,
+      });
+      agentGrants.recordCall(caller.clientId);
+    }
   }
   }); // end tracer.span('mcp.tool_call')
 });
@@ -4056,6 +4164,7 @@ async function main() {
         oauthIssuer: remoteCn.remoteOauthIssuer || undefined,
         rateLimitPerSecond: remoteCn.remoteRateLimitPerSecond ?? undefined,
         rateLimitBurst: remoteCn.remoteRateLimitBurst ?? undefined,
+        agentGrants,
       });
       logger.info(`pm-bridge-mcp started on HTTP transport at ${handle.url}${handle.issuer ? ` (OAuth issuer ${handle.issuer})` : ""}`, "MCPServer");
       (globalThis as unknown as { __pmBridgeHttpHandle?: { close(): Promise<void> } }).__pmBridgeHttpHandle = handle;

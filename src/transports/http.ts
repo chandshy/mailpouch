@@ -36,6 +36,8 @@ import { logger } from "../utils/logger.js";
 import { OAuthStore } from "./oauth-store.js";
 import { OAuthHandlers } from "./oauth-handlers.js";
 import { TokenBucketLimiter } from "./rate-limit.js";
+import type { AgentGrantStore } from "../agents/grant-store.js";
+import { runWithCaller } from "../agents/caller-context.js";
 
 export interface HttpTransportOptions {
   /** MCP server instance to wire the transport into. */
@@ -61,6 +63,14 @@ export interface HttpTransportOptions {
   rateLimitPerSecond?: number;
   /** Burst size (default 40). */
   rateLimitBurst?: number;
+  /**
+   * Optional grant store to wire into DCR + authed tool calls. When set,
+   * each new DCR client gets a pending AgentGrant, and the caller-context
+   * dispatched to the MCP handler carries the client_id so the tool
+   * dispatcher can consult per-agent permissions. When omitted, the
+   * transport behaves as before (bearer-only, no per-agent gating).
+   */
+  agentGrants?: AgentGrantStore;
 }
 
 export interface HttpTransportHandle {
@@ -157,6 +167,9 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
         oauthStore,
         { issuer, resource: `${issuer}${path}`, adminPassword: opts.oauthAdminPassword },
         unauthLimiter,
+        opts.agentGrants
+          ? (c) => opts.agentGrants!.createPending({ clientId: c.client_id, clientName: c.client_name ?? "" })
+          : undefined,
       )
     : null;
 
@@ -204,6 +217,8 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
     const token = extractBearer(req);
     let tokenKey: string | null = null;
     let ok = false;
+    let callerClientId = "bearer:static";
+    let callerClientName = "Static bearer";
 
     if (token && opts.bearerToken && tokenMatches(token, opts.bearerToken)) {
       ok = true;
@@ -222,6 +237,10 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
         }
         ok = true;
         tokenKey = `oauth:${rec.clientId}`;
+        callerClientId = rec.clientId;
+        // Pull the human-readable client name from the DCR record when available.
+        const dcr = oauthStore.getClient(rec.clientId);
+        if (dcr?.client_name) callerClientName = dcr.client_name;
       }
     }
 
@@ -245,7 +264,19 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
 
     try {
       const body = req.method === "GET" ? undefined : await readJsonBody(req);
-      await transport.handleRequest(req, res, body);
+      // Wrap the dispatcher in an async-local caller context so the tool
+      // layer can identify the agent without threading it through every
+      // function signature. Static bearer uses a well-known clientId so
+      // the gate/audit can distinguish it from an unknown caller.
+      await runWithCaller(
+        {
+          clientId: callerClientId,
+          clientName: callerClientName,
+          ip: clientIp(req),
+          staticBearer: tokenKey === "bearer:static",
+        },
+        async () => { await transport.handleRequest(req, res, body); },
+      );
     } catch (err: unknown) {
       logger.error("HTTP transport request failed", "HttpTransport", err);
       if (!res.headersSent) {

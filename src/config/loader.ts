@@ -249,11 +249,11 @@ export function saveConfig(config: ServerConfig): void {
   const dest    = getConfigPath();
   const payload = JSON.stringify(config, null, 2);
   // Atomic write: write to a temp file then rename into place.
-  // rename(2) is atomic on POSIX; on Windows it is also effectively atomic
-  // for same-volume operations.  This prevents a corrupted config file if
-  // the process is killed between open() and write() — the same technique
-  // used in escalation.ts for the pending-escalation file.
-  const tmp = join(tmpdir(), `protonmcp-cfg-${randomBytes(8).toString("hex")}.json.tmp`);
+  // rename(2) is atomic on POSIX only when both sides live on the same
+  // filesystem. On Linux installs where /tmp is tmpfs and $HOME is on
+  // separate storage, using os.tmpdir() produces EXDEV. Put the tmp next
+  // to the destination so rename stays atomic regardless of mount layout.
+  const tmp = `${dest}.${randomBytes(8).toString("hex")}.tmp`;
   writeFileSync(tmp, payload, { encoding: "utf-8", mode: 0o600 });
   renameSync(tmp, dest);
   }); // end tracer.spanSync('config.save')
