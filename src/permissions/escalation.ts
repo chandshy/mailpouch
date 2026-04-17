@@ -194,7 +194,9 @@ function savePendingFile(data: PendingFile): void {
   }
 
   const dest    = getPendingFilePath();
-  const tmp     = join(tmpdir(), `protonmcp-pending-${randomBytes(8).toString("hex")}.json.tmp`);
+  // Same-filesystem tmp so rename(2) stays atomic even when /tmp is on a
+  // different mount (tmpfs) than $HOME.
+  const tmp     = `${dest}.${randomBytes(8).toString("hex")}.tmp`;
   const payload = JSON.stringify(data, null, 2);
 
   writeFileSync(tmp, payload, { encoding: "utf-8", mode: 0o600 });

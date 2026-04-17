@@ -117,11 +117,18 @@ export class OAuthHandlers {
   private readonly store: OAuthStore;
   private readonly cfg: OAuthEndpointsConfig;
   private readonly limiter: TokenBucketLimiter;
+  private readonly onClientRegistered?: (c: { client_id: string; client_name?: string }) => void;
 
-  constructor(store: OAuthStore, cfg: OAuthEndpointsConfig, limiter: TokenBucketLimiter) {
+  constructor(
+    store: OAuthStore,
+    cfg: OAuthEndpointsConfig,
+    limiter: TokenBucketLimiter,
+    onClientRegistered?: (c: { client_id: string; client_name?: string }) => void,
+  ) {
     this.store = store;
     this.cfg = cfg;
     this.limiter = limiter;
+    this.onClientRegistered = onClientRegistered;
     if (!cfg.adminPassword) throw new Error("OAuth admin password is required");
   }
 
@@ -208,6 +215,12 @@ export class OAuthHandlers {
       token_endpoint_auth_method: "none",      // Public client — PKCE is mandatory anyway
       scope: SCOPES.join(" "),
     });
+
+    // Fire-and-forget: let the transport create the pending AgentGrant so
+    // the user can approve in the settings UI. Handler errors are swallowed
+    // — DCR itself succeeded and the caller should still get their client_id.
+    try { this.onClientRegistered?.({ client_id: client.client_id, client_name: client.client_name }); }
+    catch (hookErr) { logger.warn("onClientRegistered hook threw (non-fatal)", "OAuth", hookErr); }
 
     json(res, 201, client);
     return { handled: true };

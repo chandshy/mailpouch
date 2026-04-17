@@ -65,6 +65,7 @@ import {
   type AuditEntry,
 } from "../permissions/escalation.js";
 import { getLogFilePath } from "../utils/logger.js";
+import { getAgentGrantStore, getAgentAuditLog } from "../agents/registry.js";
 
 // ─── TCP connectivity test ─────────────────────────────────────────────────────
 
@@ -3564,6 +3565,88 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
         } catch (e: unknown) {
           json(res, 500, { error: e instanceof Error ? e.message : String(e) });
         }
+        return;
+      }
+
+      // ══ AGENT GRANTS (A1 — no UI yet; curl / programmatic access) ══════════
+      if (path === "/api/agents" || path.startsWith("/api/agents/")) {
+        const grants = getAgentGrantStore();
+        const audit = getAgentAuditLog();
+        if (!grants || !audit) {
+          json(res, 503, { error: "Agent services not initialized." });
+          return;
+        }
+
+        // GET /api/agents?status=... — list all (or filter by status)
+        if (method === "GET" && path === "/api/agents") {
+          const statusFilter = url.searchParams.get("status") as
+            | "pending" | "active" | "revoked" | "expired" | null;
+          const list = statusFilter
+            ? grants.list({ status: statusFilter })
+            : grants.list();
+          json(res, 200, { grants: list });
+          return;
+        }
+
+        // GET /api/agents/audit?limit=200 — recent audit rows
+        if (method === "GET" && path === "/api/agents/audit") {
+          const limit = Math.min(Math.max(1, parseInt(url.searchParams.get("limit") ?? "200", 10)), 1000);
+          json(res, 200, { rows: audit.readTail(limit) });
+          return;
+        }
+
+        // POST /api/agents/:id/approve — body: { preset, toolOverrides?, conditions?, note? }
+        const approveMatch = /^\/api\/agents\/([A-Za-z0-9_\-]+)\/approve$/.exec(path);
+        if (method === "POST" && approveMatch) {
+          if (!requireCsrf(req, res)) return;
+          const clientId = approveMatch[1];
+          let body: Record<string, unknown>;
+          try { body = JSON.parse(await readBodySafe(req)) as Record<string, unknown>; }
+          catch { json(res, 400, { error: "Request body must be valid JSON." }); return; }
+
+          const presets = new Set(["full", "read_only", "supervised", "send_only", "custom"]);
+          const preset = String(body.preset ?? "read_only");
+          if (!presets.has(preset)) {
+            json(res, 400, { error: `Invalid preset '${preset}'. Must be one of: ${[...presets].join(", ")}.` });
+            return;
+          }
+          const grant = grants.approve({
+            clientId,
+            preset: preset as "full" | "read_only" | "supervised" | "send_only" | "custom",
+            toolOverrides: body.toolOverrides as Record<string, boolean> | undefined,
+            conditions: body.conditions as Record<string, unknown> | undefined,
+            note: typeof body.note === "string" ? body.note : undefined,
+          });
+          if (!grant) { json(res, 404, { error: "No grant record for that clientId." }); return; }
+          json(res, 200, { grant });
+          return;
+        }
+
+        // POST /api/agents/:id/deny
+        const denyMatch = /^\/api\/agents\/([A-Za-z0-9_\-]+)\/deny$/.exec(path);
+        if (method === "POST" && denyMatch) {
+          if (!requireCsrf(req, res)) return;
+          const clientId = denyMatch[1];
+          let body: Record<string, unknown> = {};
+          try { body = JSON.parse(await readBodySafe(req)) as Record<string, unknown>; } catch { /* allow empty body */ }
+          const grant = grants.deny(clientId, typeof body.note === "string" ? body.note : undefined);
+          if (!grant) { json(res, 404, { error: "No grant record for that clientId." }); return; }
+          json(res, 200, { grant });
+          return;
+        }
+
+        // POST /api/agents/:id/revoke
+        const revokeMatch = /^\/api\/agents\/([A-Za-z0-9_\-]+)\/revoke$/.exec(path);
+        if (method === "POST" && revokeMatch) {
+          if (!requireCsrf(req, res)) return;
+          const clientId = revokeMatch[1];
+          const grant = grants.revoke(clientId);
+          if (!grant) { json(res, 404, { error: "No grant record for that clientId." }); return; }
+          json(res, 200, { grant });
+          return;
+        }
+
+        json(res, 404, { error: "Unknown agent endpoint." });
         return;
       }
 
