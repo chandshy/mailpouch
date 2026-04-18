@@ -3110,6 +3110,9 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
             debug:           typeof c.debug === "boolean" ? c.debug : current.connection.debug,
             autoStartBridge: typeof c.autoStartBridge === "boolean" ? c.autoStartBridge : current.connection.autoStartBridge,
             allowInsecureBridge: typeof c.allowInsecureBridge === "boolean" ? c.allowInsecureBridge : current.connection.allowInsecureBridge,
+            // SimpleLogin: only overwrite when a non-placeholder key was posted
+            ...(typeof c.simpleloginApiKey === "string" && c.simpleloginApiKey && c.simpleloginApiKey !== "••••••••" ? { simpleloginApiKey: c.simpleloginApiKey } : {}),
+            simpleloginBaseUrl: typeof c.simpleloginBaseUrl === "string" ? c.simpleloginBaseUrl : current.connection.simpleloginBaseUrl,
             // Only overwrite credentials if a non-empty, non-placeholder string was sent
             ...(typeof c.password  === "string" && c.password  && c.password  !== "••••••••" ? { password:  c.password  } : {}),
             ...(typeof c.smtpToken === "string" && c.smtpToken && c.smtpToken !== "••••••••" ? { smtpToken: c.smtpToken } : {}),

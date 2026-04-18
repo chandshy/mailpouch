@@ -29,6 +29,9 @@ export const ALL_TOOLS = [
   "get_connection_status", "sync_emails", "clear_cache", "get_logs",
   // Bridge & server control
   "start_bridge", "shutdown_server", "restart_server",
+  // SimpleLogin aliases (Proton-owned; optional — requires API key)
+  "alias_list", "alias_create_random", "alias_create_custom",
+  "alias_toggle", "alias_delete", "alias_get_activity",
 ] as const;
 
 export type ToolName = (typeof ALL_TOOLS)[number];
@@ -104,6 +107,15 @@ export const TOOL_CATEGORIES: Record<string, ToolCategory> = {
     tools: ["start_bridge", "shutdown_server", "restart_server"],
     risk: "destructive",
   },
+  aliases: {
+    label: "SimpleLogin Aliases",
+    description: "Create and manage SimpleLogin aliases (Proton-owned alias service; requires API key)",
+    tools: [
+      "alias_list", "alias_create_random", "alias_create_custom",
+      "alias_toggle", "alias_delete", "alias_get_activity",
+    ],
+    risk: "moderate",
+  },
 };
 
 // ─── Permission Types ──────────────────────────────────────────────────────────
@@ -153,6 +165,14 @@ export interface ConnectionSettings {
   autoStartBridge?: boolean;
   /** Explicit path to the Proton Bridge executable. Leave blank to auto-detect. */
   bridgePath?: string;
+  /**
+   * SimpleLogin API key for the alias_* tools. Generated from
+   * https://app.simplelogin.io/dashboard/api_key. Leave blank to disable the
+   * alias tool group entirely (tools return a configuration error if invoked).
+   */
+  simpleloginApiKey?: string;
+  /** Optional override for SimpleLogin instance base URL (defaults to app.simplelogin.io). */
+  simpleloginBaseUrl?: string;
   debug: boolean;
 }
 
@@ -239,4 +259,5 @@ export const DESTRUCTIVE_TOOLS: ReadonlySet<string> = new Set<string>([
   "bulk_delete_emails",
   "move_to_trash",
   "move_to_spam",
+  "alias_delete",
 ]);
