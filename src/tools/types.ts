@@ -7,6 +7,37 @@
  * Handlers never touch module-level singletons directly — they read
  * everything they need from ctx, which keeps the boundary explicit and
  * makes it safe to hot-swap services (e.g. per-account routing).
+ *
+ * ─────────────────────────────────────────────────────────────────────────
+ * Error-shape rule for tool handlers
+ * ─────────────────────────────────────────────────────────────────────────
+ *
+ * Tool handlers report failure in one of three shapes. Pick the shape that
+ * matches the *agent's* mental model, not just whichever happens to be
+ * convenient at the call site:
+ *
+ *   1. throw new McpError(ErrorCode.InvalidParams, msg)
+ *      → Programmer/caller error: malformed, missing, oversized, or
+ *        typed-wrong arguments. The MCP SDK serializes this as a JSON-RPC
+ *        error response so the agent knows to retry the call differently.
+ *
+ *   2. throw new McpError(ErrorCode.InvalidRequest, msg)
+ *      → Server-side precondition the call cannot satisfy regardless of
+ *        arguments: service not configured, feature flag off, bridge
+ *        unreachable, dependent CLI not installed. Treated as a JSON-RPC
+ *        error so the agent surfaces the configuration gap instead of
+ *        narrating it as a normal tool result.
+ *
+ *   3. return { isError: true, content, structuredContent }
+ *      → Expected domain outcome: the tool ran correctly but the
+ *        operation has nothing to report — email not found, attachment
+ *        missing, folder doesn't exist, scheduler had no matching record,
+ *        SMTP delivery rejected. The agent gets a tool-result shape it
+ *        can reason about and relay to the user.
+ *
+ * When in doubt, prefer the shape already used in this file or in a
+ * neighboring handler for the same kind of failure — consistency across
+ * sites matters more than any individual judgment call.
  */
 
 import type { SimpleIMAPService } from "../services/simple-imap-service.js";
