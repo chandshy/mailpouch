@@ -3519,24 +3519,107 @@ function buildAgentSetupJson() {
       "An MCP server that exposes a user's Proton Mail inbox (via Proton Bridge) to AI agents as typed, permission-gated, audit-logged tools.",
     protocol: {
       name: "Model Context Protocol",
+      version: "2025-06-18",
       transports: ["stdio", "http"],
       docs: "https://modelcontextprotocol.io",
+      specsRepo: "https://github.com/modelcontextprotocol",
     },
     binary: {
       command: "mailpouch",
       installNote:
-        "Install the npm package with `npm install -g mailpouch` (or a GitHub install) so the `mailpouch` command is on PATH.",
+        "Install with `npm install -g <tarball-or-github-url>` so the `mailpouch` command is on PATH. The MCP client either spawns this binary as a subprocess (stdio transport) or POSTs JSON-RPC to its HTTP endpoint (http transport).",
+      supportedEnvVars: {
+        MAILPOUCH_TIER: "core | extended | complete — selects which tools are surfaced via tools/list. Default: complete.",
+        MAILPOUCH_CONFIG: "Override the config file path (default ~/.mailpouch.json with legacy-path fallback).",
+      },
+    },
+    quickstart: [
+      "Step 1 — Check that the `mailpouch` binary is on PATH (the operator installs it).",
+      "Step 2 — Configure your MCP client to spawn it over stdio OR connect to its HTTP endpoint.",
+      "Step 3 — Send `initialize` → wait for `serverInfo` → send `notifications/initialized`.",
+      "Step 4 — Send `tools/list` to discover the currently-exposed tool surface. Never assume the full 69-tool list is available — operator may have tiered it down or restricted it via per-agent grants.",
+    ],
+    transports: {
+      stdio: {
+        when: "Preferred for single-user / local / desktop clients that can spawn child processes (Claude Desktop, Claude Code, Cline, Continue.dev, mcp-inspector, SDK-based Python/TypeScript clients).",
+        how: "Spawn `mailpouch` as a subprocess. Send JSON-RPC messages as newline-terminated JSON on the child's stdin; read responses from its stdout. One message per line. Log output goes to stderr (ignore or capture separately).",
+        auth: "None required — the client trusts the binary because it spawned it. The binary reads its configuration (Bridge credentials, account list) from the operator's config file.",
+      },
+      http: {
+        when: "Use when the client cannot spawn subprocesses (a web-based agent, a remote agent across machines, a multi-agent orchestrator). Operator must opt in by setting remoteMode=true in the mailpouch config.",
+        endpoint: "POST http://<host>:<port>/mcp  — default port 8788, path /mcp. Exact URL is printed to the operator's terminal on startup.",
+        contentType: "application/json",
+        framing: "Standard JSON-RPC 2.0 over HTTP. One request body = one JSON-RPC message. The server uses the StreamableHTTPServerTransport from the MCP SDK.",
+        auth: {
+          modes: ["none (not allowed — operator must pick one of the below)", "static-bearer", "oauth-2.1"],
+          staticBearer: {
+            when: "Simplest — a pre-shared token in the mailpouch config's `remoteBearerToken` field. The client sends it on every request.",
+            header: "Authorization: Bearer <token>",
+          },
+          oauth21: {
+            when: "Required for multi-client / unattended agents. Full RFC 7591 DCR + RFC 8414/9728 metadata + PKCE S256 + RFC 8707 resource indicators.",
+            flow: [
+              "1. GET /.well-known/oauth-authorization-server → discover /register, /authorize, /token URLs.",
+              "2. POST /register with your { redirect_uris, client_name } → get back { client_id }.",
+              "3. Redirect the operator (or open a browser) to /authorize?response_type=code&client_id=…&code_challenge=…&code_challenge_method=S256&resource=http://<host>:<port>/mcp&redirect_uri=…",
+              "4. Operator types the admin password into the consent page; consent redirects back with ?code=…",
+              "5. POST /token { grant_type=authorization_code, code, code_verifier, client_id, redirect_uri, resource=http://<host>:<port>/mcp } → access_token (24h TTL).",
+              "6. Send MCP requests with Authorization: Bearer <access_token>. The server validates the `resource` binding on every call.",
+            ],
+          },
+        },
+        rateLimits: "Per-caller token-bucket: 20 req/s sustained, 40 burst for unauthenticated IPs; 60/120 for authenticated tokens. 429 on exhaustion.",
+      },
     },
     clientConfig: {
       claudeDesktop: {
-        mcpServers: {
-          mailpouch: { command: "mailpouch" },
+        path: "~/Library/Application Support/Claude/claude_desktop_config.json  (macOS)\n%APPDATA%\\Claude\\claude_desktop_config.json  (Windows)\n~/.config/Claude/claude_desktop_config.json  (Linux)",
+        snippet: {
+          mcpServers: { mailpouch: { command: "mailpouch" } },
         },
       },
-      generic: {
-        transport: "stdio",
-        command: "mailpouch",
-        args: [] as string[],
+      claudeCode: {
+        path: "Project-level: .mcp.json in the repo root, or ~/.claude.json for user-scoped.",
+        snippet: {
+          mcpServers: { mailpouch: { command: "mailpouch" } },
+        },
+      },
+      cline: {
+        path: "VSCode extension settings → Cline → MCP Servers, or directly edit cline_mcp_settings.json",
+        snippet: {
+          mcpServers: { mailpouch: { command: "mailpouch" } },
+        },
+      },
+      continueDev: {
+        path: "~/.continue/config.json",
+        snippet: {
+          experimental: {
+            modelContextProtocolServers: [
+              { transport: { type: "stdio", command: "mailpouch" } },
+            ],
+          },
+        },
+      },
+      mcpInspector: {
+        how: "npx @modelcontextprotocol/inspector mailpouch — useful for testing tool discovery + invocation without wiring a full client.",
+      },
+      customSdk: {
+        python: "from mcp import StdioServerParameters, stdio_client\nparams = StdioServerParameters(command='mailpouch')\nasync with stdio_client(params) as (read, write): ...",
+        typescript: "import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'\nconst transport = new StdioClientTransport({ command: 'mailpouch' })\nawait client.connect(transport)",
+      },
+      rawJsonRpc: {
+        when: "No SDK? No wrapper client? Just a bare agent with a JSON-RPC capability? This is the minimum handshake.",
+        example: [
+          "// 1. Send this on stdin (or POST to /mcp):",
+          '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"my-agent","version":"1.0"}}}',
+          "// 2. Read response from stdout — expect {\"result\":{\"serverInfo\":{\"name\":\"mailpouch\",…}}}",
+          "// 3. Send initialized notification (no response expected):",
+          '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+          "// 4. Discover tools:",
+          '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}',
+          "// 5. Call one:",
+          '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_unread_count","arguments":{}}}',
+        ],
       },
     },
     capabilities: {
@@ -3544,15 +3627,21 @@ function buildAgentSetupJson() {
       categories: Object.keys(TOOL_CATEGORIES),
       tiers: ["core", "extended", "complete"],
       defaultTier: "complete",
+      resources: { supported: true, description: "Server exposes resources describing mail-account state (read-only URIs)." },
+      prompts: { supported: true, description: "Pre-canned prompts like draft_in_my_voice, triage_inbox, compose_reply — consult prompts/list." },
+      elicitation: { supported: true, description: "Server may request user confirmation mid-call for destructive operations. Clients that don't support elicitation fall back to { confirmed: true } on the call args." },
       destructiveConfirmation:
         "Destructive tools (delete_email, bulk_delete, move_to_trash, move_to_spam, alias_delete, pass_get) require an MCP elicitation round-trip OR an explicit { confirmed: true } argument on the call.",
     },
+    accountRouting: {
+      description: "A single server can host multiple mail accounts. Pass account_id on any tool call to route to a specific account; omit it to use the currently-active one.",
+      discovery: "The list of configured accounts is not exposed as a tool (operator's decision for privacy). Ask the user to set the default in the settings UI, or pass account_id on every call.",
+    },
     firstCallAdvice:
-      "Before invoking tools, call tools/list to discover the currently-exposed surface — the operator may have restricted the server to the `core` or `extended` tier. If a tool you expected to see is missing, ask the user to raise the tier or grant you an override via the settings UI.",
+      "Before invoking tools, call tools/list to discover the currently-exposed surface. Default tier is `complete` (69 tools) but operators can restrict to `core` (~20 tools) or `extended` (~50) via MAILPOUCH_TIER. Per-agent grants can further narrow the surface or impose folder allowlists / IP pins / rate limits. If a tool you expected is missing, ask the user to adjust the grant — don't assume it's a bug.",
     humanControls: {
       settingsUi: "http://localhost:8766",
-      description:
-        "The operator uses this UI to approve your agent, set conditions (expiry, folder allowlist, IP pins, per-tool rate limits, account scope), and revoke access. Your audit trail is visible to them.",
+      description: "The operator uses this UI to approve your agent, set conditions (expiry, folder allowlist, IP pins, per-tool rate limits, account scope), and revoke access. Every tool call you make is audit-logged (hashed-args, never values). Your audit trail is visible to them.",
     },
   };
 }
@@ -3560,7 +3649,8 @@ function buildAgentSetupJson() {
 function buildAgentSetupHtml(): string {
   const data = buildAgentSetupJson();
   const jsonPretty = JSON.stringify(data, null, 2);
-  const claudeSnippet = JSON.stringify(data.clientConfig.claudeDesktop, null, 2);
+  const clients = data.clientConfig;
+  const snip = (o: unknown) => escapeHtml(JSON.stringify(o, null, 2));
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -3573,58 +3663,145 @@ function buildAgentSetupHtml(): string {
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body {
   font: 14px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
-  background: #0f0e1a; color: #e8e6f8; padding: 32px 24px; max-width: 820px; margin: 0 auto;
+  background: #0f0e1a; color: #e8e6f8; padding: 32px 24px; max-width: 900px; margin: 0 auto;
 }
 h1 { font-size: 20px; color: #c4c0e0; margin-bottom: 6px; font-family: system-ui, sans-serif; }
-h2 { font-size: 14px; color: #6d4aff; margin: 24px 0 8px; font-family: system-ui, sans-serif; text-transform: uppercase; letter-spacing: .04em; }
-p  { color: #c4c0e0; margin-bottom: 12px; font-family: system-ui, sans-serif; font-size: 14px; }
+h2 { font-size: 14px; color: #6d4aff; margin: 28px 0 8px; font-family: system-ui, sans-serif; text-transform: uppercase; letter-spacing: .04em; }
+h3 { font-size: 13px; color: #c4c0e0; margin: 16px 0 6px; font-family: system-ui, sans-serif; }
+p  { color: #c4c0e0; margin-bottom: 10px; font-family: system-ui, sans-serif; font-size: 14px; }
+ol, ul { color: #c4c0e0; font-family: system-ui, sans-serif; font-size: 14px; margin: 0 0 12px 20px; }
+li { margin-bottom: 4px; }
 .lede { color: #e8e6f8; font-size: 15px; margin-bottom: 4px; }
 pre {
   background: #1a1830; border: 1px solid #302e50; border-radius: 8px;
-  padding: 14px 16px; overflow-x: auto; font-size: 13px; color: #e8e6f8;
+  padding: 12px 14px; overflow-x: auto; font-size: 12.5px; color: #e8e6f8;
+  margin-bottom: 8px;
 }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; color: #e8e6f8; background: #22203a; padding: 1px 5px; border-radius: 3px; }
 a { color: #6d4aff; }
 .pill {
   display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 999px;
   background: #22203a; border: 1px solid #403d68; color: #c4c0e0; font-family: system-ui, sans-serif;
 }
-footer { color: #7c78a8; margin-top: 32px; font-size: 12px; font-family: system-ui, sans-serif; }
+.card {
+  background: rgba(26,24,48,.5); border: 1px solid #302e50; border-radius: 10px;
+  padding: 14px 16px; margin-bottom: 12px;
+}
+.card h3 { margin-top: 0; color: #6d4aff; }
+.note { font-family: system-ui, sans-serif; font-size: 13px; color: #7c78a8; margin-bottom: 6px; }
+footer { color: #7c78a8; margin-top: 36px; font-size: 12px; font-family: system-ui, sans-serif; }
 </style>
 </head>
 <body>
 
 <h1>mailpouch — Agent Integration Reference</h1>
-<p class="lede">A concise, machine-readable integration brief. Humans share this URL with their agent so it has a single-page, copy-paste-ready reference for connecting.</p>
-<p><span class="pill">For AI agents</span> <span class="pill">noindex</span> <span class="pill">HTML + JSON</span></p>
+<p class="lede">A single-page, copy-paste-ready guide for connecting any MCP client (not just Claude) to mailpouch. Humans share this URL with their agent.</p>
+<p><span class="pill">For AI agents</span> <span class="pill">noindex</span> <span class="pill">HTML + JSON</span> <span class="pill">v${data.version}</span></p>
 
 <h2>What this is</h2>
 <p>${data.summary}</p>
-<p>Protocol: ${data.protocol.name} — <a href="${data.protocol.docs}">${data.protocol.docs}</a>. Transports supported: <code>${data.protocol.transports.join(", ")}</code>.</p>
+<p>Protocol: <strong>${data.protocol.name}</strong> (spec version <code>${data.protocol.version}</code>) — <a href="${data.protocol.docs}">${data.protocol.docs}</a>. Transports: <code>${data.protocol.transports.join(", ")}</code>.</p>
 
-<h2>How to connect (Claude Desktop)</h2>
-<p>Add this block to your Claude Desktop <code>mcpServers</code> config. The <code>mailpouch</code> binary must be on PATH (install with <code>${data.binary.installNote.replace(/`/g, "")}</code>).</p>
-<pre>${escapeHtml(claudeSnippet)}</pre>
+<h2>4-step quickstart</h2>
+<ol>
+${data.quickstart.map(s => `  <li>${escapeHtml(s)}</li>`).join("\n")}
+</ol>
 
-<h2>First call</h2>
-<p>${data.firstCallAdvice}</p>
+<h2>Transport: stdio (most common)</h2>
+<p class="note">${escapeHtml(data.transports.stdio.when)}</p>
+<p><strong>How:</strong> ${escapeHtml(data.transports.stdio.how)}</p>
+<p><strong>Auth:</strong> ${escapeHtml(data.transports.stdio.auth)}</p>
+
+<h2>Transport: http (remote / multi-client)</h2>
+<p class="note">${escapeHtml(data.transports.http.when)}</p>
+<p><strong>Endpoint:</strong> <code>${escapeHtml(data.transports.http.endpoint)}</code></p>
+<p><strong>Content-Type:</strong> <code>${escapeHtml(data.transports.http.contentType)}</code> · <strong>Framing:</strong> ${escapeHtml(data.transports.http.framing)}</p>
+
+<h3>Auth: static bearer</h3>
+<p>${escapeHtml(data.transports.http.auth.staticBearer.when)}</p>
+<p><strong>Header:</strong> <code>${escapeHtml(data.transports.http.auth.staticBearer.header)}</code></p>
+
+<h3>Auth: OAuth 2.1</h3>
+<p>${escapeHtml(data.transports.http.auth.oauth21.when)}</p>
+<ol>
+${data.transports.http.auth.oauth21.flow.map(s => `  <li>${escapeHtml(s)}</li>`).join("\n")}
+</ol>
+<p><strong>Rate limits:</strong> ${escapeHtml(data.transports.http.rateLimits)}</p>
+
+<h2>Client config — pick your client</h2>
+
+<div class="card">
+  <h3>Claude Desktop</h3>
+  <p class="note">Config path: <code>${escapeHtml(clients.claudeDesktop.path)}</code></p>
+  <pre>${snip(clients.claudeDesktop.snippet)}</pre>
+</div>
+
+<div class="card">
+  <h3>Claude Code (CLI)</h3>
+  <p class="note">Config path: <code>${escapeHtml(clients.claudeCode.path)}</code></p>
+  <pre>${snip(clients.claudeCode.snippet)}</pre>
+</div>
+
+<div class="card">
+  <h3>Cline (VSCode extension)</h3>
+  <p class="note">${escapeHtml(clients.cline.path)}</p>
+  <pre>${snip(clients.cline.snippet)}</pre>
+</div>
+
+<div class="card">
+  <h3>Continue.dev</h3>
+  <p class="note">Config path: <code>${escapeHtml(clients.continueDev.path)}</code></p>
+  <pre>${snip(clients.continueDev.snippet)}</pre>
+</div>
+
+<div class="card">
+  <h3>mcp-inspector (dev tool)</h3>
+  <p class="note">${escapeHtml(clients.mcpInspector.how)}</p>
+</div>
+
+<div class="card">
+  <h3>Custom SDK client — Python</h3>
+  <pre>${escapeHtml(clients.customSdk.python)}</pre>
+</div>
+
+<div class="card">
+  <h3>Custom SDK client — TypeScript</h3>
+  <pre>${escapeHtml(clients.customSdk.typescript)}</pre>
+</div>
+
+<div class="card">
+  <h3>Raw JSON-RPC (no SDK, no wrapper)</h3>
+  <p class="note">${escapeHtml(clients.rawJsonRpc.when)}</p>
+  <pre>${clients.rawJsonRpc.example.map(escapeHtml).join("\n")}</pre>
+</div>
+
+<h2>Capabilities</h2>
+<pre>toolCount:   ${data.capabilities.toolCount}
+categories:  ${data.capabilities.categories.join(", ")}
+tiers:       ${data.capabilities.tiers.join(" &lt; ")}   (default: ${data.capabilities.defaultTier})
+resources:   ${data.capabilities.resources.supported}    — ${escapeHtml(data.capabilities.resources.description)}
+prompts:     ${data.capabilities.prompts.supported}    — ${escapeHtml(data.capabilities.prompts.description)}
+elicitation: ${data.capabilities.elicitation.supported}    — ${escapeHtml(data.capabilities.elicitation.description)}</pre>
 
 <h2>Destructive operations</h2>
 <p>${data.capabilities.destructiveConfirmation}</p>
 
-<h2>Capabilities</h2>
-<pre>toolCount: ${data.capabilities.toolCount}
-categories: ${data.capabilities.categories.join(", ")}
-tiers: ${data.capabilities.tiers.join(" &lt; ")} (default: ${data.capabilities.defaultTier})</pre>
+<h2>Multi-account routing</h2>
+<p>${escapeHtml(data.accountRouting.description)}</p>
+<p>${escapeHtml(data.accountRouting.discovery)}</p>
+
+<h2>First-call advice</h2>
+<p>${data.firstCallAdvice}</p>
 
 <h2>Operator control surface</h2>
 <p>The human running this server sees you in their <a href="${data.humanControls.settingsUi}">settings UI</a>. ${data.humanControls.description}</p>
 
-<h2>Full machine-readable payload</h2>
-<p>This same data is available as JSON at <a href="/agent-setup.json"><code>/agent-setup.json</code></a> (or send <code>Accept: application/json</code> to this URL).</p>
+<h2>Machine-readable payload</h2>
+<p>Same data as JSON: <a href="/agent-setup.json"><code>/agent-setup.json</code></a>, or send <code>Accept: application/json</code> to this URL.</p>
 <pre>${escapeHtml(jsonPretty)}</pre>
 
 <footer>
-mailpouch v${data.version} · served from the local settings server · not internet-indexed
+mailpouch v${data.version} · served from the local settings server · noindex · not internet-indexed
 </footer>
 
 </body>
