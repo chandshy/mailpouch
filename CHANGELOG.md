@@ -5,6 +5,126 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] — 2026-04-18
+
+Adds multi-account support, per-agent permission grants, a remote HTTP
+transport with OAuth 2.1, local full-text search, and integrations with
+SimpleLogin and Proton Pass. The product is renamed from
+`protonmail-agentic-mcp` to `pm-bridge-mcp`. Tool count: 49 → 67.
+
+### Added
+
+- **Multi-account registry** (#63) — `accounts[]` + `activeAccountId` in
+  the config; `AccountManager` owns one `{imap, smtp, spec}` per account
+  and hot-swaps the module-level service symbols on `active-changed`
+  events (no restart). Per-tool routing via an `account_id` arg. Accounts
+  tab in the Settings UI. Legacy single-account configs auto-migrate to a
+  "primary" account.
+- **Per-agent permission grants** (#63) — per-caller gate with grants
+  that progress pending → active → revoked/expired. Conditions:
+  `expiresAt`, `folderAllowlist`, `ipPins`, `maxCallsPerHourByTool`,
+  `accountId`, `toolOverrides`. Append-only audit log (hashed args only,
+  never values; 10 MB rotation, 3 compressed generations). Approve / deny
+  / revoke and approve-with-conditions modal in the Agents tab.
+- **Notification channels** (#63) — `DesktopNotifier` (macOS `osascript`,
+  Linux `notify-send`, Windows `powershell.exe` toast; no dep).
+  `WebhookDispatcher` with CloudEvents 1.0 default, Slack/Discord
+  auto-detection, HMAC-signed `X-PMBridge-Signature-256`, 8-attempt
+  exponential backoff with ±20 % jitter. Triggered by a
+  `NotificationBroker` that emits grant-created/approved/denied/revoked/
+  expired events.
+- **HTTP transport with OAuth 2.1** (#53) — `StreamableHTTPServerTransport`
+  in remote mode. Either static bearer (`remoteBearerToken`) or the full
+  OAuth suite: `/oauth/register` (RFC 7591 DCR), `/oauth/authorize` (PKCE
+  S256 consent flow gated by admin password), `/oauth/token` (RFC 8707
+  resource indicator validation), `/oauth/revoke`,
+  `/.well-known/oauth-authorization-server` (RFC 8414),
+  `/.well-known/oauth-protected-resource` (RFC 9728). Per-caller
+  token-bucket rate limit (20 req/s sustained, 40 burst; 3× bucket for
+  authenticated). Stdio transport unchanged for Claude Desktop.
+- **Local FTS5 search index** (#52) — three tools (`fts_search`,
+  `fts_rebuild`, `fts_status`) backed by `better-sqlite3` (optional
+  native dep). BM25 ranking, FTS5 syntax (phrase, boolean, prefix, column
+  filters), snippet output. Graceful degradation when `better-sqlite3`
+  isn't installed — `fts_status` reports `available: false`, other tools
+  return `InvalidRequest`; mail tools unaffected.
+- **Proton Pass integration** (#51) — three tools: `pass_list`,
+  `pass_search` (both safe), `pass_get` (destructive, audit-logged).
+  Subprocess wrapper around `pass-cli` with a Personal Access Token.
+  Every `pass_get` call is appended to
+  `~/.pm-bridge-mcp-pass-audit.jsonl` (no arg values, no response
+  bodies).
+- **Reminder scheduler** (#50) — `remind_if_no_reply`,
+  `list_pending_reminders`, `cancel_reminder`, `check_reminders`. JSONL
+  persistence at `~/.pm-bridge-mcp-reminders.json`.
+- **Content tools** (#49) — `get_thread` (IMAP
+  `References`/`In-Reply-To` walk with a 200-message cap) and
+  `get_correspondence_profile` (volume, first/last interaction, average
+  response time for a single address).
+- **Progressive tool tiering** (#48) — three tiers (`core` / `extended`
+  / `complete`); `PM_BRIDGE_MCP_TIER` env var and `toolTier` config
+  field control how many tools appear in ListTools. Reduces context
+  bloat for agents that only need a subset.
+- **MCP elicitation for destructive tools** (#47) — destructive tool
+  calls trigger an elicitation request to the client before executing.
+  Older clients without elicitation fall back to the
+  `{ confirmed: true }` argument flow (preserves the pre-elicitation
+  behavior).
+- **SimpleLogin alias tools** (#46) — six tools for managing aliases on
+  Proton-owned SimpleLogin (optional; requires API key). `alias_delete`
+  is destructive.
+- **"Works best with…" companion MCP servers** (#45) — README section
+  listing complementary MCP servers that pair well with pm-bridge-mcp.
+
+### Changed
+
+- **Product rename** (#34) — `protonmail-agentic-mcp` → `pm-bridge-mcp`.
+  Config path prefers `~/.pm-bridge-mcp.json`, falls back to the legacy
+  `~/.protonmail-mcp.json`. npm binary and homepage URLs updated.
+- **Bridge TLS hardening** (#31) — production default now requires a
+  loaded Bridge TLS cert; localhost Bridge without a cert needs explicit
+  `allowInsecureBridge` opt-in (config field or
+  `PROTONMAIL_MCP_INSECURE_BRIDGE=1`). Bridge version floor bumped to
+  v3.22.0 (detected via IMAP ID).
+- **Compliance UX** (#33) — destructive-tool confirmation gate (on by
+  default; `requireDestructiveConfirm`) + ToS §2.10 acknowledgement
+  recorded on first launch.
+- **SMTP abuse-signal backoff** (#35) — exponential backoff (base 5 s,
+  cap 5 min, with jitter) when SMTP returns 421/450/454. Prevents
+  accidental hammering of Bridge after Proton rate-limits us.
+- **Build tooling** — TypeScript 5.9 → 6.0 (#13),
+  `moduleResolution: NodeNext` switch.
+
+### Fixed
+
+- **`chore(deps)`** (#62) — resolved three transitive CVEs from
+  `@modelcontextprotocol/sdk@1.29.0` via `package.json` `overrides`:
+  `hono >=4.12.14` (6 moderate advisories),
+  `@hono/node-server >=1.19.13` (moderate), `path-to-regexp >=8.4.2`
+  (high ReDoS).
+- **`TOOL_CATEGORY_TIER` gap** — the `aliases` category was missing from
+  the tier map after #46 and #48 interleaved on main, leaving alias
+  tools unreachable from `toolsForTier("complete")`. Fixed while
+  rebasing #49.
+
+### Dependency bumps (Dependabot)
+
+- `@modelcontextprotocol/sdk` 1.27.1 → 1.29.0 (#19)
+- `imapflow` 1.2.15 → 1.3.1 (#25)
+- `mailparser` 3.9.4 → 3.9.8 (#27)
+- `@types/nodemailer` 6.4.19 → 8.0.0
+- `@types/node` 25.5.0 → 25.6.0 (#26)
+- `vitest` 4.1.0 → 4.1.4 (#30)
+- `@vitest/coverage-v8` 4.1.0 → 4.1.4 (#28)
+
+### Coverage notes
+
+- Test count: 1,021 → **1,525** across 41 files.
+- Thresholds relaxed as new subsystems brought defensive error paths
+  that are hard to exercise without stubbing native deps: statements
+  95 → 94, branches 94 → 90, functions 94 → 93, lines 96 → 96.
+  Backfilling these is a follow-up.
+
 ## [2.0.4] — 2026-03-19
 
 ### Improved
