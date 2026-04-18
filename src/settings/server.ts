@@ -927,7 +927,7 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
       <div class="wiz-panel active" id="wpanel-0" role="tabpanel" aria-label="Welcome">
         <div class="wiz-title">Welcome to mailpouch</div>
         <div class="wiz-subtitle">
-          Give Claude secure, permission-controlled access to your Proton Mail inbox
+          Give your Agent secure, permission-controlled access to your Proton Mail inbox
           via Proton Bridge. Setup takes about 3 minutes.
         </div>
 
@@ -1889,9 +1889,9 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
     list.innerHTML = rows.map(a => {
       const active = a.id === activeId;
       const buttons =
-        (active ? '' : '<button class="btn btn-primary" onclick="activateAccount(\'' + esc(a.id) + '\')">Activate</button>') +
-        '<button class="btn btn-ghost" onclick="editAccount(\'' + esc(a.id) + '\')">Edit</button>' +
-        (!active ? '<button class="btn btn-ghost" onclick="deleteAccountConfirm(\'' + esc(a.id) + '\')">Delete</button>' : '');
+        (active ? '' : '<button class="btn btn-primary" onclick="activateAccount(\\'' + esc(a.id) + '\\')">Activate</button>') +
+        '<button class="btn btn-ghost" onclick="editAccount(\\'' + esc(a.id) + '\\')">Edit</button>' +
+        (!active ? '<button class="btn btn-ghost" onclick="deleteAccountConfirm(\\'' + esc(a.id) + '\\')">Delete</button>' : '');
       const last = a.lastCheckedAt ? ' · last check ' + new Date(a.lastCheckedAt).toLocaleString() + ' · ' + esc(a.lastCheckResult || '') : '';
       return (
         '<div class="card" style="padding:12px;border:1px solid #333;border-radius:8px;' + (active ? 'border-color:#6D4AFF' : '') + '">' +
@@ -2071,13 +2071,13 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
       const nameEsc = esc(g.clientName);
       const condArg = g.conditions ? JSON.stringify(g.conditions).replace(/'/g, "\\'") : 'null';
       const buttons = g.status === 'pending'
-        ? '<button class="btn btn-primary" onclick="approveGrant(\'' + cidEsc + '\',\'read_only\')">Approve read-only</button>' +
-          '<button class="btn btn-primary" onclick="approveGrant(\'' + cidEsc + '\',\'supervised\')">Approve supervised</button>' +
-          '<button class="btn btn-ghost"   onclick="openGrantModal(\'' + cidEsc + '\',\'' + nameEsc + '\',null)">Customize\u2026</button>' +
-          '<button class="btn btn-ghost"   onclick="denyGrant(\''    + cidEsc + '\')">Deny</button>'
+        ? '<button class="btn btn-primary" onclick="approveGrant(\\'' + cidEsc + '\\',\\'read_only\\')">Approve read-only</button>' +
+          '<button class="btn btn-primary" onclick="approveGrant(\\'' + cidEsc + '\\',\\'supervised\\')">Approve supervised</button>' +
+          '<button class="btn btn-ghost"   onclick="openGrantModal(\\'' + cidEsc + '\\',\\'' + nameEsc + '\\',null)">Customize\u2026</button>' +
+          '<button class="btn btn-ghost"   onclick="denyGrant(\\''    + cidEsc + '\\')">Deny</button>'
         : g.status === 'active'
-        ? '<button class="btn btn-ghost"   onclick="openGrantModal(\'' + cidEsc + '\',\'' + nameEsc + '\',' + condArg + ')">Extend / modify\u2026</button>' +
-          '<button class="btn btn-ghost"   onclick="revokeGrant(\''  + cidEsc + '\')">Revoke</button>'
+        ? '<button class="btn btn-ghost"   onclick="openGrantModal(\\'' + cidEsc + '\\',\\'' + nameEsc + '\\',' + condArg + ')">Extend / modify\u2026</button>' +
+          '<button class="btn btn-ghost"   onclick="revokeGrant(\\''  + cidEsc + '\\')">Revoke</button>'
         : '';
       return (
         '<div class="card" style="padding:12px;border:1px solid #333;border-radius:8px">' +
