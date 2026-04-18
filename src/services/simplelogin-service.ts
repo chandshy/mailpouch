@@ -9,7 +9,7 @@
  * spelling — that's how SimpleLogin designed it). API keys are scoped per
  * account and generated from the SimpleLogin dashboard.
  *
- * All requests are fire-and-forget from pm-bridge-mcp's perspective; we do
+ * All requests are fire-and-forget from mailpouch's perspective; we do
  * not persist alias state locally — the agent always reads fresh from the API.
  */
 

@@ -101,13 +101,17 @@ describe("SimpleIMAPService.connect() bridgeCertPath handling", () => {
   describe("strict mode (no allowInsecureBridge opt-in)", () => {
     // Tests in this block run with the env var temporarily cleared so that
     // the strict default (throw when no cert or cert load fails) is exercised.
-    let prevEnv: string | undefined;
+    const ENV_KEYS = ["MAILPOUCH_INSECURE_BRIDGE", "PM_BRIDGE_MCP_INSECURE_BRIDGE", "PROTONMAIL_MCP_INSECURE_BRIDGE"] as const;
+    let prev: Record<string, string | undefined> = {};
     beforeEach(() => {
-      prevEnv = process.env.PROTONMAIL_MCP_INSECURE_BRIDGE;
-      delete process.env.PROTONMAIL_MCP_INSECURE_BRIDGE;
+      prev = {};
+      for (const k of ENV_KEYS) { prev[k] = process.env[k]; delete process.env[k]; }
     });
     afterEach(() => {
-      if (prevEnv !== undefined) process.env.PROTONMAIL_MCP_INSECURE_BRIDGE = prevEnv;
+      for (const k of ENV_KEYS) {
+        if (prev[k] !== undefined) process.env[k] = prev[k];
+        else delete process.env[k];
+      }
     });
 
     it("throws when localhost and no cert path is configured", async () => {

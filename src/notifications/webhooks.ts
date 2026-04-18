@@ -15,7 +15,7 @@
  *                              discord.com/api/webhooks URLs.
  *   "raw"                    — Send the raw grant JSON.
  *
- * Signing: every delivery carries an `X-PMBridge-Signature-256` header
+ * Signing: every delivery carries an `X-Mailpouch-Signature-256` header
  * whose value is `sha256=<hex>` of HMAC(body, secret) — matches the
  * GitHub webhook convention. No signing happens when the endpoint has
  * no secret configured.
@@ -129,10 +129,10 @@ export function buildPayload(ev: GrantChangedEvent, format: WebhookFormat): Reco
     (g.conditions?.expiresAt ? ` · expires ${g.conditions.expiresAt}` : "");
 
   if (format === "slack") {
-    return { text: `*pm-bridge-mcp* — ${line}\n${detail}` };
+    return { text: `*mailpouch* — ${line}\n${detail}` };
   }
   if (format === "discord") {
-    return { content: `**pm-bridge-mcp** — ${line}\n${detail}` };
+    return { content: `**mailpouch** — ${line}\n${detail}` };
   }
   if (format === "raw") {
     return { kind: ev.kind, seq: ev.seq, grant: g };
@@ -140,9 +140,9 @@ export function buildPayload(ev: GrantChangedEvent, format: WebhookFormat): Reco
   // CloudEvents 1.0 envelope.
   return {
     specversion: "1.0",
-    id: `pmb-${randomBytes(8).toString("hex")}`,
-    source: "pm-bridge-mcp",
-    type: `com.pmbridge.${ev.kind.replace("-", ".")}`,
+    id: `mp-${randomBytes(8).toString("hex")}`,
+    source: "mailpouch",
+    type: `com.mailpouch.${ev.kind.replace("-", ".")}`,
     time: new Date().toISOString(),
     datacontenttype: "application/json",
     data: {
@@ -218,9 +218,9 @@ export class WebhookDispatcher {
     const body = JSON.stringify(payload);
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
-      "User-Agent": "pm-bridge-mcp/1 (+https://github.com/chandshy/pm-bridge-mcp)",
+      "User-Agent": "mailpouch/1 (+https://github.com/chandshy/mailpouch)",
     };
-    if (endpoint.secret) headers["X-PMBridge-Signature-256"] = sign(body, endpoint.secret);
+    if (endpoint.secret) headers["X-Mailpouch-Signature-256"] = sign(body, endpoint.secret);
 
     let lastError = "";
     let status: number | undefined;

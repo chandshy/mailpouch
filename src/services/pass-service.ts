@@ -20,7 +20,7 @@
  * - PAT is read from the config file (mode 0600) OR keychain. Never from
  *   env vars the agent can inspect.
  * - Every call is logged to an append-only audit file
- *   (~/.pm-bridge-mcp-pass-audit.jsonl, mode 0600) with timestamp + tool
+ *   (~/.mailpouch-pass-audit.jsonl, mode 0600) with timestamp + tool
  *   name + item ID (but never the secret value itself).
  * - No tool returns or logs the decrypted secret in plain text unless the
  *   user has explicitly confirmed via the elicitation gate. That's the

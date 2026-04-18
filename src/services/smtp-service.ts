@@ -68,11 +68,11 @@ export class SMTPService {
       ? this.config.smtp.smtpToken
       : this.config.smtp.password;
 
-    // Accept either the new PM_BRIDGE_MCP name or the legacy PROTONMAIL name.
-    // New wins; legacy is silently honored for one release. Remove the
-    // PROTONMAIL_MCP_INSECURE_BRIDGE alias in v2.2.
+    // Env-var priority: MAILPOUCH_* > PM_BRIDGE_MCP_* > PROTONMAIL_MCP_*. Legacy
+    // names honored through v3.0.
     const allowInsecure =
       this.config.smtp.allowInsecureBridge === true ||
+      process.env.MAILPOUCH_INSECURE_BRIDGE === "1" ||
       process.env.PM_BRIDGE_MCP_INSECURE_BRIDGE === "1" ||
       process.env.PROTONMAIL_MCP_INSECURE_BRIDGE === "1";
 
@@ -103,7 +103,7 @@ export class SMTPService {
             throw new Error(
               `SMTP: Bridge cert at "${resolvedCertPath}" could not be loaded and allowInsecureBridge is not set. ` +
               `Fix the cert path in Settings → Connection, or set allowInsecureBridge: true ` +
-              `(or PM_BRIDGE_MCP_INSECURE_BRIDGE=1) to opt into the legacy insecure behavior. ` +
+              `(or MAILPOUCH_INSECURE_BRIDGE=1) to opt into the legacy insecure behavior. ` +
               `Underlying error: ${(err as Error).message}`
             );
           }
@@ -122,7 +122,7 @@ export class SMTPService {
           throw new Error(
             "SMTP: No Bridge certificate configured. Export the cert from Bridge → Help → Export TLS Certificate " +
             "and set 'bridgeCertPath' in Settings → Connection. To opt into the legacy behavior (TLS validation " +
-            "disabled for localhost), set allowInsecureBridge: true or launch with PM_BRIDGE_MCP_INSECURE_BRIDGE=1."
+            "disabled for localhost), set allowInsecureBridge: true or launch with MAILPOUCH_INSECURE_BRIDGE=1."
           );
         }
         logger.warn(
@@ -435,12 +435,12 @@ export class SMTPService {
   ): Promise<{ success: boolean; messageId?: string; error?: string }> {
     logger.debug("Sending test email", "SMTPService", { to });
 
-    const subject = "Test Email from pm-bridge-mcp";
+    const subject = "Test Email from mailpouch";
     const body =
       customMessage ||
       `
       <h2>Test Email Successful</h2>
-      <p>This is a test email from the pm-bridge-mcp server.</p>
+      <p>This is a test email from the mailpouch server.</p>
       <p><strong>Timestamp:</strong> ${new Date().toISOString()}</p>
       <p><strong>From:</strong> ${escapeHtml(this.config.smtp.username)}</p>
       <p>If you received this email, your SMTP configuration is working correctly.</p>

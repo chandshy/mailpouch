@@ -29,7 +29,7 @@
  *      MAX_PENDING pending at a time, preventing flooding/confusion.
  *
  *   7. DURABLE AUDIT TRAIL — all events are appended to
- *      ~/.pm-bridge-mcp.audit.jsonl immediately, before any response is
+ *      ~/.mailpouch.audit.jsonl immediately, before any response is
  *      sent.  The agent cannot erase this log via MCP tools.
  *
  *   8. UPGRADE-ONLY — downgrading a preset (reducing privilege) never
@@ -37,7 +37,7 @@
  *      Only transitions to a higher-privilege preset require approval.
  *
  * Shared state between the MCP server and the settings server is maintained
- * via a file (~/.pm-bridge-mcp.pending.json, mode 0600) rather than IPC,
+ * via a file (~/.mailpouch.pending.json, mode 0600) rather than IPC,
  * so both processes remain independent.
  *
  * Residual risk (documented):
@@ -116,31 +116,41 @@ interface PendingFile {
 // ─── File paths ────────────────────────────────────────────────────────────────
 
 export function getPendingFilePath(): string {
-  // Accept either the new PM_BRIDGE_MCP name or the legacy PROTONMAIL name.
-  // New wins; legacy is silently honored for one release. Remove the
-  // PROTONMAIL_MCP_PENDING alias in v2.2.
-  const envPath = process.env.PM_BRIDGE_MCP_PENDING ?? process.env.PROTONMAIL_MCP_PENDING;
+  // Env-var priority: MAILPOUCH_* > PM_BRIDGE_MCP_* > PROTONMAIL_*. Legacy
+  // names honored through v3.0.
+  const envPath = process.env.MAILPOUCH_PENDING
+    ?? process.env.PM_BRIDGE_MCP_PENDING
+    ?? process.env.PROTONMAIL_MCP_PENDING;
   if (envPath) return envPath;
   // Read-old/write-new: prefer the new path, but if a stale pending record
-  // is sitting in the legacy file (and the new one doesn't exist yet), keep
+  // is sitting in a legacy file (and the new one doesn't exist yet), keep
   // honoring it so an in-flight escalation isn't dropped on the floor mid-flow.
-  const preferred = join(homedir(), ".pm-bridge-mcp.pending.json");
-  const legacy = join(homedir(), ".protonmail-mcp.pending.json");
-  if (!existsSync(preferred) && existsSync(legacy)) return legacy;
+  const preferred = join(homedir(), ".mailpouch.pending.json");
+  const legacyV2 = join(homedir(), ".pm-bridge-mcp.pending.json");
+  const legacyV1 = join(homedir(), ".protonmail-mcp.pending.json");
+  if (!existsSync(preferred)) {
+    if (existsSync(legacyV2)) return legacyV2;
+    if (existsSync(legacyV1)) return legacyV1;
+  }
   return preferred;
 }
 
 export function getAuditLogPath(): string {
-  // Accept either the new PM_BRIDGE_MCP name or the legacy PROTONMAIL name.
-  // New wins; legacy is silently honored for one release. Remove the
-  // PROTONMAIL_MCP_AUDIT alias in v2.2.
-  const envPath = process.env.PM_BRIDGE_MCP_AUDIT ?? process.env.PROTONMAIL_MCP_AUDIT;
+  // Env-var priority: MAILPOUCH_* > PM_BRIDGE_MCP_* > PROTONMAIL_*. Legacy
+  // names honored through v3.0.
+  const envPath = process.env.MAILPOUCH_AUDIT
+    ?? process.env.PM_BRIDGE_MCP_AUDIT
+    ?? process.env.PROTONMAIL_MCP_AUDIT;
   if (envPath) return envPath;
-  // Read-old/write-new: append to the legacy file when it's the only one
+  // Read-old/write-new: append to a legacy file when it's the only one
   // present so the audit trail stays continuous across the rename.
-  const preferred = join(homedir(), ".pm-bridge-mcp.audit.jsonl");
-  const legacy = join(homedir(), ".protonmail-mcp.audit.jsonl");
-  if (!existsSync(preferred) && existsSync(legacy)) return legacy;
+  const preferred = join(homedir(), ".mailpouch.audit.jsonl");
+  const legacyV2 = join(homedir(), ".pm-bridge-mcp.audit.jsonl");
+  const legacyV1 = join(homedir(), ".protonmail-mcp.audit.jsonl");
+  if (!existsSync(preferred)) {
+    if (existsSync(legacyV2)) return legacyV2;
+    if (existsSync(legacyV1)) return legacyV1;
+  }
   return preferred;
 }
 

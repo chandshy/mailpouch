@@ -98,7 +98,7 @@ export class DesktopNotifier {
   }
 
   private async notifyLinux(n: DesktopNotification): Promise<{ ok: boolean; platform: string; reason?: string }> {
-    const args: string[] = ["--app-name=pm-bridge-mcp"];
+    const args: string[] = ["--app-name=mailpouch"];
     if (n.subtitle) {
       // notify-send doesn't have a subtitle; fold it into the body.
       args.push(n.title, `${n.subtitle}\n\n${n.body}`);
@@ -115,7 +115,7 @@ export class DesktopNotifier {
     // Inline PowerShell script uses the built-in WinRT toast API. No
     // module install required on Windows 10+; the AppID is fine as a
     // generic label since we don't care about Action Center grouping
-    // for a single pm-bridge-mcp deployment.
+    // for a single mailpouch deployment.
     const xml =
       `<toast><visual><binding template='ToastGeneric'>` +
       `<text>${n.title}</text>` +
@@ -129,7 +129,7 @@ export class DesktopNotifier {
       `$x = New-Object Windows.Data.Xml.Dom.XmlDocument;` +
       `$x.LoadXml('${escPowerShell(xml)}');` +
       `$t = [Windows.UI.Notifications.ToastNotification]::new($x);` +
-      `[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('pm-bridge-mcp').Show($t);`;
+      `[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('mailpouch').Show($t);`;
     const { code } = await this.run("powershell.exe", ["-NoProfile", "-Command", ps]);
     return code === 0 ? { ok: true, platform: "win32" } : { ok: false, platform: "win32", reason: `powershell exit ${code}` };
   }

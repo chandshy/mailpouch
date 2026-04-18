@@ -1,5 +1,5 @@
 /**
- * pm-bridge-mcp — Terminal UI
+ * mailpouch — Terminal UI
  *
  * Provides interactive configuration management when a browser is not
  * available. Detects the environment at runtime and selects the best
@@ -186,7 +186,7 @@ export function printNonInteractive(): void {
   const cfg = loadConfig();
   const path = getConfigPath();
 
-  process.stdout.write("\npm-bridge-mcp — Settings\n");
+  process.stdout.write("\nmailpouch — Settings\n");
   process.stdout.write("─".repeat(48) + "\n");
 
   if (cfg) {
@@ -201,7 +201,7 @@ export function printNonInteractive(): void {
   }
 
   process.stdout.write("\nTo configure: run in an interactive terminal, or start the browser UI:\n");
-  process.stdout.write("  npx pm-bridge-mcp-settings\n\n");
+  process.stdout.write("  npx mailpouch-settings\n\n");
 }
 
 // ─── Colour helpers (ANSI) ────────────────────────────────────────────────────
@@ -317,7 +317,7 @@ function ansiDraw(st: AnsiState): void {
   out.push(C.clrScr + C.hideCur);
 
   // Header
-  const title = "  ✉  pm-bridge-mcp — Settings";
+  const title = "  ✉  mailpouch — Settings";
   out.push(C.bgNav + C.bCyan + C.bold + title.padEnd(w) + C.reset + "\n");
 
   const cfgExists = configExists();
@@ -739,7 +739,7 @@ export async function runPlainTUI(serverPort: number, startServerFn: (port: numb
   function hr() { process.stdout.write("─".repeat(48) + "\n"); }
 
   function printHeader() {
-    process.stdout.write("\npm-bridge-mcp — Settings\n");
+    process.stdout.write("\nmailpouch — Settings\n");
     hr();
     const cfg = loadConfig();
     const path = getConfigPath();

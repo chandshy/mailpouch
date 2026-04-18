@@ -7,7 +7,7 @@
  * a truncated sha256 hash of the args instead so "same call repeated" is
  * observable without content leakage.
  *
- * File: ~/.pm-bridge-mcp-agent-audit.jsonl (0600)
+ * File: ~/.mailpouch-agent-audit.jsonl (0600)
  * Rotation: when current file exceeds ROTATE_BYTES, rename to .1.gz and
  *           start fresh. Keep KEEP_GENERATIONS compressed generations.
  */
@@ -105,7 +105,7 @@ export class AgentAuditLog {
 /**
  * Truncated sha256 of JSON.stringify(args). Gives us a stable "same args"
  * fingerprint without storing the content. 16 hex chars = 64 bits of
- * collision resistance, plenty for a dedup hint at pm-bridge scale.
+ * collision resistance, plenty for a dedup hint at mailpouch scale.
  */
 export function hashArgs(args: unknown): string {
   if (args === undefined || args === null) return "";

@@ -1,5 +1,5 @@
 /**
- * Helper utilities for pm-bridge-mcp
+ * Helper utilities for mailpouch
  */
 
 import { randomUUID } from "crypto";

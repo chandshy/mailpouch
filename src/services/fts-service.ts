@@ -6,7 +6,7 @@
  * FTS5 gives us BM25-ranked keyword search with snippet highlighting, which
  * is good-enough for most day-to-day "find the email about X" queries.
  *
- * `better-sqlite3` is an *optional* dependency — pm-bridge-mcp must still
+ * `better-sqlite3` is an *optional* dependency — mailpouch must still
  * load and serve mail tools when it isn't available. Call openFtsIndex() to
  * get a live instance; it throws FtsUnavailableError when the native
  * binding is missing, and callers return a structured error to the tool
@@ -221,7 +221,7 @@ export function openFtsIndex(dbPath: string): FtsIndexService {
   } catch (err) {
     throw new FtsUnavailableError(
       "FTS index requires 'better-sqlite3' (optional dependency). Install with " +
-      "`npm install better-sqlite3` in the pm-bridge-mcp directory. " +
+      "`npm install better-sqlite3` in the mailpouch directory. " +
       `Underlying error: ${(err as Error).message}`,
     );
   }

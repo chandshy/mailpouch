@@ -1,5 +1,5 @@
 /**
- * Type definitions for pm-bridge-mcp (the Proton Mail MCP server)
+ * Type definitions for mailpouch (the Proton Mail MCP server)
  */
 
 export interface SMTPConfig {
@@ -15,7 +15,7 @@ export interface SMTPConfig {
   /**
    * Explicit opt-in to accept the local Bridge connection without a pinned TLS cert.
    * Default false → the service refuses to start when localhost is used without a cert.
-   * Set true (or PM_BRIDGE_MCP_INSECURE_BRIDGE=1) to preserve the pre-2026-04 behavior.
+   * Set true (or MAILPOUCH_INSECURE_BRIDGE=1) to preserve the pre-2026-04 behavior.
    */
   allowInsecureBridge?: boolean;
 }

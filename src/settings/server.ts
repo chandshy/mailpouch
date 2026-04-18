@@ -1,5 +1,5 @@
 /**
- * pm-bridge-mcp — Settings UI Server
+ * mailpouch — Settings UI Server
  *
  * Starts a localhost-only HTTP server that serves a browser-based
  * configuration interface.  The UI lets users:
@@ -9,7 +9,7 @@
  *   • Test connectivity
  *   • View server status and the generated Claude Desktop config snippet
  *
- * The config is persisted to ~/.pm-bridge-mcp.json (mode 0600).
+ * The config is persisted to ~/.mailpouch.json (mode 0600).
  * The MCP server reads that file every 15 s, so changes take effect
  * without a restart.
  */
@@ -132,7 +132,7 @@ function buildHtml(configPath: string, csrfToken: string, runningPort = 8765): s
 
   // Read version + name from package.json at the project root
   let pkgVersion = "unknown";
-  let pkgName = "pm-bridge-mcp";
+  let pkgName = "mailpouch";
   try {
     const pkgPath = _pkgJsonPath;
     const pkgJson = JSON.parse(readFileSync(pkgPath, "utf-8")) as { version?: string; name?: string };
@@ -149,7 +149,7 @@ function buildHtml(configPath: string, csrfToken: string, runningPort = 8765): s
     process.platform === "darwin" ? "~/Library/Application Support/protonmail/bridge-v3/cert.pem" :
                                     "~/.config/protonmail/bridge-v3/cert.pem";
   const certPlatformHint = `Default location: <code style="background:var(--surface3);padding:1px 5px;border-radius:3px;font-size:11px">${certDefaultPath}</code>`;
-  // configPath comes from process.env.PM_BRIDGE_MCP_CONFIG and is injected
+  // configPath comes from process.env.MAILPOUCH_CONFIG and is injected
   // directly into two <code> elements via template-literal interpolation.
   // A path like `/home/u/<script>alert(1)</script>.json` (set by a malicious
   // env var or via path manipulation) would produce XSS in the settings page.
@@ -168,7 +168,7 @@ function buildHtml(configPath: string, csrfToken: string, runningPort = 8765): s
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="csrf-token" content="${csrfToken}">
-<title>pm-bridge-mcp — Settings</title>
+<title>mailpouch — Settings</title>
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -847,7 +847,7 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
   <div class="logo-wrap">
     <div class="logo-icon">✉</div>
     <div>
-      <div class="header-title">pm-bridge-mcp</div>
+      <div class="header-title">mailpouch</div>
       <div class="header-subtitle">Settings</div>
     </div>
   </div>
@@ -925,7 +925,7 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
 
       <!-- ══ Step 1: Welcome ══ -->
       <div class="wiz-panel active" id="wpanel-0" role="tabpanel" aria-label="Welcome">
-        <div class="wiz-title">Welcome to pm-bridge-mcp</div>
+        <div class="wiz-title">Welcome to mailpouch</div>
         <div class="wiz-subtitle">
           Give Claude secure, permission-controlled access to your Proton Mail inbox
           via Proton Bridge. Setup takes about 3 minutes.
@@ -1263,7 +1263,7 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
         <div class="done-hero">
           <div class="done-check">✓</div>
           <h2>You're all set!</h2>
-          <p>pm-bridge-mcp is configured. The last step is registering it with your MCP host.</p>
+          <p>mailpouch is configured. The last step is registering it with your MCP host.</p>
         </div>
 
         <div id="done-write-section">
@@ -2427,9 +2427,9 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
 
     // Build snippet from wizard state
     const snippet = {
-      'pm-bridge': {
+      'mailpouch': {
         command: 'node',
-        args: [window.__distIndexPath || '/path/to/pm-bridge-mcp/dist/index.js'],
+        args: [window.__distIndexPath || '/path/to/mailpouch/dist/index.js'],
       },
     };
     document.getElementById('done-snippet').textContent = JSON.stringify(snippet, null, 2);
@@ -2894,9 +2894,9 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
 
   function buildClaudeSnippet(cn) {
     const snippet = {
-      'pm-bridge': {
+      'mailpouch': {
         command: 'node',
-        args: [window.__distIndexPath || '/path/to/pm-bridge-mcp/dist/index.js'],
+        args: [window.__distIndexPath || '/path/to/mailpouch/dist/index.js'],
       },
     };
     document.getElementById('claude-snippet').textContent = JSON.stringify(snippet, null, 2);
@@ -3896,7 +3896,7 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
         try {
           const pkgJson = JSON.parse(readFileSync(_pkgJsonPath, "utf-8")) as { version?: string; name?: string };
           const current = pkgJson.version ?? "unknown";
-          const name    = pkgJson.name    ?? "pm-bridge-mcp";
+          const name    = pkgJson.name    ?? "mailpouch";
 
           const latest = await new Promise<string>((resolve, reject) => {
             const isWin = process.platform === "win32";
@@ -3956,7 +3956,7 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
         if (!requireCsrf(req, res)) return;
         try {
           const pkgJson = JSON.parse(readFileSync(_pkgJsonPath, "utf-8")) as { name?: string };
-          const name    = pkgJson.name ?? "pm-bridge-mcp";
+          const name    = pkgJson.name ?? "mailpouch";
 
           const output = await new Promise<string>((resolve, reject) => {
             const isWin = process.platform === "win32";
@@ -4360,7 +4360,7 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
           if (!existing.mcpServers || typeof existing.mcpServers !== "object") {
             existing.mcpServers = {};
           }
-          (existing.mcpServers as Record<string, unknown>)["pm-bridge"] = entry;
+          (existing.mcpServers as Record<string, unknown>)["mailpouch"] = entry;
 
           // Write atomically via temp file + rename
           const tmpPath = claudeConfigPath + ".tmp." + randomBytes(6).toString("hex");
@@ -4542,7 +4542,7 @@ export async function startSettingsServer(
 
     console.log("");
     console.log(`  ┌${"─".repeat(w + 2)}┐`);
-    line("pm-bridge-mcp — Settings UI");
+    line("mailpouch — Settings UI");
     blank();
     line(`Local:   ${localUrl}`);
 

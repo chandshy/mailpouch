@@ -1,5 +1,5 @@
 /**
- * Security utilities for the pm-bridge-mcp Settings Server
+ * Security utilities for the mailpouch Settings Server
  *
  * Covers:
  *   • Per-IP rate limiting (sliding window, in-memory)
@@ -311,7 +311,7 @@ export function tryGenerateSelfSignedCert(): TlsCredentials | null {
         "-days",   "365",
         "-nodes",
         "-batch",
-        "-subj",   "/CN=pm-bridge-mcp Settings/O=Local/C=US",
+        "-subj",   "/CN=mailpouch Settings/O=Local/C=US",
       ],
       { stdio: "pipe", timeout: 30_000 },
     );

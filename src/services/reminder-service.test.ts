@@ -12,7 +12,7 @@ import { tmpdir } from "os";
 import { randomBytes } from "crypto";
 
 function tmpPath(): string {
-  return join(tmpdir(), `pm-bridge-reminders-${randomBytes(6).toString("hex")}.json`);
+  return join(tmpdir(), `mailpouch-reminders-${randomBytes(6).toString("hex")}.json`);
 }
 
 describe("ReminderService", () => {
@@ -129,14 +129,14 @@ describe("ReminderService", () => {
     it("cancels a reminder when an inbox message's In-Reply-To matches its Message-ID", () => {
       const svc = new ReminderService(path);
       const r = svc.add({
-        messageId: "<outbound-42@pm-bridge>",
+        messageId: "<outbound-42@mailpouch>",
         recipient: "alice@x",
         subject: "Proposal",
         sentAt: new Date(),
         afterDays: 3,
       });
       const cancelled = svc.detectRepliesAndCancel([
-        { headers: { "in-reply-to": "<outbound-42@pm-bridge>" } },
+        { headers: { "in-reply-to": "<outbound-42@mailpouch>" } },
       ]);
       expect(cancelled).toEqual([r.id]);
       expect(svc.listPending()).toHaveLength(0);
@@ -145,11 +145,11 @@ describe("ReminderService", () => {
     it("matches against References header and multi-valued tokens", () => {
       const svc = new ReminderService(path);
       svc.add({
-        messageId: "<chain-1@pm-bridge>",
+        messageId: "<chain-1@mailpouch>",
         recipient: "bob@x", subject: "chain", sentAt: new Date(), afterDays: 1,
       });
       const cancelled = svc.detectRepliesAndCancel([
-        { headers: { "References": "<other@x> <chain-1@pm-bridge> <another@x>" } },
+        { headers: { "References": "<other@x> <chain-1@mailpouch> <another@x>" } },
       ]);
       expect(cancelled).toHaveLength(1);
     });

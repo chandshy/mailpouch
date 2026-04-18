@@ -1,5 +1,5 @@
 /**
- * OAuth 2.1 authorization-server HTTP handlers for pm-bridge-mcp.
+ * OAuth 2.1 authorization-server HTTP handlers for mailpouch.
  *
  * Implements the surface required by the 2025-11-25 MCP spec for an
  * authenticated remote deployment:
@@ -181,7 +181,7 @@ export class OAuthHandlers {
       authorization_servers: [this.cfg.issuer],
       scopes_supported: SCOPES,
       bearer_methods_supported: ["header"],
-      resource_name: "pm-bridge-mcp",
+      resource_name: "mailpouch",
     });
     return { handled: true };
   }
@@ -381,7 +381,7 @@ export class OAuthHandlers {
   <head>
     <meta charset="utf-8" />
     <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; form-action 'self'">
-    <title>pm-bridge-mcp — authorize</title>
+    <title>mailpouch — authorize</title>
     <style>
       body { font-family: system-ui, sans-serif; background: #111; color: #eee; margin: 0; padding: 40px; }
       .card { max-width: 480px; margin: 0 auto; background: #1b1b1e; padding: 24px; border-radius: 12px; }
@@ -398,7 +398,7 @@ export class OAuthHandlers {
   </head>
   <body>
     <div class="card">
-      <h1>Authorize pm-bridge-mcp</h1>
+      <h1>Authorize mailpouch</h1>
       <p>An MCP client is requesting access to your Proton Mail via this server.</p>
       <dl>
         <dt>Client</dt><dd>${esc(ctx.clientName)} (${esc(ctx.clientId)})</dd>

@@ -1,6 +1,6 @@
-# Contributing to pm-bridge-mcp
+# Contributing to mailpouch
 
-Thank you for your interest in contributing to pm-bridge-mcp! This document provides guidelines and information for contributors.
+Thank you for your interest in contributing to mailpouch! This document provides guidelines and information for contributors.
 
 ## Getting Started
 
@@ -16,8 +16,8 @@ Thank you for your interest in contributing to pm-bridge-mcp! This document prov
 1. Fork the repository on GitHub
 2. Clone your fork locally:
    ```bash
-   git clone https://github.com/YOUR_USERNAME/pm-bridge-mcp.git
-   cd pm-bridge-mcp
+   git clone https://github.com/YOUR_USERNAME/mailpouch.git
+   cd mailpouch
    ```
 
 3. Install dependencies:
@@ -30,7 +30,7 @@ Thank you for your interest in contributing to pm-bridge-mcp! This document prov
    npm run build
    npm run settings    # opens http://localhost:8765
    ```
-   Complete the setup wizard to save credentials to `~/.pm-bridge-mcp.json`. Alternatively, create that file directly with the required `connection` fields (see `src/config/schema.ts` for the shape).
+   Complete the setup wizard to save credentials to `~/.mailpouch.json`. Alternatively, create that file directly with the required `connection` fields (see `src/config/schema.ts` for the shape).
 
 5. Build the project:
    ```bash
@@ -253,7 +253,7 @@ If you discover a security vulnerability:
 ### Security Best Practices
 
 - Never commit credentials or API keys
-- Store credentials in `~/.pm-bridge-mcp.json` (mode 0600) or OS keychain — never in env vars or source code
+- Store credentials in `~/.mailpouch.json` (mode 0600) or OS keychain — never in env vars or source code
 - Validate all user inputs
 - Handle errors securely
 - Follow principle of least privilege
@@ -263,7 +263,7 @@ If you discover a security vulnerability:
 ## Questions?
 
 - Open a GitHub Discussion for general questions
-- Open an [Issue](https://github.com/chandshy/pm-bridge-mcp/issues) for bug reports or feature requests
+- Open an [Issue](https://github.com/chandshy/mailpouch/issues) for bug reports or feature requests
 - Check existing issues and discussions first
 
 ## License

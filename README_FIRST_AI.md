@@ -1,7 +1,7 @@
-# pm-bridge-mcp — AI Agent Guide
+# mailpouch — AI Agent Guide
 
 > **Read this before using any tools.** This document is written for AI agents
-> (Claude, GPT, Gemini, etc.) operating through the pm-bridge-mcp server. It
+> (Claude, GPT, Gemini, etc.) operating through the mailpouch server. It
 > covers what each tool does, when to use it, the permission model, limits you
 > must respect, and how to handle errors correctly.
 

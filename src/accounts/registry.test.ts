@@ -55,7 +55,7 @@ import { defaultConfig } from "../config/loader.js";
 function seedConfig(cfg: Partial<ServerConfig>): void {
   const base = defaultConfig();
   const merged = { ...base, ...cfg };
-  const path = `${process.env.HOME || "/home/chuck"}/.pm-bridge-mcp.json`;
+  const path = `${process.env.HOME || "/home/chuck"}/.mailpouch.json`;
   diskByPath.set(path, JSON.stringify(merged));
 }
 
@@ -164,7 +164,7 @@ describe("accounts registry", () => {
     });
     setActiveAccount(other.id);
     // Loading config should now show the mirrored settings.
-    const path = `${process.env.HOME || "/home/chuck"}/.pm-bridge-mcp.json`;
+    const path = `${process.env.HOME || "/home/chuck"}/.mailpouch.json`;
     const cfg = JSON.parse(diskByPath.get(path) ?? "{}") as ServerConfig;
     expect(cfg.connection.smtpHost).toBe("smtp.other");
     expect(cfg.activeAccountId).toBe(other.id);

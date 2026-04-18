@@ -7,7 +7,7 @@ import { randomBytes } from "crypto";
 import { gunzipSync } from "zlib";
 
 function tmpPath(): string {
-  return join(tmpdir(), `pm-bridge-audit-${randomBytes(6).toString("hex")}.jsonl`);
+  return join(tmpdir(), `mailpouch-audit-${randomBytes(6).toString("hex")}.jsonl`);
 }
 
 describe("hashArgs", () => {

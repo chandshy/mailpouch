@@ -18,7 +18,7 @@ vi.mock("child_process", () => ({
 }));
 
 function tmpPath(): string {
-  return join(tmpdir(), `pm-bridge-pass-audit-${randomBytes(6).toString("hex")}.jsonl`);
+  return join(tmpdir(), `mailpouch-pass-audit-${randomBytes(6).toString("hex")}.jsonl`);
 }
 
 type FakeChild = EventEmitter & {

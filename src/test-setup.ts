@@ -9,4 +9,4 @@
  * every call site. Tests that verify the throw-on-missing-cert behavior
  * override this in their own setup.
  */
-process.env.PROTONMAIL_MCP_INSECURE_BRIDGE = "1";
+process.env.MAILPOUCH_INSECURE_BRIDGE = "1";

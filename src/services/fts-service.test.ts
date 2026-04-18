@@ -25,7 +25,7 @@ function sqliteAvailable(): boolean {
 const describeMaybe = sqliteAvailable() ? describe : describe.skip;
 
 function tmpDb(): string {
-  return join(tmpdir(), `pm-bridge-fts-${randomBytes(6).toString("hex")}.db`);
+  return join(tmpdir(), `mailpouch-fts-${randomBytes(6).toString("hex")}.db`);
 }
 
 function sampleRecord(overrides: Partial<Parameters<FtsIndexService["upsert"]>[0]> = {}) {

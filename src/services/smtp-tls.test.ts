@@ -47,15 +47,19 @@ function baseConfig(overrides: Partial<ProtonMailConfig["smtp"]> = {}): ProtonMa
 }
 
 describe("SMTPService TLS strict mode (no allowInsecureBridge)", () => {
-  let prevEnv: string | undefined;
+  const ENV_KEYS = ["MAILPOUCH_INSECURE_BRIDGE", "PM_BRIDGE_MCP_INSECURE_BRIDGE", "PROTONMAIL_MCP_INSECURE_BRIDGE"] as const;
+  let prev: Record<string, string | undefined> = {};
 
   beforeEach(() => {
-    prevEnv = process.env.PROTONMAIL_MCP_INSECURE_BRIDGE;
-    delete process.env.PROTONMAIL_MCP_INSECURE_BRIDGE;
+    prev = {};
+    for (const k of ENV_KEYS) { prev[k] = process.env[k]; delete process.env[k]; }
   });
 
   afterEach(() => {
-    if (prevEnv !== undefined) process.env.PROTONMAIL_MCP_INSECURE_BRIDGE = prevEnv;
+    for (const k of ENV_KEYS) {
+      if (prev[k] !== undefined) process.env[k] = prev[k];
+      else delete process.env[k];
+    }
   });
 
   it("throws when localhost has credentials but no cert path and no opt-in", () => {
@@ -114,7 +118,19 @@ describe("SMTPService TLS insecure opt-in", () => {
     expect((svc as unknown as { insecureTls: boolean }).insecureTls).toBe(true);
   });
 
-  it("runs in insecure mode when PROTONMAIL_MCP_INSECURE_BRIDGE=1 is set in env", () => {
+  it("runs in insecure mode when MAILPOUCH_INSECURE_BRIDGE=1 is set in env", () => {
+    const prev = process.env.MAILPOUCH_INSECURE_BRIDGE;
+    process.env.MAILPOUCH_INSECURE_BRIDGE = "1";
+    try {
+      const svc = new SMTPService(baseConfig());
+      expect((svc as unknown as { insecureTls: boolean }).insecureTls).toBe(true);
+    } finally {
+      if (prev !== undefined) process.env.MAILPOUCH_INSECURE_BRIDGE = prev;
+      else delete process.env.MAILPOUCH_INSECURE_BRIDGE;
+    }
+  });
+
+  it("still honors legacy PROTONMAIL_MCP_INSECURE_BRIDGE=1 as an env alias", () => {
     const prev = process.env.PROTONMAIL_MCP_INSECURE_BRIDGE;
     process.env.PROTONMAIL_MCP_INSECURE_BRIDGE = "1";
     try {

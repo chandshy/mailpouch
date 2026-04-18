@@ -1,12 +1,12 @@
 {
-  "name": "pm-bridge-mcp",
-  "version": "2.1.0",
-  "description": "MCP server that exposes Proton Mail via Proton Bridge — 51 tools, Resources, and Prompts for agentic email management with user-initiated permission controls.",
+  "name": "mailpouch",
+  "version": "2.2.0",
+  "description": "mailpouch — MCP server that exposes Proton Mail via Proton Bridge. 51 tools, Resources, and Prompts for agentic email management with user-initiated permission controls.",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "pm-bridge-mcp": "dist/index.js",
-    "pm-bridge-mcp-settings": "dist/settings-main.js"
+    "mailpouch": "dist/index.js",
+    "mailpouch-settings": "dist/settings-main.js"
   },
   "scripts": {
     "build": "tsc",
@@ -25,7 +25,9 @@
     "typecheck": "tsc --noEmit"
   },
   "keywords": [
+    "mailpouch",
     "proton-bridge",
+    "proton-mail",
     "mcp",
     "model-context-protocol",
     "email",
@@ -48,13 +50,13 @@
     "email": "chandshy@gmail.com"
   },
   "license": "MIT",
-  "homepage": "https://github.com/chandshy/pm-bridge-mcp#readme",
+  "homepage": "https://github.com/chandshy/mailpouch#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/chandshy/pm-bridge-mcp.git"
+    "url": "git+https://github.com/chandshy/mailpouch.git"
   },
   "bugs": {
-    "url": "https://github.com/chandshy/pm-bridge-mcp/issues"
+    "url": "https://github.com/chandshy/mailpouch/issues"
   },
   "engines": {
     "node": ">=20.0.0",

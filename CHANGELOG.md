@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] — 2026-04-18
+### Changed
+- **Product renamed to `mailpouch`** — the name better reflects the product's
+  positioning (a sealed, private pouch for mail in transit between your
+  provider and your agent). The `pm-bridge-mcp` name was descriptive but
+  trademark-adjacent; `mailpouch` is era-neutral and brand-safe.
+- Package name, bin names, config path, env vars, log file, webhook
+  signature header, MCP server name, and OS keychain service name all
+  rename in lockstep.
+### Added
+- **One-shot keychain migration** at startup — existing installs carry
+  their stored Bridge password forward from `protonmail-mcp-server` or
+  `pm-bridge-mcp` service entries to `mailpouch`. No re-entry required.
+- **Legacy env-var aliases honored** through v3.0: `MAILPOUCH_X` wins,
+  but `PM_BRIDGE_MCP_X` and `PROTONMAIL_MCP_X` still read.
+- **Legacy file-path aliases honored**: reads fall back to
+  `~/.pm-bridge-mcp-*` and `~/.protonmail-mcp-*` if the new path is
+  absent. Writes always use the new path.
+### Breaking
+- Webhook signature header renamed `X-PMBridge-Signature-256` →
+  `X-Mailpouch-Signature-256`. Downstream verifiers must update. The
+  CloudEvents `source` and `type` prefix changed too (`pm-bridge-mcp` →
+  `mailpouch`, `com.pmbridge.*` → `com.mailpouch.*`), and the outbound
+  `User-Agent` is now `mailpouch/1 (+https://github.com/chandshy/mailpouch)`.
+- Binary names changed: `pm-bridge-mcp` → `mailpouch`,
+  `pm-bridge-mcp-settings` → `mailpouch-settings`.
+
 ## [2.1.0] — 2026-04-18
 
 Adds multi-account support, per-agent permission grants, a remote HTTP

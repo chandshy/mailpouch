@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * pm-bridge-mcp — System Tray entry point
+ * mailpouch — System Tray entry point
  *
  * Starts the settings HTTP server and shows a system tray icon
  * matching the style of the Proton Bridge tray icon:
@@ -163,7 +163,7 @@ async function main(): Promise<void> {
     // systray2 not installed — start server and open browser, no tray icon
     openBrowser(settingsUrl);
     process.stdout.write(
-      `\npm-bridge-mcp Settings: ${settingsUrl}\nPress Ctrl+C to stop.\n\n`
+      `\nmailpouch Settings: ${settingsUrl}\nPress Ctrl+C to stop.\n\n`
     );
     return;
   }
@@ -176,9 +176,9 @@ async function main(): Promise<void> {
     menu: {
       icon:    ICON_B64,
       title:   "",
-      tooltip: "pm-bridge-mcp",
+      tooltip: "mailpouch",
       items: [
-        item("pm-bridge-mcp", "Proton Mail via Proton Bridge", false),
+        item("mailpouch", "Proton Mail via Proton Bridge", false),
         sep,
         item(`\u25CF Connected`,    "", false),
         item(email || "Not configured", "", false),
@@ -205,7 +205,7 @@ async function main(): Promise<void> {
   });
 
   process.stdout.write(
-    `\npm-bridge-mcp tray icon active.\nSettings: ${settingsUrl}\nRight-click the tray icon to manage.\n\n`
+    `\nmailpouch tray icon active.\nSettings: ${settingsUrl}\nRight-click the tray icon to manage.\n\n`
   );
 }
 

@@ -1,5 +1,5 @@
 /**
- * Configuration schema for pm-bridge-mcp
+ * Configuration schema for mailpouch
  * Covers connection settings and per-tool agentic access permissions.
  */
 
@@ -173,7 +173,7 @@ export interface ConnectionSettings {
   /**
    * Explicit opt-in to run IMAP/SMTP against localhost Bridge without a pinned cert.
    * Default false — the services throw at startup if localhost is used with neither
-   * a loaded cert nor this flag. Override per-launch with PM_BRIDGE_MCP_INSECURE_BRIDGE=1.
+   * a loaded cert nor this flag. Override per-launch with MAILPOUCH_INSECURE_BRIDGE=1.
    */
   allowInsecureBridge?: boolean;
   /**
@@ -187,7 +187,7 @@ export interface ConnectionSettings {
   /** Explicit path to the Proton Bridge executable. Leave blank to auto-detect. */
   bridgePath?: string;
   /**
-   * Remote (HTTP) transport mode. When true, pm-bridge-mcp listens on an
+   * Remote (HTTP) transport mode. When true, mailpouch listens on an
    * HTTP port for MCP requests instead of stdio, gated by a bearer token.
    * Default false — stdio transport, which is what Claude Desktop spawns.
    */
@@ -353,7 +353,7 @@ export interface ServerConfig {
    *   "core"     — reading / sending / analytics / system (~20 tools)
    *   "extended" — core + drafts / folders / actions
    *   "complete" — all tools (default, preserves current behavior)
-   * Override per-launch with PM_BRIDGE_MCP_TIER.
+   * Override per-launch with MAILPOUCH_TIER.
    */
   toolTier?: ToolTier;
   /**
@@ -403,7 +403,7 @@ export const DESTRUCTIVE_TOOLS: ReadonlySet<string> = new Set<string>([
 // burn tens of thousands of tokens before the user types anything.
 //
 // Tiering lets operators expose only the tools they actually use. Activate via
-// the PM_BRIDGE_MCP_TIER env var (core|extended|complete; default complete) or
+// the MAILPOUCH_TIER env var (core|extended|complete; default complete) or
 // the `toolTier` field in the config file.
 
 export type ToolTier = "core" | "extended" | "complete";

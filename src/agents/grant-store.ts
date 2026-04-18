@@ -1,7 +1,7 @@
 /**
  * Persistence for {@link AgentGrant} records.
  *
- * A single JSON file (`~/.pm-bridge-mcp-agents.json`) holds every grant the
+ * A single JSON file (`~/.mailpouch-agents.json`) holds every grant the
  * server has ever seen, across all three statuses. Writes are atomic via
  * tmp→rename, consistent with the rest of the project's credential-hygiene
  * story. The file is mode 0600.

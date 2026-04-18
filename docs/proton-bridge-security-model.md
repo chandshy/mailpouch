@@ -21,7 +21,7 @@ Proton Mail Bridge is a desktop app that runs locally, connects to Proton's serv
 | Mailbox password | Hashed + salted, stored in OS keychain |
 | Bridge password | Stored in OS keychain |
 
-Bridge generates a **unique Bridge password** for email client access. This is different from the Proton Mail account password and is the `password` field in `~/.pm-bridge-mcp.json`.
+Bridge generates a **unique Bridge password** for email client access. This is different from the Proton Mail account password and is the `password` field in `~/.mailpouch.json`.
 
 ---
 

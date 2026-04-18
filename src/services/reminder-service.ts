@@ -69,7 +69,7 @@ export class ReminderService {
 
   private persist(): void {
     const payload: ReminderFile = { version: 1, reminders: this.reminders };
-    const tmp = join(tmpdir(), `pm-bridge-reminders-${randomBytes(8).toString("hex")}.json.tmp`);
+    const tmp = join(tmpdir(), `mailpouch-reminders-${randomBytes(8).toString("hex")}.json.tmp`);
     writeFileSync(tmp, JSON.stringify(payload, null, 2), { encoding: "utf-8", mode: 0o600 });
     renameSync(tmp, this.path);
   }

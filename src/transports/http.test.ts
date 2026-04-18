@@ -36,7 +36,7 @@ async function freePort(): Promise<number> {
 }
 
 function buildServer(): McpServer {
-  const srv = new McpServer({ name: "pm-bridge-mcp-test", version: "0.0.0" }, {
+  const srv = new McpServer({ name: "mailpouch-test", version: "0.0.0" }, {
     capabilities: { tools: { listChanged: false } },
   });
   srv.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [] }));
@@ -415,7 +415,7 @@ describe("HTTP transport", () => {
       const res = await fetch(`${url}/oauth/authorize?${q.toString()}`);
       expect(res.status).toBe(200);
       const html = await res.text();
-      expect(html).toContain("Authorize pm-bridge-mcp");
+      expect(html).toContain("Authorize mailpouch");
       expect(html).toContain("Inky");
     });
 

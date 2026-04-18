@@ -7,7 +7,7 @@ import { tmpdir } from "os";
 import { randomBytes } from "crypto";
 
 function tmpPath(): string {
-  return join(tmpdir(), `pm-bridge-grant-mgr-${randomBytes(6).toString("hex")}.json`);
+  return join(tmpdir(), `mailpouch-grant-mgr-${randomBytes(6).toString("hex")}.json`);
 }
 
 describe("GrantManager.check", () => {

@@ -6,7 +6,7 @@ import { tmpdir } from "os";
 import { randomBytes } from "crypto";
 
 function tmpPath(): string {
-  return join(tmpdir(), `pm-bridge-agents-${randomBytes(6).toString("hex")}.json`);
+  return join(tmpdir(), `mailpouch-agents-${randomBytes(6).toString("hex")}.json`);
 }
 
 describe("AgentGrantStore", () => {

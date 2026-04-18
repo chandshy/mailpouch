@@ -1,7 +1,7 @@
 /**
  * Shared types for the agent-grant system.
  *
- * A pm-bridge-mcp deployment typically serves more than one MCP client
+ * A mailpouch deployment typically serves more than one MCP client
  * (Claude Desktop, Claude Code, other hosts). Every client identifies
  * itself via an OAuth client_id issued by DCR. An AgentGrant records the
  * user's decision about that specific client: is it approved, what can

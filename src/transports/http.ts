@@ -1,5 +1,5 @@
 /**
- * HTTP transport for pm-bridge-mcp (remote / self-host mode).
+ * HTTP transport for mailpouch (remote / self-host mode).
  *
  * Spec reference: https://modelcontextprotocol.io/specification/2025-11-25
  *
@@ -244,7 +244,7 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
         const expectedResource = `${issuer}${path}`;
         if (rec.resource && rec.resource !== expectedResource) {
           res.statusCode = 401;
-          res.setHeader("WWW-Authenticate", `Bearer realm="pm-bridge-mcp", error="invalid_token", error_description="token resource does not match endpoint"`);
+          res.setHeader("WWW-Authenticate", `Bearer realm="mailpouch", error="invalid_token", error_description="token resource does not match endpoint"`);
           res.end(JSON.stringify({ error: "invalid_token" }));
           return;
         }
@@ -261,8 +261,8 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
       res.statusCode = 401;
       res.setHeader("WWW-Authenticate",
         oauthHandlers
-          ? `Bearer realm="pm-bridge-mcp", resource_metadata="${issuer}/.well-known/oauth-protected-resource"`
-          : 'Bearer realm="pm-bridge-mcp"',
+          ? `Bearer realm="mailpouch", resource_metadata="${issuer}/.well-known/oauth-protected-resource"`
+          : 'Bearer realm="mailpouch"',
       );
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify({ error: "invalid_token" }));

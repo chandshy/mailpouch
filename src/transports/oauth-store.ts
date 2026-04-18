@@ -1,7 +1,7 @@
 /**
  * In-memory stores for the OAuth 2.1 authorization server.
  *
- * All state is process-local — matching pm-bridge-mcp's single-user design.
+ * All state is process-local — matching mailpouch's single-user design.
  * A restart drops outstanding auth codes (short TTL anyway) and tokens
  * (requiring clients to re-auth); registered DCR clients are re-provisioned
  * on demand because MCP hosts will call the register endpoint again.

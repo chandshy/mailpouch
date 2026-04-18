@@ -7,7 +7,7 @@
  * Design notes
  *   - One ImapFlow connection per account. imapflow's documented pattern
  *     is "N separate clients" (no built-in pool); IDLE auto-runs per
- *     client. Memory is bounded because pm-bridge-mcp is single-user and
+ *     client. Memory is bounded because mailpouch is single-user and
  *     most users have ≤ 3 accounts.
  *   - Lazy connection: services are created per account at AccountManager
  *     construction, but the underlying IMAP socket only opens on first

@@ -1,10 +1,11 @@
 /**
- * Config file loader / saver for pm-bridge-mcp.
+ * Config file loader / saver for mailpouch.
  *
- * Config is persisted to a single JSON file (default: ~/.pm-bridge-mcp.json,
- * with read-fallback to the legacy ~/.protonmail-mcp.json for installs that
- * predate the rename). Override the path with the PM_BRIDGE_MCP_CONFIG env var
- * (the legacy PROTONMAIL_MCP_CONFIG name is also accepted for one release).
+ * Config is persisted to a single JSON file (default: ~/.mailpouch.json),
+ * with read-fallback to ~/.pm-bridge-mcp.json (v2.1) and ~/.protonmail-mcp.json
+ * (original) for installs that predate the rename. Override the path with the
+ * MAILPOUCH_CONFIG env var — the legacy PM_BRIDGE_MCP_CONFIG / PROTONMAIL_MCP_CONFIG
+ * names are also accepted through v3.0.
  *
  * On Unix systems the file is written with mode 0600 (owner-read/write only)
  * to reduce the risk of credential exposure.
@@ -43,7 +44,11 @@ function clamp(value: number, min: number, max: number): number {
 // ─── Config path ───────────────────────────────────────────────────────────────
 
 export function getConfigPath(): string {
-  const envPath = process.env.PM_BRIDGE_MCP_CONFIG ?? process.env.PROTONMAIL_MCP_CONFIG;
+  // Env-var priority: MAILPOUCH_* > PM_BRIDGE_MCP_* > PROTONMAIL_MCP_*. First
+  // truthy wins. Legacy names honored through v3.0.
+  const envPath = process.env.MAILPOUCH_CONFIG
+    ?? process.env.PM_BRIDGE_MCP_CONFIG
+    ?? process.env.PROTONMAIL_MCP_CONFIG;
   if (envPath) {
     // Resolve to absolute path and ensure it stays within the user's home
     // directory — prevents path-traversal attacks (e.g. "../../etc/passwd").
@@ -51,16 +56,21 @@ export function getConfigPath(): string {
     const home = homedir();
     if (!resolved.startsWith(home + "/") && !resolved.startsWith(home + "\\") && resolved !== home) {
       throw new Error(
-        `PM_BRIDGE_MCP_CONFIG must point to a path within the home directory (${home}). Got: ${resolved}`
+        `MAILPOUCH_CONFIG must point to a path within the home directory (${home}). Got: ${resolved}`
       );
     }
     return resolved;
   }
-  // Prefer the new path, but fall back to the legacy ~/.protonmail-mcp.json
-  // if it exists and the new one doesn't — keeps existing installs working.
-  const preferred = join(homedir(), ".pm-bridge-mcp.json");
-  const legacy = join(homedir(), ".protonmail-mcp.json");
-  if (!existsSync(preferred) && existsSync(legacy)) return legacy;
+  // Prefer the new path; fall back through the rename chain if only a legacy
+  // path exists — keeps existing installs working. Writes always use the new
+  // path, so this only fires once per install.
+  const preferred = join(homedir(), ".mailpouch.json");
+  const legacyV2 = join(homedir(), ".pm-bridge-mcp.json");
+  const legacyV1 = join(homedir(), ".protonmail-mcp.json");
+  if (!existsSync(preferred)) {
+    if (existsSync(legacyV2)) return legacyV2;
+    if (existsSync(legacyV1)) return legacyV1;
+  }
   return preferred;
 }
 

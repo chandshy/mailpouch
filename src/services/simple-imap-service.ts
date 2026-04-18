@@ -325,10 +325,10 @@ export class SimpleIMAPService {
 
       // Check if using localhost (Proton Bridge)
       const isLocalhost = host === 'localhost' || host === '127.0.0.1';
-      // Accept either the new PM_BRIDGE_MCP name or the legacy PROTONMAIL name.
-      // New wins; legacy is silently honored for one release. Remove the
-      // PROTONMAIL_MCP_INSECURE_BRIDGE alias in v2.2.
+      // Env-var priority: MAILPOUCH_* > PM_BRIDGE_MCP_* > PROTONMAIL_MCP_*.
+      // Legacy names honored through v3.0.
       const allowInsecure = allowInsecureBridge
+        || process.env.MAILPOUCH_INSECURE_BRIDGE === '1'
         || process.env.PM_BRIDGE_MCP_INSECURE_BRIDGE === '1'
         || process.env.PROTONMAIL_MCP_INSECURE_BRIDGE === '1';
 
@@ -359,7 +359,7 @@ export class SimpleIMAPService {
               throw new Error(
                 `IMAP: Bridge cert at "${resolvedCertPath}" could not be loaded and allowInsecureBridge is not set. ` +
                 `Fix the cert path in Settings → Connection, or set allowInsecureBridge: true ` +
-                `(or PM_BRIDGE_MCP_INSECURE_BRIDGE=1) to opt into the legacy insecure behavior. ` +
+                `(or MAILPOUCH_INSECURE_BRIDGE=1) to opt into the legacy insecure behavior. ` +
                 `Underlying error: ${(err as Error).message}`
               );
             }
@@ -377,7 +377,7 @@ export class SimpleIMAPService {
             throw new Error(
               'IMAP: No Bridge certificate configured. Export the cert from Bridge → Help → Export TLS Certificate ' +
               "and set 'bridgeCertPath' in Settings → Connection. To opt into the legacy behavior (TLS validation " +
-              'disabled for localhost), set allowInsecureBridge: true or launch with PM_BRIDGE_MCP_INSECURE_BRIDGE=1.'
+              'disabled for localhost), set allowInsecureBridge: true or launch with MAILPOUCH_INSECURE_BRIDGE=1.'
             );
           }
           logger.warn(
@@ -463,7 +463,7 @@ export class SimpleIMAPService {
       // swallow any failure — a missing ID response is not actionable.
       const idFn = (this.client as unknown as { id?: (info?: Record<string, string>) => Promise<Record<string, string>> }).id;
       if (typeof idFn !== 'function') return;
-      const info = await idFn.call(this.client, { name: 'pm-bridge-mcp' });
+      const info = await idFn.call(this.client, { name: 'mailpouch' });
       const name = String(info?.name ?? '');
       const version = String(info?.version ?? '');
       if (!version) return;
