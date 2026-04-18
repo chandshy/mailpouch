@@ -69,7 +69,7 @@ interface SqliteStatement {
 interface SqliteDatabase {
   exec(sql: string): void;
   prepare(sql: string): SqliteStatement;
-  transaction<T extends (...args: unknown[]) => unknown>(fn: T): T;
+  transaction<F extends (...args: never[]) => unknown>(fn: F): F;
   close(): void;
   pragma(s: string): unknown;
 }
@@ -148,12 +148,12 @@ export class FtsIndexService {
   /** Bulk upsert wrapped in a single transaction. */
   upsertMany(records: FtsRecord[]): number {
     if (records.length === 0) return 0;
-    // better-sqlite3's transaction() returns a fn with the same signature as
-    // the inner fn. We feed it the whole batch and run per-row inside.
-    const tx = this.db.transaction(((batch: unknown) => {
-      for (const r of batch as FtsRecord[]) this.upsert(r);
-      return (batch as FtsRecord[]).length;
-    }) as unknown as (...args: unknown[]) => unknown) as unknown as (batch: FtsRecord[]) => number;
+    // better-sqlite3's transaction() preserves the argument signature of the
+    // inner fn, so we can write it concretely without any casts.
+    const tx = this.db.transaction((batch: FtsRecord[]) => {
+      for (const r of batch) this.upsert(r);
+      return batch.length;
+    });
     return tx(records);
   }
 

@@ -20,10 +20,11 @@
  */
 
 import type { IncomingMessage, ServerResponse } from "http";
-import { createHash, timingSafeEqual } from "crypto";
+import { createHash } from "crypto";
 import { OAuthStore } from "./oauth-store.js";
 import { TokenBucketLimiter } from "./rate-limit.js";
 import { logger } from "../utils/logger.js";
+import { constantTimeEqual } from "../utils/crypto.js";
 
 const SCOPES = ["mcp:full"] as const;
 
@@ -82,24 +83,11 @@ function error(res: ServerResponse, status: number, error: string, description?:
 /** PKCE S256 verification: base64url(sha256(verifier)) must equal challenge. */
 function verifyPkceS256(verifier: string, challenge: string): boolean {
   const computed = createHash("sha256").update(verifier, "utf-8").digest("base64url");
-  const a = Buffer.from(computed, "utf-8");
-  const b = Buffer.from(challenge, "utf-8");
-  if (a.length !== b.length) return false;
-  return timingSafeEqual(a, b);
+  return constantTimeEqual(computed, challenge);
 }
 
-/** Compare two strings in constant time, safe against length-leak. */
-function safeEqual(a: string, b: string): boolean {
-  if (!a || !b) return false;
-  const aa = Buffer.from(a, "utf-8");
-  const bb = Buffer.from(b, "utf-8");
-  if (aa.length !== bb.length) {
-    const pad = Buffer.alloc(bb.length);
-    try { timingSafeEqual(pad, bb); } catch { /* ignore */ }
-    return false;
-  }
-  return timingSafeEqual(aa, bb);
-}
+// Constant-time string compare imported from ../utils/crypto.
+const safeEqual = constantTimeEqual;
 
 /** Client IP extraction — trust X-Forwarded-For only when the caller is loopback. */
 function clientIp(req: IncomingMessage): string {

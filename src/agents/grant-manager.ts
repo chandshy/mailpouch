@@ -89,7 +89,7 @@ export class GrantManager {
 
     // No override — apply the intersection of grant preset and global preset.
     const effective = intersectPresets(grant.preset, ctx.globalPreset);
-    if (!this.presetAllows(effective, ctx.tool)) {
+    if (!this.globalAllows(effective, ctx.tool)) {
       return { allowed: false, reason: `Tool '${ctx.tool}' is outside the effective preset '${effective}' for '${grant.clientName}'.` };
     }
 
@@ -112,13 +112,19 @@ export class GrantManager {
   }
 
   private globalAllows(preset: PermissionPreset, tool: string): boolean {
-    const perms = buildPermissions(preset);
+    // Memoize on preset — buildPermissions materializes a full map per call,
+    // but the preset→permissions mapping is pure. `check()` can consult this
+    // twice per call (once for the override path, once for the preset path),
+    // and a high-QPS agent would materialize the same map over and over.
+    let perms = this.permsCache.get(preset);
+    if (!perms) {
+      perms = buildPermissions(preset);
+      this.permsCache.set(preset, perms);
+    }
     return !!perms.tools[tool as ToolName]?.enabled;
   }
 
-  private presetAllows(preset: PermissionPreset, tool: string): boolean {
-    return this.globalAllows(preset, tool);
-  }
+  private readonly permsCache = new Map<PermissionPreset, ReturnType<typeof buildPermissions>>();
 }
 
 /**

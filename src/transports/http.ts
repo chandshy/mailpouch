@@ -29,7 +29,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
 import { createServer as createSecureServer } from "https";
 import { readFileSync } from "fs";
-import { timingSafeEqual } from "crypto";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { Server as McpServer } from "@modelcontextprotocol/sdk/server/index.js";
 import { logger } from "../utils/logger.js";
@@ -82,18 +81,10 @@ export interface HttpTransportHandle {
   close: () => Promise<void>;
 }
 
+import { constantTimeEqual } from "../utils/crypto.js";
+
 /** Constant-time compare, safe against length-leak. */
-function tokenMatches(actual: string, expected: string): boolean {
-  if (!expected || !actual) return false;
-  const a = Buffer.from(actual, "utf-8");
-  const b = Buffer.from(expected, "utf-8");
-  if (a.length !== b.length) {
-    const pad = Buffer.alloc(b.length, 0);
-    try { timingSafeEqual(pad, b); } catch { /* ignore */ }
-    return false;
-  }
-  return timingSafeEqual(a, b);
-}
+const tokenMatches = constantTimeEqual;
 
 function extractBearer(req: IncomingMessage): string | null {
   const raw = req.headers["authorization"];
