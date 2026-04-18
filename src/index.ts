@@ -5106,19 +5106,20 @@ async function main() {
         logger.warn("SMTP connection failed — sending features limited", "MCPServer", e);
         logger.info("Use your Proton Bridge password (not your Proton Mail account password)", "MCPServer");
       }),
-      imapService.connect(
-        config.imap.host,
-        config.imap.port,
-        config.imap.username,
-        config.imap.password,
-        config.imap.bridgeCertPath,
-        config.imap.secure,
-        config.imap.allowInsecureBridge ?? false
-      ).then(() => {
-        logger.info("IMAP connection established", "MCPServer");
-      }).catch((e: unknown) => {
-        logger.warn("IMAP connection failed — reading features limited", "MCPServer", e);
-        logger.info("Ensure Proton Bridge is running on localhost:1143", "MCPServer");
+      // Connect IMAP for EVERY configured account so IDLE runs against each
+      // mailbox, not just the active one. Per-account failures are logged
+      // but do not fail the boot — a single broken account shouldn't stop
+      // the others from coming online.
+      accountManager.connectAll().then((results) => {
+        const ok = results.filter(r => r.ok).length;
+        const failed = results.length - ok;
+        logger.info(
+          `IMAP connections established: ${ok}/${results.length} account(s)${failed > 0 ? ` — ${failed} failed` : ""}`,
+          "MCPServer",
+        );
+        if (failed > 0) {
+          logger.info("Ensure Proton Bridge is running and each account's credentials are correct", "MCPServer");
+        }
       }),
     ]);
 

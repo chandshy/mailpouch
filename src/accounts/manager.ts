@@ -161,6 +161,41 @@ export class AccountManager extends EventEmitter {
       try { await svcs.imap.disconnect(); } catch { /* ignore */ }
     }
   }
+
+  /**
+   * Warm IMAP connections for every known account. Called at boot so IDLE
+   * runs against every configured mailbox — otherwise non-active accounts
+   * only connect on their first per-tool call, which means new-mail events
+   * sit in the Proton server until the agent asks for them.
+   *
+   * Failures are logged per-account but do not stop the loop; a single
+   * broken account shouldn't block the others. Returns per-account
+   * success/failure so the caller can surface a summary.
+   */
+  async connectAll(): Promise<Array<{ id: string; ok: boolean; error?: string }>> {
+    const results: Array<{ id: string; ok: boolean; error?: string }> = [];
+    for (const [id, svcs] of this.perAccount) {
+      const s = svcs.spec;
+      try {
+        await svcs.imap.connect(
+          s.imapHost,
+          s.imapPort,
+          s.username,
+          s.password,
+          s.bridgeCertPath,
+          s.tlsMode === "ssl",
+          !!s.allowInsecureBridge,
+        );
+        logger.info(`IMAP connected for account "${id}"`, "AccountManager");
+        results.push({ id, ok: true });
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.warn(`IMAP connect failed for account "${id}": ${msg}`, "AccountManager");
+        results.push({ id, ok: false, error: msg });
+      }
+    }
+    return results;
+  }
 }
 
 // ─── Module singleton accessor ────────────────────────────────────────────

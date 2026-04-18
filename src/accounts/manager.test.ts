@@ -30,9 +30,11 @@ vi.mock("../services/smtp-service.js", () => {
 });
 
 const imapDisconnect = vi.fn().mockResolvedValue(undefined);
+const imapConnect = vi.fn().mockResolvedValue(undefined);
 vi.mock("../services/simple-imap-service.js", () => {
   class SimpleIMAPService {
     disconnect = imapDisconnect;
+    connect = imapConnect;
   }
   return { SimpleIMAPService };
 });
@@ -59,6 +61,7 @@ describe("AccountManager", () => {
     mockRegistry.value = { accounts: [], activeAccountId: "" };
     smtpCloseMock.mockClear();
     imapDisconnect.mockClear();
+    imapConnect.mockClear();
     smtpReinit.mockClear();
   });
 
@@ -183,6 +186,34 @@ describe("AccountManager", () => {
     await mgr.closeAll();
     expect(smtpCloseMock).toHaveBeenCalledTimes(2);
     expect(imapDisconnect).toHaveBeenCalledTimes(2);
+  });
+
+  it("connectAll opens IMAP for every account and reports per-account results", async () => {
+    mockRegistry.value = {
+      accounts: [mkSpec("a"), mkSpec("b")],
+      activeAccountId: "a",
+    };
+    const mgr = new AccountManager();
+    const results = await mgr.connectAll();
+    expect(imapConnect).toHaveBeenCalledTimes(2);
+    expect(results).toEqual([
+      { id: "a", ok: true },
+      { id: "b", ok: true },
+    ]);
+  });
+
+  it("connectAll reports per-account failures without stopping the loop", async () => {
+    mockRegistry.value = {
+      accounts: [mkSpec("a"), mkSpec("b")],
+      activeAccountId: "a",
+    };
+    const mgr = new AccountManager();
+    imapConnect
+      .mockRejectedValueOnce(new Error("bridge down"))
+      .mockResolvedValueOnce(undefined);
+    const results = await mgr.connectAll();
+    expect(results[0]).toEqual({ id: "a", ok: false, error: "bridge down" });
+    expect(results[1]).toEqual({ id: "b", ok: true });
   });
 });
 
