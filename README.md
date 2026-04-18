@@ -1,6 +1,12 @@
 # mailpouch
 
-**MCP server for Proton Mail via Proton Bridge.** An unofficial, user-initiated bridge between agentic MCP clients and Proton Bridge's local IMAP/SMTP surface.
+`mailpouch` is an MCP server that gives AI agents a typed, permission-gated, audit-logged tool surface over private-mail providers — Proton Mail (via Proton Bridge) and plain IMAP today, with Tuta and Mailfence on the roadmap.
+
+The pitch in one line: if you picked Proton Mail because you didn't want a third party reading your inbox, you don't suddenly want to hand a chatbot OAuth access to that same inbox so it can triage on your behalf. The usual "connect your email" integrations route everything through someone else's servers and ask for blanket scopes. Hand-rolled IMAP inside the agent is worse — no permission boundary, no audit trail, and the model holds your credentials in its context window. Neither option respects why you chose the provider in the first place.
+
+`mailpouch` runs locally and speaks to Proton Bridge over a TLS socket on your own machine; nothing leaves the box unless you asked it to. Sixty-nine tools across reading, sending, drafts, folders, search, analytics, aliases, Proton Pass, and system control, tiered into `core` / `extended` / `complete` so an agent that only reads doesn't burn context on Bridge lifecycle tools it will never call. Every connecting client gets its own grant with folder allowlists, IP pins, per-tool rate caps, expiry, and account binding — all hashed-args in the audit log, never the values. Delete, trash, spam, and alias removal round-trip through MCP elicitation for human confirmation before they execute. That last part sounds like theatre until you watch an agent try to empty a folder and get blocked mid-call.
+
+It is real because the primitives are real: OAuth 2.1 with PKCE S256, RFC 7591 dynamic client registration, RFC 8707 resource indicators, RFC 9728 protected-resource metadata, or a static bearer token if you'd rather. Credentials live in the OS keychain. A local FTS5 index with BM25 ranking handles phrase, boolean, prefix, and column-filter queries so your search terms never leave your laptop. Desktop notifications use native `osascript` / `notify-send` / `powershell.exe` with no added dependency; webhook dispatch auto-detects CloudEvents 1.0, Slack, or Discord, signs with HMAC, and retries with eight-attempt exponential backoff. So how do you point it at your Bridge install and wire up a client?
 
 [![CI](https://github.com/chandshy/mailpouch/actions/workflows/ci.yml/badge.svg)](https://github.com/chandshy/mailpouch/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/badge/npm-v2.2.0-blue.svg)](https://www.npmjs.com/package/mailpouch)
