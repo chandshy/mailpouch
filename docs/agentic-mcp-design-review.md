@@ -1,4 +1,4 @@
-# Agentic MCP Design Review — protonmail-mcp-server
+# Agentic MCP Design Review — pm-bridge-mcp
 
 **Researched:** 2026-03-17 | **Updated:** 2026-03-17 | **Sources:** modelcontextprotocol.io specification (2025-11-25)
 
@@ -37,7 +37,7 @@ Settings UI (browser or TUI)
   ↓
 Choose preset or configure per-tool
   ↓
-Config saved to ~/.protonmail-mcp.json (mode 0600)
+Config saved to ~/.pm-bridge-mcp.json (mode 0600)
   ↓
 MCP server reloads every 15s → takes effect immediately
 ```
@@ -54,7 +54,7 @@ MCP server reloads every 15s → takes effect immediately
 1. Permission gate — every tool checked against config (15s refresh)
 2. Rate limiting — per-tool limits enforced in MCP server
 3. Escalation gate — privilege increases require explicit human approval (separate channel)
-4. Audit log — append-only at `~/.protonmail-mcp.audit.jsonl`
+4. Audit log — append-only at `~/.pm-bridge-mcp.audit.jsonl`
 5. CSRF protection — all mutating API calls require session token
 6. Origin validation — settings server checks Origin/Referer headers
 7. Input validation — email addresses, folder names, attachment sizes, hostnames

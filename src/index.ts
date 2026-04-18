@@ -123,7 +123,7 @@ import { allToolDefs, allHandlers, escalationHandlers, describeRequestEscalation
 import type { ToolCallContext, ToolSharedState } from "./tools/types.js";
 
 // ─── Service Initialization ───────────────────────────────────────────────────
-// All credentials and connection settings are loaded from ~/.protonmail-mcp.json
+// All credentials and connection settings are loaded from ~/.pm-bridge-mcp.json
 // and the OS keychain in main(). No credentials are read from environment variables
 // to prevent accidental exposure to other processes.
 
@@ -167,8 +167,22 @@ accountManager.on("active-changed", (ev: { services: { imap: SimpleIMAPService; 
 let simpleloginService = new SimpleLoginService("");
 const analyticsService = new AnalyticsService();
 
-const SCHEDULER_STORE = process.env.PROTONMAIL_SCHEDULER_STORE
-  || `${process.env.HOME || process.env.USERPROFILE || "."}/.protonmail-mcp-scheduled.json`;
+// Accept either the new PM_BRIDGE_MCP name or the legacy PROTONMAIL name.
+// New wins; legacy is silently honored for one release. Remove the
+// PROTONMAIL_SCHEDULER_STORE alias in v2.2.
+function _resolveSchedulerStorePath(): string {
+  const envPath = process.env.PM_BRIDGE_MCP_SCHEDULER_STORE
+    || process.env.PROTONMAIL_SCHEDULER_STORE;
+  if (envPath) return envPath;
+  const home = process.env.HOME || process.env.USERPROFILE || ".";
+  // Read-old/write-new: keep using the legacy file if it exists and the new
+  // one doesn't, so a queue of pending scheduled emails survives the rename.
+  const preferred = `${home}/.pm-bridge-mcp-scheduled.json`;
+  const legacy = `${home}/.protonmail-mcp-scheduled.json`;
+  if (!existsSync(preferred) && existsSync(legacy)) return legacy;
+  return preferred;
+}
+const SCHEDULER_STORE = _resolveSchedulerStorePath();
 const schedulerService = new SchedulerService(smtpService, SCHEDULER_STORE);
 
 const REMINDERS_STORE = process.env.PM_BRIDGE_MCP_REMINDERS
@@ -409,7 +423,7 @@ function truncateEmailBody(body: string, maxLength: number = 2000): string {
 // ─── MCP Server ───────────────────────────────────────────────────────────────
 
 const server = new Server(
-  { name: "protonmail-mcp-server", version: _pkgVersion },
+  { name: "pm-bridge-mcp", version: _pkgVersion },
   {
     capabilities: {
       tools: { listChanged: false },
@@ -567,7 +581,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 
   // ── Permission gate ───────────────────────────────────────────────────────
-  // Checked against ~/.protonmail-mcp.json (refreshed every 15 s).
+  // Checked against ~/.pm-bridge-mcp.json (refreshed every 15 s).
   // If no config file exists the read-only preset is enforced — agents can
   // read and search but cannot send, move, delete, or modify email state.
   // Run `npm run settings` to open the settings UI and grant broader access.
@@ -1963,7 +1977,10 @@ async function main() {
     // Both run alongside the MCP stdio transport. stdout is now owned by the
     // MCP protocol, so startSettingsServer is called with quiet=true.
     // Skip when running as a respawn child (stdio:ignore, no real MCP session).
-    if (!process.env.PROTONMAIL_MCP_RESPAWN) {
+    // Honor either env name during the rename window — a child spawned by an
+    // older parent build sets PROTONMAIL_MCP_RESPAWN; a newer parent sets the
+    // PM_BRIDGE_MCP_RESPAWN form. Either one suppresses the daemon side-effects.
+    if (!process.env.PM_BRIDGE_MCP_RESPAWN && !process.env.PROTONMAIL_MCP_RESPAWN) {
       await _startSettingsServerDaemon();
       _initTray().catch((err: unknown) => logger.warn("Tray init error", "MCPServer", err));
     }

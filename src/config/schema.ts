@@ -1,5 +1,5 @@
 /**
- * Configuration schema for ProtonMail MCP Server
+ * Configuration schema for pm-bridge-mcp
  * Covers connection settings and per-tool agentic access permissions.
  */
 
@@ -173,7 +173,7 @@ export interface ConnectionSettings {
   /**
    * Explicit opt-in to run IMAP/SMTP against localhost Bridge without a pinned cert.
    * Default false — the services throw at startup if localhost is used with neither
-   * a loaded cert nor this flag. Override per-launch with PROTONMAIL_MCP_INSECURE_BRIDGE=1.
+   * a loaded cert nor this flag. Override per-launch with PM_BRIDGE_MCP_INSECURE_BRIDGE=1.
    */
   allowInsecureBridge?: boolean;
   /**

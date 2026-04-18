@@ -25,7 +25,6 @@
     "typecheck": "tsc --noEmit"
   },
   "keywords": [
-    "proton-mail",
     "proton-bridge",
     "mcp",
     "model-context-protocol",
@@ -38,7 +37,6 @@
     "ai",
     "productivity",
     "bridge",
-    "proton-bridge",
     "smtp",
     "imap",
     "analytics",
@@ -50,13 +48,13 @@
     "email": "chandshy@gmail.com"
   },
   "license": "MIT",
-  "homepage": "https://github.com/chandshy/protonmail-agentic-mcp#readme",
+  "homepage": "https://github.com/chandshy/pm-bridge-mcp#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/chandshy/protonmail-agentic-mcp.git"
+    "url": "git+https://github.com/chandshy/pm-bridge-mcp.git"
   },
   "bugs": {
-    "url": "https://github.com/chandshy/protonmail-agentic-mcp/issues"
+    "url": "https://github.com/chandshy/pm-bridge-mcp/issues"
   },
   "engines": {
     "node": ">=20.0.0",

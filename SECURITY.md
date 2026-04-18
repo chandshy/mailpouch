@@ -30,7 +30,7 @@ If you discover a security vulnerability, please send an email to **chandshy@gma
 The server implements a 10-layer defense-in-depth security model:
 
 ### 1. Permission Gate
-- Every tool call checked against `~/.protonmail-mcp.json` (refreshed every 15s)
+- Every tool call checked against `~/.pm-bridge-mcp.json` (refreshed every 15s)
 - 4 presets: read_only (default), supervised, send_only, full
 - Per-tool enable/disable and rate limiting
 
@@ -46,7 +46,7 @@ The server implements a 10-layer defense-in-depth security model:
 - Human must type "APPROVE" before confirmation button activates
 
 ### 4. Audit Trail
-- Append-only log at `~/.protonmail-mcp.audit.jsonl`
+- Append-only log at `~/.pm-bridge-mcp.audit.jsonl`
 - Records all escalation requests, approvals, and denials
 
 ### 5. CSRF Protection
@@ -82,8 +82,8 @@ When using this MCP server:
 
 ### Credential Management
 - **Never commit** credentials to version control
-- Credentials are stored in `~/.protonmail-mcp.json` (mode 0600) or your OS keychain — never in environment variables or `.env` files
-- Use **Proton Bridge passwords**, not your main ProtonMail password
+- Credentials are stored in `~/.pm-bridge-mcp.json` (mode 0600) or your OS keychain — never in environment variables or `.env` files
+- Use **Proton Bridge passwords**, not your main Proton Mail password
 - Rotate credentials regularly
 
 ### Network Security
@@ -92,14 +92,14 @@ When using this MCP server:
 - The server accepts self-signed certificates for localhost only when no cert is configured
 
 ### Access Control
-- Config file at `~/.protonmail-mcp.json` is written with mode 0600
+- Config file at `~/.pm-bridge-mcp.json` is written with mode 0600
 - Start with **read_only** preset and escalate only as needed
 - Use **supervised** preset for day-to-day agent use (rate-limited writes)
 - Reserve **full** preset for trusted, supervised workflows
 
 ### Data Protection
 - Email data is **cached in memory** only (cleared on restart, capped at 500 entries per fetch)
-- **Scheduled emails** are persisted to `~/.protonmail-mcp-scheduled.json` (mode 0600, atomic writes) so they survive restarts. This file contains email metadata (recipients, subject, body) — protect it accordingly.
+- **Scheduled emails** are persisted to `~/.pm-bridge-mcp-scheduled.json` (mode 0600, atomic writes) so they survive restarts. This file contains email metadata (recipients, subject, body) — protect it accordingly.
 - No persistent storage of email content beyond the scheduled email queue
 - Logs are sanitized (no full email bodies)
 - Audit log contains escalation metadata only (no email content)
@@ -126,4 +126,4 @@ Security patches will be released as:
 
 ---
 
-Thank you for helping keep ProtonMail MCP Server secure!
+Thank you for helping keep pm-bridge-mcp secure!

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * ProtonMail MCP Server — Settings entry point
+ * pm-bridge-mcp — Settings entry point
  *
  * Auto-detects the display environment and launches the best available UI:
  *
@@ -43,7 +43,7 @@ function hasFlag(name: string): boolean  { return flagIndex(name) !== -1; }
 
 if (hasFlag("--help") || hasFlag("-h")) {
   process.stdout.write(
-    "Usage: protonmail-mcp-settings [options]\n\n" +
+    "Usage: pm-bridge-mcp-settings [options]\n\n" +
     "Options:\n" +
     "  --port <n>    HTTP server port (default: 8765)\n" +
     "  --browser     Force browser mode\n" +
@@ -85,7 +85,7 @@ const port = portArg !== -1
     : configPort;
 
 if (isNaN(port) || port < 1 || port > 65535) {
-  process.stderr.write("Invalid port. Usage: protonmail-mcp-settings [--port <1-65535>]\n");
+  process.stderr.write("Invalid port. Usage: pm-bridge-mcp-settings [--port <1-65535>]\n");
   process.exit(1);
 }
 

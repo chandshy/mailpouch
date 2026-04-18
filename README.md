@@ -2,7 +2,7 @@
 
 **MCP server for Proton Mail via Proton Bridge.** An unofficial, user-initiated bridge between agentic MCP clients and Proton Bridge's local IMAP/SMTP surface.
 
-[![CI](https://github.com/chandshy/protonmail-agentic-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/chandshy/protonmail-agentic-mcp/actions/workflows/ci.yml)
+[![CI](https://github.com/chandshy/pm-bridge-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/chandshy/pm-bridge-mcp/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/badge/npm-v2.1.0-blue.svg)](https://www.npmjs.com/package/pm-bridge-mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D20.0.0-brightgreen.svg)](https://nodejs.org/)
@@ -33,7 +33,7 @@ You remain the operator of your Proton account. Running this server against your
 
 ## What It Does
 
-ProtonMail encrypts your email end-to-end, which means no third-party API can read it. [Proton Bridge](https://proton.me/mail/bridge) solves this by decrypting email locally. This MCP server connects to Bridge and gives Claude (or any MCP host) structured, permission-gated access to your inbox.
+Proton Mail encrypts your email end-to-end, which means no third-party API can read it. [Proton Bridge](https://proton.me/mail/bridge) solves this by decrypting email locally. This MCP server connects to Bridge and gives Claude (or any MCP host) structured, permission-gated access to your inbox.
 
 Your emails are decrypted on your own machine by Proton Bridge. This server never persists email content — everything stays in memory and is cleared on restart. You control exactly what the AI can do through a preset permission system with human-gated escalation for anything sensitive.
 
@@ -108,14 +108,14 @@ Bridge listens locally on:
 ### Option A — npm (recommended)
 
 ```bash
-npm install -g github:chandshy/protonmail-agentic-mcp
+npm install -g github:chandshy/pm-bridge-mcp
 ```
 
 ### Option B — From source
 
 ```bash
-git clone https://github.com/chandshy/protonmail-agentic-mcp.git
-cd protonmail-agentic-mcp
+git clone https://github.com/chandshy/pm-bridge-mcp.git
+cd pm-bridge-mcp
 npm install
 npm run build
 ```
@@ -152,7 +152,7 @@ The **6-step wizard** walks you through everything automatically:
 5. **Review** — confirm your settings before saving
 6. **Done** — displays the exact JSON snippet to paste into your MCP client config; optionally writes it for you automatically
 
-Settings are saved to `~/.protonmail-mcp.json` with mode `0600` (owner read/write only). Bridge passwords, OAuth admin passwords, and Pass PATs prefer the OS keychain when available.
+Settings are saved to `~/.pm-bridge-mcp.json` with mode `0600` (owner read/write only). Bridge passwords, OAuth admin passwords, and Pass PATs prefer the OS keychain when available.
 
 ---
 
@@ -171,7 +171,7 @@ The generated entry looks like this (your path will differ):
 ```json
 {
   "mcpServers": {
-    "protonmail": {
+    "pm-bridge": {
       "command": "node",
       "args": ["/path/to/node_modules/pm-bridge-mcp/dist/index.js"]
     }
@@ -215,7 +215,7 @@ Canonical code: [`src/accounts/registry.ts`](src/accounts/registry.ts), [`src/ac
 
 For headless boxes, phones, or sharing one Bridge across multiple devices, switch to HTTP transport. The same binary listens on a port instead of stdio.
 
-Enable it via the Setup tab → **Remote (HTTP) mode**, or by setting these in `~/.protonmail-mcp.json`:
+Enable it via the Setup tab → **Remote (HTTP) mode**, or by setting these in `~/.pm-bridge-mcp.json`:
 
 ```json
 {
@@ -250,7 +250,7 @@ A static-bearer client config looks like:
 ```json
 {
   "mcpServers": {
-    "protonmail-remote": {
+    "pm-bridge-remote": {
       "url": "https://mcp.example.com/mcp",
       "headers": { "Authorization": "Bearer <token>" }
     }
@@ -260,18 +260,20 @@ A static-bearer client config looks like:
 
 ### Environment variables
 
-Configuration is stored in `~/.protonmail-mcp.json` and managed via the settings UI — not environment variables. The following env vars are available for advanced/optional overrides:
+Configuration is stored in `~/.pm-bridge-mcp.json` and managed via the settings UI — not environment variables. The following env vars are available for advanced/optional overrides:
 
 | Variable | Default | Description |
 |---|---|---|
-| `PROTONMAIL_MCP_CONFIG` | `~/.protonmail-mcp.json` | Override config file path |
-| `PROTONMAIL_SCHEDULER_STORE` | `~/.protonmail-mcp-scheduled.json` | Scheduled email persistence file |
-| `PROTONMAIL_LOG_FILE` | `~/.protonmail-mcp.log` | Override log file path |
-| `PROTONMAIL_MCP_PENDING` | `~/.protonmail-mcp.pending.json` | Override pending escalations file path |
-| `PROTONMAIL_MCP_AUDIT` | `~/.protonmail-mcp.audit.jsonl` | Override escalation audit log path |
-| `PROTONMAIL_MCP_INSECURE_BRIDGE` | unset | Per-launch opt-in to localhost Bridge without a pinned cert |
+| `PM_BRIDGE_MCP_CONFIG` | `~/.pm-bridge-mcp.json` | Override config file path |
+| `PM_BRIDGE_MCP_SCHEDULER_STORE` | `~/.pm-bridge-mcp-scheduled.json` | Scheduled email persistence file |
+| `PM_BRIDGE_MCP_LOG_FILE` | `~/.pm-bridge-mcp.log` | Override log file path |
+| `PM_BRIDGE_MCP_PENDING` | `~/.pm-bridge-mcp.pending.json` | Override pending escalations file path |
+| `PM_BRIDGE_MCP_AUDIT` | `~/.pm-bridge-mcp.audit.jsonl` | Override escalation audit log path |
+| `PM_BRIDGE_MCP_INSECURE_BRIDGE` | unset | Per-launch opt-in to localhost Bridge without a pinned cert |
 | `PM_BRIDGE_MCP_TIER` | `complete` | Tool-tier override: `core` / `extended` / `complete` |
 | `PORT` | `8765` | Override settings UI HTTP server port |
+
+> The legacy `PROTONMAIL_*` forms of the first six variables are still honored for one release to avoid breaking existing installs; new docs and CLI help only mention the `PM_BRIDGE_MCP_*` names.
 
 ---
 
@@ -349,7 +351,7 @@ The escalation system lets an agent request broader permissions without permanen
 - You must type `APPROVE` before the button activates — no accidental clicks
 - CSRF-protected: the approval API requires a session token embedded only in the rendered HTML page
 - Rate-limited: max 5 escalation requests per hour, max 1 pending at a time
-- Audit trail: every request, approval, and denial is appended to `~/.protonmail-mcp.audit.jsonl`
+- Audit trail: every request, approval, and denial is appended to `~/.pm-bridge-mcp.audit.jsonl`
 - Approve from another device: `npx pm-bridge-mcp-settings --lan`
 
 ---
@@ -386,12 +388,12 @@ This server gives AI agents *controlled* access to sensitive email data. The sec
 
 | Layer | Mechanism |
 |---|---|
-| Permission gate | Every tool call checked against `~/.protonmail-mcp.json` (refreshed every 15 s) |
+| Permission gate | Every tool call checked against `~/.pm-bridge-mcp.json` (refreshed every 15 s) |
 | Tool tiering | `core` / `extended` / `complete` controls the `ListTools` surface — agents can't call what they can't see |
 | Rate limiting | Per-tool sliding-window limits in-process; per-caller token-bucket on the HTTP transport |
 | Destructive confirmation | MCP elicitation prompt (or required `{ confirmed: true }`) on delete / trash / spam / `alias_delete` / `pass_get` |
 | Escalation gate | Privilege increases require explicit human approval via a separate channel |
-| Audit log | Append-only log of all escalation events at `~/.protonmail-mcp.audit.jsonl` |
+| Audit log | Append-only log of all escalation events at `~/.pm-bridge-mcp.audit.jsonl` |
 | OAuth 2.1 + PKCE-S256 | Spec-compliant DCR + consent flow gated on admin password (HTTP transport) |
 | CSRF protection | All mutating settings API calls require a session token (timing-safe comparison) |
 | Origin validation | Settings server validates `Origin`/`Referer` headers; rejects unknown origins |
@@ -407,12 +409,12 @@ This server gives AI agents *controlled* access to sensitive email data. The sec
 **What agents cannot do:**
 - Approve their own escalation requests
 - Bypass the permission gate (it runs in the server process, not the agent)
-- Read or modify `~/.protonmail-mcp.json` directly (not an exposed tool)
+- Read or modify `~/.pm-bridge-mcp.json` directly (not an exposed tool)
 - Erase the audit log
 - Inject headers into outgoing email via crafted subjects, filenames, or custom headers
 - Execute destructive tools without surfacing the intent to the user
 
-**Credentials:** Stored in `~/.protonmail-mcp.json` with `0600` permissions (or in the OS keychain). Never commit this file. The settings UI never displays or transmits high-value secrets after they are first saved.
+**Credentials:** Stored in `~/.pm-bridge-mcp.json` with `0600` permissions (or in the OS keychain). Never commit this file. The settings UI never displays or transmits high-value secrets after they are first saved.
 
 ---
 
@@ -479,7 +481,7 @@ Canonical code: [`src/notifications/desktop.ts`](src/notifications/desktop.ts), 
 - Export the Bridge TLS certificate: Bridge app → **Settings → Export TLS certificates**.
 - Set the path in the settings UI under **Setup → Bridge TLS Certificate**.
 
-> The server refuses to connect to a localhost Bridge without a pinned TLS certificate — this matches Proton Bridge's own v3.21.2+ hardening. If you cannot provide a cert, set **Allow insecure Bridge connection** under Setup (or launch with `PROTONMAIL_MCP_INSECURE_BRIDGE=1`) to opt back into the legacy behavior. Configs that predate this change are grandfathered into the legacy mode with a startup warning until the opt-in is set explicitly.
+> The server refuses to connect to a localhost Bridge without a pinned TLS certificate — this matches Proton Bridge's own v3.21.2+ hardening. If you cannot provide a cert, set **Allow insecure Bridge connection** under Setup (or launch with `PM_BRIDGE_MCP_INSECURE_BRIDGE=1`) to opt back into the legacy behavior. Configs that predate this change are grandfathered into the legacy mode with a startup warning until the opt-in is set explicitly.
 
 ### Bridge version warning on startup
 
@@ -513,8 +515,8 @@ Canonical code: [`src/notifications/desktop.ts`](src/notifications/desktop.ts), 
 ## Development
 
 ```bash
-git clone https://github.com/chandshy/protonmail-agentic-mcp.git
-cd protonmail-agentic-mcp
+git clone https://github.com/chandshy/pm-bridge-mcp.git
+cd pm-bridge-mcp
 npm install
 
 npm run build          # compile TypeScript to dist/
@@ -600,4 +602,4 @@ MIT — see [LICENSE](LICENSE)
 
 *Unofficial third-party server. Not affiliated with or endorsed by Proton AG.*
 
-[GitHub](https://github.com/chandshy/protonmail-agentic-mcp) · [npm](https://www.npmjs.com/package/pm-bridge-mcp) · [Issues](https://github.com/chandshy/protonmail-agentic-mcp/issues) · [Model Context Protocol](https://modelcontextprotocol.io)
+[GitHub](https://github.com/chandshy/pm-bridge-mcp) · [npm](https://www.npmjs.com/package/pm-bridge-mcp) · [Issues](https://github.com/chandshy/pm-bridge-mcp/issues) · [Model Context Protocol](https://modelcontextprotocol.io)

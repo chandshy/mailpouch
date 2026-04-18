@@ -1,8 +1,10 @@
 /**
- * Config file loader / saver for ProtonMail MCP Server.
+ * Config file loader / saver for pm-bridge-mcp.
  *
- * Config is persisted to a single JSON file (default: ~/.protonmail-mcp.json).
- * Override the path with the PROTONMAIL_MCP_CONFIG env var.
+ * Config is persisted to a single JSON file (default: ~/.pm-bridge-mcp.json,
+ * with read-fallback to the legacy ~/.protonmail-mcp.json for installs that
+ * predate the rename). Override the path with the PM_BRIDGE_MCP_CONFIG env var
+ * (the legacy PROTONMAIL_MCP_CONFIG name is also accepted for one release).
  *
  * On Unix systems the file is written with mode 0600 (owner-read/write only)
  * to reduce the risk of credential exposure.

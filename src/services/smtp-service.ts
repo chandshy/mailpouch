@@ -1,5 +1,6 @@
 /**
- * SMTP Service for sending emails via ProtonMail
+ * SMTP Service for sending emails via Proton Mail (through Proton Bridge or
+ * direct submission).
  */
 
 import nodemailer from "nodemailer";
@@ -67,8 +68,12 @@ export class SMTPService {
       ? this.config.smtp.smtpToken
       : this.config.smtp.password;
 
+    // Accept either the new PM_BRIDGE_MCP name or the legacy PROTONMAIL name.
+    // New wins; legacy is silently honored for one release. Remove the
+    // PROTONMAIL_MCP_INSECURE_BRIDGE alias in v2.2.
     const allowInsecure =
       this.config.smtp.allowInsecureBridge === true ||
+      process.env.PM_BRIDGE_MCP_INSECURE_BRIDGE === "1" ||
       process.env.PROTONMAIL_MCP_INSECURE_BRIDGE === "1";
 
     // Build TLS options based on connection type
@@ -98,7 +103,7 @@ export class SMTPService {
             throw new Error(
               `SMTP: Bridge cert at "${resolvedCertPath}" could not be loaded and allowInsecureBridge is not set. ` +
               `Fix the cert path in Settings → Connection, or set allowInsecureBridge: true ` +
-              `(or PROTONMAIL_MCP_INSECURE_BRIDGE=1) to opt into the legacy insecure behavior. ` +
+              `(or PM_BRIDGE_MCP_INSECURE_BRIDGE=1) to opt into the legacy insecure behavior. ` +
               `Underlying error: ${(err as Error).message}`
             );
           }
@@ -117,7 +122,7 @@ export class SMTPService {
           throw new Error(
             "SMTP: No Bridge certificate configured. Export the cert from Bridge → Help → Export TLS Certificate " +
             "and set 'bridgeCertPath' in Settings → Connection. To opt into the legacy behavior (TLS validation " +
-            "disabled for localhost), set allowInsecureBridge: true or launch with PROTONMAIL_MCP_INSECURE_BRIDGE=1."
+            "disabled for localhost), set allowInsecureBridge: true or launch with PM_BRIDGE_MCP_INSECURE_BRIDGE=1."
           );
         }
         logger.warn(

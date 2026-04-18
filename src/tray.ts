@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * ProtonMail MCP — System Tray entry point
+ * pm-bridge-mcp — System Tray entry point
  *
  * Starts the settings HTTP server and shows a system tray icon
  * matching the style of the Proton Bridge tray icon:
@@ -57,7 +57,7 @@ function makeEnvelopePng(): Buffer {
   const rowSize = 1 + W * 4; // filter byte + 4 bytes per pixel (RGBA)
   const raw = Buffer.allocUnsafe(H * rowSize);
 
-  // Fill entire canvas with ProtonMail purple (#6D4AFF)
+  // Fill entire canvas with Proton purple (#6D4AFF)
   for (let y = 0; y < H; y++) {
     raw[y * rowSize] = 0; // filter byte: None
     for (let x = 0; x < W; x++) {

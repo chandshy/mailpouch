@@ -81,7 +81,7 @@ export const handlers: Record<string, ToolHandler> = {
       spawn(process.execPath, process.argv.slice(1), {
         stdio: "ignore",
         detached: true,
-        env: { ...process.env, PROTONMAIL_MCP_RESPAWN: "1" },
+        env: { ...process.env, PM_BRIDGE_MCP_RESPAWN: "1" },
       }).unref();
     } catch (spawnErr: unknown) {
       logger.error("Failed to spawn replacement process during restart", "MCPServer", spawnErr);

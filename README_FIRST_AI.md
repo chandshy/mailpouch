@@ -1,7 +1,7 @@
-# ProtonMail MCP Server — AI Agent Guide
+# pm-bridge-mcp — AI Agent Guide
 
 > **Read this before using any tools.** This document is written for AI agents
-> (Claude, GPT, Gemini, etc.) operating through the ProtonMail MCP server. It
+> (Claude, GPT, Gemini, etc.) operating through the pm-bridge-mcp server. It
 > covers what each tool does, when to use it, the permission model, limits you
 > must respect, and how to handle errors correctly.
 
@@ -9,7 +9,7 @@
 
 ## Quick orientation
 
-You have access to a user's ProtonMail inbox via Proton Bridge (a local
+You have access to a user's Proton Mail inbox via Proton Bridge (a local
 desktop app that decrypts their end-to-end encrypted email). The MCP server
 runs on the user's machine and connects to Bridge locally — but when you
 read emails through this server, the content is sent to your provider's API
@@ -114,7 +114,7 @@ Use this before `get_emails` to check if a folder has anything new.
 Returns `{ unreadByFolder: { "INBOX": 3, "Sent": 0, ... }, totalUnread: 3 }`.
 
 #### `list_labels`
-List all ProtonMail labels (folders with `Labels/` prefix) with message counts.
+List all Proton Mail labels (folders with `Labels/` prefix) with message counts.
 Returns `{ labels: [...], count }`.
 
 #### `get_emails_by_label`
@@ -354,7 +354,7 @@ folder   string  Folder name without prefix (e.g. Work). Moves to Folders/Work.
 ```
 
 #### `move_to_label`
-Apply a ProtonMail label to an email. The label path is constructed as
+Apply a Proton Mail label to an email. The label path is constructed as
 `Labels/<label>`. The label folder must exist (use `create_folder` first).
 
 ```

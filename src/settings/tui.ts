@@ -1,5 +1,5 @@
 /**
- * ProtonMail MCP Server — Terminal UI
+ * pm-bridge-mcp — Terminal UI
  *
  * Provides interactive configuration management when a browser is not
  * available. Detects the environment at runtime and selects the best
@@ -201,7 +201,7 @@ export function printNonInteractive(): void {
   }
 
   process.stdout.write("\nTo configure: run in an interactive terminal, or start the browser UI:\n");
-  process.stdout.write("  npx protonmail-mcp-settings\n\n");
+  process.stdout.write("  npx pm-bridge-mcp-settings\n\n");
 }
 
 // ─── Colour helpers (ANSI) ────────────────────────────────────────────────────

@@ -78,18 +78,47 @@ describe('isUpgrade', () => {
 // ─── File path helpers ───────────────────────────────────────────────────────
 
 describe('getPendingFilePath / getAuditLogPath', () => {
-  it('uses default home-dir path when env vars are absent', () => {
+  it('uses the new default home-dir path when env vars are absent', () => {
+    delete process.env.PM_BRIDGE_MCP_PENDING;
+    delete process.env.PM_BRIDGE_MCP_AUDIT;
     delete process.env.PROTONMAIL_MCP_PENDING;
     delete process.env.PROTONMAIL_MCP_AUDIT;
-    expect(getPendingFilePath()).toMatch(/protonmail-mcp\.pending\.json$/);
-    expect(getAuditLogPath()).toMatch(/protonmail-mcp\.audit\.jsonl$/);
+    // Default is the new pm-bridge-mcp path unless a legacy file exists on
+    // disk (the read-old/write-new fallback). The test runner's homedir is
+    // unlikely to contain one, so assert the new name.
+    expect(getPendingFilePath()).toMatch(/pm-bridge-mcp\.pending\.json$/);
+    expect(getAuditLogPath()).toMatch(/pm-bridge-mcp\.audit\.jsonl$/);
   });
 
-  it('uses env var overrides when set', () => {
-    process.env.PROTONMAIL_MCP_PENDING = '/tmp/test-pending.json';
-    process.env.PROTONMAIL_MCP_AUDIT   = '/tmp/test-audit.jsonl';
-    expect(getPendingFilePath()).toBe('/tmp/test-pending.json');
-    expect(getAuditLogPath()).toBe('/tmp/test-audit.jsonl');
+  it('uses new-name env var overrides when set', () => {
+    process.env.PM_BRIDGE_MCP_PENDING = '/tmp/test-pending-new.json';
+    process.env.PM_BRIDGE_MCP_AUDIT   = '/tmp/test-audit-new.jsonl';
+    expect(getPendingFilePath()).toBe('/tmp/test-pending-new.json');
+    expect(getAuditLogPath()).toBe('/tmp/test-audit-new.jsonl');
+    delete process.env.PM_BRIDGE_MCP_PENDING;
+    delete process.env.PM_BRIDGE_MCP_AUDIT;
+  });
+
+  it('still accepts legacy PROTONMAIL_MCP_* env vars for one release', () => {
+    delete process.env.PM_BRIDGE_MCP_PENDING;
+    delete process.env.PM_BRIDGE_MCP_AUDIT;
+    process.env.PROTONMAIL_MCP_PENDING = '/tmp/test-pending-legacy.json';
+    process.env.PROTONMAIL_MCP_AUDIT   = '/tmp/test-audit-legacy.jsonl';
+    expect(getPendingFilePath()).toBe('/tmp/test-pending-legacy.json');
+    expect(getAuditLogPath()).toBe('/tmp/test-audit-legacy.jsonl');
+    delete process.env.PROTONMAIL_MCP_PENDING;
+    delete process.env.PROTONMAIL_MCP_AUDIT;
+  });
+
+  it('prefers the new env var over the legacy alias when both are set', () => {
+    process.env.PM_BRIDGE_MCP_PENDING  = '/tmp/new-wins-pending.json';
+    process.env.PM_BRIDGE_MCP_AUDIT    = '/tmp/new-wins-audit.jsonl';
+    process.env.PROTONMAIL_MCP_PENDING = '/tmp/legacy-loses-pending.json';
+    process.env.PROTONMAIL_MCP_AUDIT   = '/tmp/legacy-loses-audit.jsonl';
+    expect(getPendingFilePath()).toBe('/tmp/new-wins-pending.json');
+    expect(getAuditLogPath()).toBe('/tmp/new-wins-audit.jsonl');
+    delete process.env.PM_BRIDGE_MCP_PENDING;
+    delete process.env.PM_BRIDGE_MCP_AUDIT;
     delete process.env.PROTONMAIL_MCP_PENDING;
     delete process.env.PROTONMAIL_MCP_AUDIT;
   });
@@ -101,22 +130,30 @@ describe('escalation workflow', () => {
   let tmpDir: string;
   let pendingPath: string;
   let auditPath: string;
-  const origPending = process.env.PROTONMAIL_MCP_PENDING;
-  const origAudit   = process.env.PROTONMAIL_MCP_AUDIT;
+  const origPending    = process.env.PM_BRIDGE_MCP_PENDING;
+  const origAudit      = process.env.PM_BRIDGE_MCP_AUDIT;
+  const origLegacyPend = process.env.PROTONMAIL_MCP_PENDING;
+  const origLegacyAud  = process.env.PROTONMAIL_MCP_AUDIT;
 
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), 'escalation-test-'));
     pendingPath = join(tmpDir, 'pending.json');
     auditPath   = join(tmpDir, 'audit.jsonl');
-    process.env.PROTONMAIL_MCP_PENDING = pendingPath;
-    process.env.PROTONMAIL_MCP_AUDIT   = auditPath;
+    // Ensure a stale legacy override from another test cannot shadow the
+    // new-name path we're about to set.
+    delete process.env.PROTONMAIL_MCP_PENDING;
+    delete process.env.PROTONMAIL_MCP_AUDIT;
+    process.env.PM_BRIDGE_MCP_PENDING = pendingPath;
+    process.env.PM_BRIDGE_MCP_AUDIT   = auditPath;
   });
 
   afterEach(() => {
-    if (origPending !== undefined) process.env.PROTONMAIL_MCP_PENDING = origPending;
-    else delete process.env.PROTONMAIL_MCP_PENDING;
-    if (origAudit !== undefined) process.env.PROTONMAIL_MCP_AUDIT = origAudit;
-    else delete process.env.PROTONMAIL_MCP_AUDIT;
+    if (origPending !== undefined) process.env.PM_BRIDGE_MCP_PENDING = origPending;
+    else delete process.env.PM_BRIDGE_MCP_PENDING;
+    if (origAudit !== undefined) process.env.PM_BRIDGE_MCP_AUDIT = origAudit;
+    else delete process.env.PM_BRIDGE_MCP_AUDIT;
+    if (origLegacyPend !== undefined) process.env.PROTONMAIL_MCP_PENDING = origLegacyPend;
+    if (origLegacyAud !== undefined)  process.env.PROTONMAIL_MCP_AUDIT   = origLegacyAud;
     rmSync(tmpDir, { recursive: true, force: true });
   });
 

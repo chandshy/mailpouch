@@ -1,8 +1,8 @@
 /**
- * Logging utility for ProtonMail MCP Server
+ * Logging utility for pm-bridge-mcp
  */
 
-import { appendFile } from "fs";
+import { appendFile, existsSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 import { LogEntry } from "../types/index.js";
@@ -18,7 +18,18 @@ import { LogEntry } from "../types/index.js";
 const SENSITIVE_KEYS = /(password|token|secret|apikey|api_key|verifier|credential|authorization|bridgecertpath|attachments|content|^body$)/i;
 
 export function getLogFilePath(): string {
-  return process.env.PROTONMAIL_LOG_FILE || join(homedir(), ".protonmail-mcp.log");
+  // Accept either the new PM_BRIDGE_MCP name or the legacy PROTONMAIL name.
+  // New wins; legacy is silently honored for one release to avoid breaking
+  // existing installs. Remove the PROTONMAIL_LOG_FILE alias in v2.2.
+  const envPath = process.env.PM_BRIDGE_MCP_LOG_FILE || process.env.PROTONMAIL_LOG_FILE;
+  if (envPath) return envPath;
+  // Read-old/write-new: if a legacy ~/.protonmail-mcp.log exists and the new
+  // one doesn't, keep appending to the legacy file so existing tail/grep
+  // workflows don't suddenly go silent. Otherwise, write to the new path.
+  const preferred = join(homedir(), ".pm-bridge-mcp.log");
+  const legacy = join(homedir(), ".protonmail-mcp.log");
+  if (!existsSync(preferred) && existsSync(legacy)) return legacy;
+  return preferred;
 }
 
 export class Logger {

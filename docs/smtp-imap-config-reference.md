@@ -67,7 +67,7 @@ The Bridge setting to switch: **Bridge Settings → Connection method → STARTT
 
 ## Configuration for This Project
 
-Connection settings and credentials are stored in `~/.protonmail-mcp.json` (mode 0600).
+Connection settings and credentials are stored in `~/.pm-bridge-mcp.json` (mode 0600).
 **No environment variables are used for credentials** — this prevents accidental exposure to
 other processes and shell history. Run `npm run settings` to open the settings UI and configure.
 
@@ -95,4 +95,4 @@ other processes and shell history. Run `npm run settings` to open the settings U
 - `bridgeCertPath` — path to the TLS certificate exported from Bridge → Settings → Export TLS certificates. Leave empty to skip cert validation (not recommended).
 - `tlsMode` — `"starttls"` (default, correct for Bridge on ports 1025/1143) or `"ssl"` (implicit TLS, for ports 465/993 if Bridge is configured for SSL mode).
 
-The config file path can be overridden with the `PROTONMAIL_MCP_CONFIG` environment variable (must point to a path within the home directory).
+The config file path can be overridden with the `PM_BRIDGE_MCP_CONFIG` environment variable (must point to a path within the home directory). The legacy `PROTONMAIL_MCP_CONFIG` name is still accepted for one release.

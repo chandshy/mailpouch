@@ -1,5 +1,5 @@
 /**
- * Helper utilities for ProtonMail MCP Server
+ * Helper utilities for pm-bridge-mcp
  */
 
 import { randomUUID } from "crypto";
