@@ -67,6 +67,10 @@
     "linux",
     "win32"
   ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "~1.29.0",
     "imapflow": "~1.3.1",
