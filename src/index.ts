@@ -46,6 +46,7 @@ import { SimpleLoginService } from "./services/simplelogin-service.js";
 import { AnalyticsService } from "./services/analytics-service.js";
 import { SchedulerService } from "./services/scheduler.js";
 import { ReminderService } from "./services/reminder-service.js";
+import { PassService, PassCliUnavailableError } from "./services/pass-service.js";
 import { logger, getLogFilePath } from "./utils/logger.js";
 import { isValidEmail, validateLabelName, validateFolderName, validateTargetFolder, requireNumericEmailId, validateAttachments } from "./utils/helpers.js";
 import { permissions } from "./permissions/manager.js";
@@ -80,6 +81,8 @@ function describeDestructivePreview(tool: string, args: Record<string, unknown>)
       return `Would move email with ID ${String(args.emailId ?? "(missing)")} to Spam.`;
     case "alias_delete":
       return `Would permanently delete SimpleLogin alias ${String(args.aliasId ?? "(missing)")}. This cannot be undone.`;
+    case "pass_get":
+      return `Would decrypt Proton Pass item ${String(args.item_id ?? "(missing)")} and return its secret fields to the model.`;
     default:
       return `Would run a destructive operation on the Proton mailbox.`;
   }
@@ -151,6 +154,10 @@ const schedulerService = new SchedulerService(smtpService, SCHEDULER_STORE);
 const REMINDERS_STORE = process.env.PM_BRIDGE_MCP_REMINDERS
   || `${process.env.HOME || process.env.USERPROFILE || "."}/.pm-bridge-mcp-reminders.json`;
 const reminderService = new ReminderService(REMINDERS_STORE);
+
+const PASS_AUDIT_PATH = process.env.PM_BRIDGE_MCP_PASS_AUDIT
+  || `${process.env.HOME || process.env.USERPROFILE || "."}/.pm-bridge-mcp-pass-audit.jsonl`;
+let passService: PassService | null = null;
 
 // ─── Bridge Auto-Start State ──────────────────────────────────────────────────
 /** Set to true when this process launched Proton Bridge; triggers kill on shutdown. */
@@ -1514,6 +1521,85 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               },
             },
           },
+        },
+      },
+
+      // ── Proton Pass (optional — requires pass-cli and a Personal Access Token) ─
+      {
+        name: "pass_list",
+        title: "List Proton Pass Items",
+        description: "List credentials stored in Proton Pass. Returns item summaries (id, name, type, vault) — no secret values. Requires passAccessToken + pass-cli to be installed.",
+        annotations: { readOnlyHint: true },
+        inputSchema: {
+          type: "object",
+          properties: {
+            vault: { type: "string", description: "Optional vault name to filter to" },
+          },
+        },
+        outputSchema: {
+          type: "object",
+          properties: {
+            items: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  id: { type: "string" },
+                  name: { type: "string" },
+                  type: { type: "string" },
+                  vault: { type: "string" },
+                  updatedAt: { type: "string", format: "date-time" },
+                },
+              },
+            },
+          },
+          required: ["items"],
+        },
+      },
+      {
+        name: "pass_search",
+        title: "Search Proton Pass Items",
+        description: "Full-text search across Proton Pass item names, URLs, and notes. Returns summaries only; use pass_get to retrieve the decrypted content for a specific item.",
+        annotations: { readOnlyHint: true },
+        inputSchema: {
+          type: "object",
+          properties: {
+            query: { type: "string", description: "Search query" },
+          },
+          required: ["query"],
+        },
+        outputSchema: {
+          type: "object",
+          properties: {
+            items: { type: "array" },
+          },
+          required: ["items"],
+        },
+      },
+      {
+        name: "pass_get",
+        title: "Get Proton Pass Item",
+        description: "Retrieve a single Proton Pass item by ID, INCLUDING its decrypted secret fields (password, TOTP, note body). Every call is audit-logged. Prefer pass_list / pass_search for non-credential lookups.",
+        annotations: { readOnlyHint: true },
+        inputSchema: {
+          type: "object",
+          properties: {
+            item_id: { type: "string", description: "Item ID from pass_list or pass_search" },
+          },
+          required: ["item_id"],
+        },
+        outputSchema: {
+          type: "object",
+          properties: {
+            id: { type: "string" },
+            name: { type: "string" },
+            type: { type: "string" },
+            username: { type: "string" },
+            fields: { type: "object", additionalProperties: { type: "string" } },
+            note: { type: "string" },
+            url: { type: "string" },
+          },
+          required: ["id", "name", "type"],
         },
       },
 
@@ -3553,6 +3639,57 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return ok({ activities });
       }
 
+      // ── Proton Pass ────────────────────────────────────────────────────────
+      case "pass_list": {
+        if (!passService) {
+          throw new McpError(ErrorCode.InvalidRequest, "Proton Pass is not configured. Set passAccessToken in Settings → Pass.");
+        }
+        const vault = typeof args.vault === "string" ? args.vault : undefined;
+        try {
+          const items = await passService.listItems(vault);
+          return ok({ items });
+        } catch (err: unknown) {
+          if (err instanceof PassCliUnavailableError) {
+            throw new McpError(ErrorCode.InvalidRequest, err.message);
+          }
+          throw err;
+        }
+      }
+
+      case "pass_search": {
+        if (!passService) {
+          throw new McpError(ErrorCode.InvalidRequest, "Proton Pass is not configured. Set passAccessToken in Settings → Pass.");
+        }
+        const query = typeof args.query === "string" ? args.query.trim() : "";
+        if (!query) throw new McpError(ErrorCode.InvalidParams, "query must be a non-empty string.");
+        try {
+          const items = await passService.searchItems(query);
+          return ok({ items });
+        } catch (err: unknown) {
+          if (err instanceof PassCliUnavailableError) {
+            throw new McpError(ErrorCode.InvalidRequest, err.message);
+          }
+          throw err;
+        }
+      }
+
+      case "pass_get": {
+        if (!passService) {
+          throw new McpError(ErrorCode.InvalidRequest, "Proton Pass is not configured. Set passAccessToken in Settings → Pass.");
+        }
+        const itemId = typeof args.item_id === "string" ? args.item_id.trim() : "";
+        if (!itemId) throw new McpError(ErrorCode.InvalidParams, "item_id must be a non-empty string.");
+        try {
+          const item = await passService.getItem(itemId);
+          return ok(item as unknown as Record<string, unknown>);
+        } catch (err: unknown) {
+          if (err instanceof PassCliUnavailableError) {
+            throw new McpError(ErrorCode.InvalidRequest, err.message);
+          }
+          throw err;
+        }
+      }
+
       case "sync_emails": {
         const folder = (args.folder as string) || "INBOX";
         // Validate folder to prevent path traversal via the folder argument.
@@ -4501,6 +4638,18 @@ async function main() {
       }
       logger.setDebugMode(!!cn.debug);
       tracer.setEnabled(!!cn.debug);
+
+      // Proton Pass — constructed only when a PAT is configured. Pass is a
+      // credential vault; errors from a missing CLI shouldn't crash the
+      // server on startup. Mail tools work fine without it.
+      if (cn.passAccessToken) {
+        passService = new PassService({
+          personalAccessToken: cn.passAccessToken,
+          cliPath: cn.passCliPath || undefined,
+          auditLogPath: PASS_AUDIT_PATH,
+        });
+        logger.info("Proton Pass client configured (pass_* tools active)", "MCPServer");
+      }
 
       // Password: keychain takes priority over config file plaintext
       const keychainCreds = await loadCredentialsFromKeychain();
