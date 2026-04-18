@@ -34,6 +34,8 @@ export const ALL_TOOLS = [
   // SimpleLogin aliases (Proton-owned; optional — requires API key)
   "alias_list", "alias_create_random", "alias_create_custom",
   "alias_toggle", "alias_delete", "alias_get_activity",
+  // Proton Pass (optional — requires pass-cli and a Personal Access Token)
+  "pass_list", "pass_search", "pass_get",
 ] as const;
 
 export type ToolName = (typeof ALL_TOOLS)[number];
@@ -125,6 +127,12 @@ export const TOOL_CATEGORIES: Record<string, ToolCategory> = {
     ],
     risk: "moderate",
   },
+  pass: {
+    label: "Proton Pass",
+    description: "Retrieve credentials from Proton Pass via pass-cli (requires a Personal Access Token).",
+    tools: ["pass_list", "pass_search", "pass_get"],
+    risk: "moderate",
+  },
 };
 
 // ─── Permission Types ──────────────────────────────────────────────────────────
@@ -182,6 +190,15 @@ export interface ConnectionSettings {
   simpleloginApiKey?: string;
   /** Optional override for SimpleLogin instance base URL (defaults to app.simplelogin.io). */
   simpleloginBaseUrl?: string;
+  /**
+   * Personal Access Token for Proton Pass CLI. Generated from the Pass web
+   * app → Settings → Developer → Personal Access Tokens. Leave blank to
+   * disable the pass_* tools entirely. Prefer keychain storage when
+   * available; Pass tokens give access to decrypted credentials.
+   */
+  passAccessToken?: string;
+  /** Optional override for the pass-cli binary path (defaults to 'pass-cli' on PATH). */
+  passCliPath?: string;
   debug: boolean;
 }
 
@@ -278,6 +295,7 @@ export const DESTRUCTIVE_TOOLS: ReadonlySet<string> = new Set<string>([
   "move_to_trash",
   "move_to_spam",
   "alias_delete",
+  "pass_get",
 ]);
 
 // ─── Tool Tiers ────────────────────────────────────────────────────────────────
@@ -302,6 +320,7 @@ export const TOOL_CATEGORY_TIER: Record<string, ToolTier> = {
   folders:        "extended",
   actions:        "extended",
   aliases:        "extended", // SimpleLogin; optional (requires API key), moderate risk
+  pass:           "extended", // Proton Pass; optional (requires PAT + pass-cli), moderate risk
   deletion:       "complete", // destructive + rarely needed by casual agents
   bridge_control: "complete", // server lifecycle
 };
