@@ -421,6 +421,49 @@ describe("loadConfig", () => {
     const cfg = loadConfig();
     expect(cfg!.tosAcknowledged).toEqual({ accepted: true, timestamp: "2026-04-17T00:00:00Z" });
   });
+
+  it("preserves settingsPort across load so the UI doesn't revert to 8765", () => {
+    mockedExistsSync.mockReturnValue(true);
+    const cfgjson = JSON.stringify({
+      configVersion: 2,
+      connection: {},
+      permissions: { preset: "full", tools: {} },
+      settingsPort: 8766,
+    });
+    mockedReadFileSync.mockReturnValue(cfgjson as unknown as Buffer);
+    const cfg = loadConfig();
+    expect(cfg!.settingsPort).toBe(8766);
+  });
+
+  it("drops invalid settingsPort (string / out-of-range / non-integer)", () => {
+    mockedExistsSync.mockReturnValue(true);
+    for (const badValue of ["8766", 0, 65536, 3.14, null]) {
+      const cfgjson = JSON.stringify({
+        configVersion: 2,
+        connection: {},
+        permissions: { preset: "full", tools: {} },
+        settingsPort: badValue,
+      });
+      mockedReadFileSync.mockReturnValue(cfgjson as unknown as Buffer);
+      const cfg = loadConfig();
+      expect(cfg!.settingsPort).toBeUndefined();
+    }
+  });
+
+  it("preserves credentialStorage across load so the UI badge stays accurate", () => {
+    mockedExistsSync.mockReturnValue(true);
+    for (const value of ["keychain", "config"] as const) {
+      const cfgjson = JSON.stringify({
+        configVersion: 2,
+        connection: {},
+        permissions: { preset: "full", tools: {} },
+        credentialStorage: value,
+      });
+      mockedReadFileSync.mockReturnValue(cfgjson as unknown as Buffer);
+      const cfg = loadConfig();
+      expect(cfg!.credentialStorage).toBe(value);
+    }
+  });
 });
 
 // ─── saveConfig ────────────────────────────────────────────────────────────────

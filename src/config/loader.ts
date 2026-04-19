@@ -223,6 +223,28 @@ export function loadConfig(): ServerConfig | null {
       mergedConnection.allowInsecureBridge = true;
     }
 
+    // Preserve settingsPort when it's a sane integer — without this, the field
+    // round-trips to disk via saveConfig but is stripped on the way back out,
+    // so GET /api/config returns no settingsPort → the UI defaults the field
+    // to 8765 → the port-mismatch warning banner fires on every reload even
+    // though the user already saved the correct value. Same defensive range
+    // check as the POST /api/config merge path (1..65535).
+    const parsedSettingsPort = parsed.settingsPort;
+    const preservedSettingsPort =
+      typeof parsedSettingsPort === "number" &&
+      Number.isInteger(parsedSettingsPort) &&
+      parsedSettingsPort >= 1 &&
+      parsedSettingsPort <= 65535
+        ? parsedSettingsPort
+        : undefined;
+    // credentialStorage drives the settings UI's "where are my secrets
+    // kept?" badge — preserve it across load/save round-trips too; it was
+    // dropped by the same bug that hit settingsPort.
+    const preservedCredentialStorage =
+      parsed.credentialStorage === "keychain" || parsed.credentialStorage === "config"
+        ? parsed.credentialStorage
+        : undefined;
+
     const result: ServerConfig = {
       configVersion: CONFIG_VERSION,
       connection: mergedConnection,
@@ -238,6 +260,8 @@ export function loadConfig(): ServerConfig | null {
       // set the field.
       requireDestructiveConfirm: parsed.requireDestructiveConfirm !== false,
       tosAcknowledged: parsed.tosAcknowledged,
+      settingsPort: preservedSettingsPort,
+      credentialStorage: preservedCredentialStorage,
       accounts: Array.isArray(parsed.accounts) ? parsed.accounts : undefined,
       activeAccountId: typeof parsed.activeAccountId === "string" ? parsed.activeAccountId : undefined,
       desktopNotificationsEnabled: typeof parsed.desktopNotificationsEnabled === "boolean"
