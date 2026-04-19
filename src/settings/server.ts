@@ -4226,9 +4226,13 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
               stdio: "ignore", detached: true, shell: false,
             });
             bridgeProc.on("error", (err) => {
-              // Best-effort log; the tcp poll below will surface the failure
-              // to the caller as `reachable: false`.
-              void err;
+              // Log at warn level so operators can diagnose launch failures
+              // from `tail ~/.mailpouch.log`. The tcp poll below will also
+              // surface this to the HTTP caller as `reachable: false`, but
+              // the specific error (ENOENT vs EACCES vs EPERM) only shows
+              // up here.
+              const msg = err instanceof Error ? err.message : String(err);
+              logger.warn(`Failed to launch Proton Bridge (${bridgeExe}): ${msg}`, "SettingsServer");
             });
             bridgeProc.unref();
           }
@@ -4795,12 +4799,21 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
               claudeLaunchArgs = ["-a", "Claude"];
             }
           } else if (platform === "win32") {
-            const winCandidates = [
-              nodePath.join(process.env.LOCALAPPDATA ?? "", "AnthropicClaude", "Claude.exe"),
-              nodePath.join(process.env.LOCALAPPDATA ?? "", "Programs", "Claude", "Claude.exe"),
-              nodePath.join(process.env.PROGRAMFILES ?? "", "Claude", "Claude.exe"),
-            ];
-            const found = winCandidates.find((p) => p && existsSync(p));
+            // Only build absolute candidates — falling back to `?? ""` would
+            // produce `AnthropicClaude\Claude.exe` (relative to cwd) if the
+            // env var is unset, which existsSync could match by accident and
+            // lead to killing Claude and then failing to relaunch.
+            const winCandidates: string[] = [];
+            const localAppData = process.env.LOCALAPPDATA;
+            const programFiles = process.env.PROGRAMFILES;
+            if (localAppData) {
+              winCandidates.push(nodePath.join(localAppData, "AnthropicClaude", "Claude.exe"));
+              winCandidates.push(nodePath.join(localAppData, "Programs", "Claude", "Claude.exe"));
+            }
+            if (programFiles) {
+              winCandidates.push(nodePath.join(programFiles, "Claude", "Claude.exe"));
+            }
+            const found = winCandidates.find((p) => existsSync(p));
             if (found) {
               claudeLaunchCmd = "cmd";
               claudeLaunchArgs = ["/c", "start", "", found];
