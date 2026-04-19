@@ -4,7 +4,7 @@
 
 The pitch in one line: if you picked Proton Mail because you didn't want a third party reading your inbox, you don't suddenly want to hand a chatbot OAuth access to that same inbox so it can triage on your behalf. The usual "connect your email" integrations route everything through someone else's servers and ask for blanket scopes. Hand-rolled IMAP inside the agent is worse — no permission boundary, no audit trail, and the model holds your credentials in its context window. Neither option respects why you chose the provider in the first place.
 
-`mailpouch` runs locally and speaks to Proton Bridge over a TLS socket on your own machine; nothing leaves the box unless you asked it to. Sixty-nine tools across reading, sending, drafts, folders, search, analytics, aliases, Proton Pass, and system control, tiered into `core` / `extended` / `complete` so an agent that only reads doesn't burn context on Bridge lifecycle tools it will never call. Every connecting client gets its own grant with folder allowlists, IP pins, per-tool rate caps, expiry, and account binding — all hashed-args in the audit log, never the values. Delete, trash, spam, and alias removal round-trip through MCP elicitation for human confirmation before they execute. That last part sounds like theatre until you watch an agent try to empty a folder and get blocked mid-call.
+`mailpouch` runs locally and speaks to Proton Bridge over a TLS socket on your own machine; nothing leaves the box unless you asked it to. 69 tools across reading, sending, drafts, folders, search, analytics, aliases, Proton Pass, and system control, tiered into `core` / `extended` / `complete` so an agent that only reads doesn't burn context on Bridge lifecycle tools it will never call. Every connecting client gets its own grant with folder allowlists, IP pins, per-tool rate caps, expiry, and account binding — all hashed-args in the audit log, never the values. Delete, trash, spam, and alias removal round-trip through MCP elicitation for human confirmation before they execute. That last part sounds like theatre until you watch an agent try to empty a folder and get blocked mid-call.
 
 It is real because the primitives are real: OAuth 2.1 with PKCE S256, RFC 7591 dynamic client registration, RFC 8707 resource indicators, RFC 9728 protected-resource metadata, or a static bearer token if you'd rather. Credentials live in the OS keychain. A local FTS5 index with BM25 ranking handles phrase, boolean, prefix, and column-filter queries so your search terms never leave your laptop. Desktop notifications use native `osascript` / `notify-send` / `powershell.exe` with no added dependency; webhook dispatch auto-detects CloudEvents 1.0, Slack, or Discord, signs with HMAC, and retries with eight-attempt exponential backoff. So how do you point it at your Bridge install and wire up a client?
 
@@ -14,7 +14,7 @@ It is real because the primitives are real: OAuth 2.1 with PKCE S256, RFC 7591 d
 [![Node.js](https://img.shields.io/badge/node-%3E%3D20.0.0-brightgreen.svg)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.7-blue.svg)](https://www.typescriptlang.org/)
 [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-1.29+-green.svg)](https://github.com/modelcontextprotocol/sdk)
-[![Tests](https://img.shields.io/badge/tests-1%2C525%20passing-brightgreen.svg)](#development)
+[![Tests](https://img.shields.io/badge/tests-1%2C566%20passing-brightgreen.svg)](#development)
 
 **Read, compose, and manage your encrypted Proton Mail inbox from any AI assistant — over stdio or remote HTTP — with human-controlled permissions.**
 
@@ -47,7 +47,7 @@ Your emails are decrypted on your own machine by Proton Bridge. This server neve
 
 ## Key Features
 
-- **67 tools** across 11 categories — reading, search, analytics, sending, drafts, scheduling, follow-up reminders, folder management, bulk actions, deletion, Bridge/server lifecycle, plus optional companion services (SimpleLogin aliases, Proton Pass, local FTS5 search). See [`src/config/schema.ts`](src/config/schema.ts) (`ALL_TOOLS`, `TOOL_CATEGORIES`) for the canonical inventory.
+- **69 tools** across 11 categories — reading, search, analytics, sending, drafts, scheduling, follow-up reminders, folder management, bulk actions, deletion, Bridge/server lifecycle, plus optional companion services (SimpleLogin aliases, Proton Pass, local FTS5 search). See [`src/config/schema.ts`](src/config/schema.ts) (`ALL_TOOLS`, `TOOL_CATEGORIES`) for the canonical inventory.
 - **Two transports** — stdio (default, Claude Desktop) and HTTP (remote / self-host). HTTP supports a static bearer **and/or** OAuth 2.1 with PKCE-S256, RFC 7591 Dynamic Client Registration, RFC 8414 authorization-server metadata, and RFC 9728 protected-resource metadata. Per-caller token-bucket rate limiting on every endpoint.
 - **Progressive tool tiering** — `core` / `extended` / `complete` controls how many tools land in the client's `ListTools` response, so context isn't burned on tools you don't use. Configurable via `toolTier` or `MAILPOUCH_TIER`.
 - **Destructive-tool confirmation** — uses MCP elicitation when the client supports it (Claude Desktop, Cline) so the user sees a prompt before any delete / trash / spam / `alias_delete` / `pass_get` runs. Falls back to a required `{ confirmed: true }` argument for clients without elicitation.
@@ -63,7 +63,7 @@ Your emails are decrypted on your own machine by Proton Bridge. This server neve
 - **Multi-account** — configure more than one Proton / IMAP account; hot-swap the active account from the Settings UI with no server restart. Tools accept an optional `account_id` argument to route a single call to a specific account. See [`src/accounts/`](src/accounts/).
 - **Per-agent grants** — each MCP client (identified by its OAuth `client_id`) is gated by its own approvable grant, with optional folder allowlists, IP pins, per-tool rate caps, expiry, and account binding. Separate from the global preset and the escalation flow. See [`src/agents/`](src/agents/).
 - **Live notifications** — desktop toasts (no extra deps) and outbound webhooks (CloudEvents / Slack / Discord, HMAC-signed, retried) fire on grant-state changes. See [`src/notifications/`](src/notifications/).
-- **1,525 tests passing** (Vitest); zero `any` type annotations in production source.
+- **1,566 tests passing** (Vitest); zero `any` type annotations in production source.
 
 ---
 
@@ -283,11 +283,11 @@ Configuration is stored in `~/.mailpouch.json` and managed via the settings UI �
 
 ## Available Tools
 
-**67 tools across 11 categories.** This README lists categories and counts; see [`src/config/schema.ts`](src/config/schema.ts) (`ALL_TOOLS` and `TOOL_CATEGORIES`) for the canonical, machine-checkable inventory.
+**69 tools across 11 categories.** This README lists categories and counts; see [`src/config/schema.ts`](src/config/schema.ts) (`ALL_TOOLS` and `TOOL_CATEGORIES`) for the canonical, machine-checkable inventory.
 
 | Category | Tools | Default tier | Risk | Permission required |
 |---|---:|---|---|---|
-| Reading | 12 | `core` | safe | always available |
+| Reading | 14 | `core` | safe | always available |
 | Sending | 4 | `core` | moderate | `supervised`, `send_only`, `full` |
 | Analytics | 4 | `core` | safe | always available |
 | System | 4 | `core` | safe | always available |
@@ -525,7 +525,7 @@ npm install
 
 npm run build          # compile TypeScript to dist/
 npm run dev            # watch mode (recompiles on save)
-npm run test           # run test suite (Vitest, 1,525 tests)
+npm run test           # run test suite (Vitest, 1,566 tests)
 npm run test:coverage  # coverage report
 npm run lint           # TypeScript type check (tsc --noEmit)
 npm run settings       # start standalone settings UI (after build)

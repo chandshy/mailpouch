@@ -1,7 +1,7 @@
 {
   "name": "mailpouch",
   "version": "2.2.0",
-  "description": "mailpouch — MCP server that exposes Proton Mail via Proton Bridge. 51 tools, Resources, and Prompts for agentic email management with user-initiated permission controls.",
+  "description": "mailpouch — MCP server that exposes Proton Mail via Proton Bridge. 69 tools, Resources, and Prompts for agentic email management with user-initiated permission controls.",
   "type": "module",
   "main": "dist/index.js",
   "bin": {

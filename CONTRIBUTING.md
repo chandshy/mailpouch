@@ -131,8 +131,6 @@ src/
     └── tracer.ts               # Lightweight request tracing
 
 docs/
-├── agentic-mcp-design-review.md
-├── proton-bridge-gaps.md
 ├── proton-bridge-imap.md
 ├── proton-bridge-overview.md
 ├── proton-bridge-security-model.md
