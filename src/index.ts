@@ -1601,8 +1601,66 @@ let _settingsUrl:     string  = "";
 let _trayInstance:    InstanceType<typeof SysTrayClass> | null = null;
 const _trayRequire = _createRequire(import.meta.url);
 
+/**
+ * Probe whether a mailpouch settings UI is already serving on `port`.
+ * Returns the base URL if the port is occupied by another mailpouch UI
+ * (identified by a valid `/api/status` response with the expected shape),
+ * or null if the port is free or occupied by something else.
+ *
+ * Used so we can defer to a user-run `mailpouch-settings` daemon instead
+ * of retrying + warning — the common "standalone settings UI plus stdio
+ * MCP in separate processes" setup was previously noisy.
+ */
+async function _probeExistingMailpouchUi(port: number): Promise<string | null> {
+  const http = await import("node:http");
+  return new Promise<string | null>((resolve) => {
+    let settled = false;
+    const finish = (url: string | null): void => {
+      if (settled) return;
+      settled = true;
+      resolve(url);
+    };
+    const req = http.request(
+      { host: "127.0.0.1", port, path: "/api/status", method: "GET", timeout: 750 },
+      (res) => {
+        let body = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk: string) => { body += chunk; if (body.length > 4096) res.destroy(); });
+        res.on("end", () => {
+          try {
+            const parsed = JSON.parse(body) as Record<string, unknown>;
+            if (typeof parsed.hasConfig === "boolean") {
+              finish(`http://localhost:${port}`);
+              return;
+            }
+          } catch { /* not JSON — not a mailpouch UI */ }
+          finish(null);
+        });
+        res.on("error", () => finish(null));
+      },
+    );
+    req.on("error", () => finish(null));
+    req.on("timeout", () => { req.destroy(); finish(null); });
+    req.end();
+  });
+}
+
 async function _startSettingsServerDaemon(): Promise<void> {
   const port = config.settingsPort ?? 8765;
+
+  // If a user-run `mailpouch-settings` instance is already serving on this
+  // port, reuse it silently rather than retry-and-warn. Probes with a short
+  // GET /api/status — any non-mailpouch listener (e.g. `python3 -m http.server`
+  // on the same port) responds with a different shape and falls through to
+  // the normal startup-then-EADDRINUSE path where the warning is accurate.
+  const existing = await _probeExistingMailpouchUi(port);
+  if (existing) {
+    _settingsUrl     = existing;
+    _settingsEnabled = true;
+    logger.info(`Reusing existing Settings UI at ${existing}`, "MCPServer");
+    return;
+  }
+
   const maxAttempts = 5;
   const retryMs     = 1000;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -1618,6 +1676,16 @@ async function _startSettingsServerDaemon(): Promise<void> {
       if (isInUse && attempt < maxAttempts) {
         logger.debug(`Settings UI port ${port} in use, retrying (${attempt}/${maxAttempts})…`, "MCPServer");
         await new Promise(r => setTimeout(r, retryMs));
+      } else if (isInUse) {
+        // Exhausted retries on a port held by something that isn't a mailpouch
+        // UI (otherwise _probeExistingMailpouchUi would have returned a URL).
+        // Make the warning actionable rather than generic.
+        logger.warn(
+          `Settings UI could not bind port ${port} — another process is using it (not a mailpouch instance). ` +
+          `Change settingsPort in ~/.mailpouch.json (or set the PORT env var) and restart to pick a free port.`,
+          "MCPServer",
+        );
+        return;
       } else {
         logger.warn("Settings UI failed to start", "MCPServer", err);
         return;
