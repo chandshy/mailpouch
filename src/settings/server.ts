@@ -4186,8 +4186,38 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
           };
         }
 
-        // Try to store credentials in OS keychain; fall back to config file
-        const credStorage = await saveConfigWithCredentials(current);
+        // Try to store credentials in OS keychain; fall back to config file.
+        // saveConfigWithCredentials mutates `current` — it blanks the password
+        // in the file when the keychain save succeeds — so capture what was
+        // posted BEFORE the call, for in-process propagation below.
+        const postedPassword  = current.connection.password  || "";
+        const postedSmtpToken = current.connection.smtpToken || "";
+        const credStorage     = await saveConfigWithCredentials(current);
+
+        // Push the newly-saved credentials into the running AccountManager so
+        // the SMTP transporter and IMAP connection pick them up WITHOUT a
+        // restart. Without this, the UI "Save Configuration" button reports
+        // success, the keychain is updated, but the in-memory per-account
+        // SMTPService still holds whatever empty creds it was built with at
+        // module load — the next send/receive still fails with
+        // "Please configure the login" / "Missing credentials for PLAIN"
+        // until the user manually restarts the MCP.
+        //
+        // Only applies when the settings server is running in-process with
+        // the MCP (the common case). The standalone `mailpouch-settings`
+        // daemon has no AccountManager singleton; getAccountManager() returns
+        // null there and the update falls through silently — the MCP process
+        // will pick up the new creds on its own next startup via main().
+        try {
+          const mgr = getAccountManager();
+          if (mgr && (postedPassword || postedSmtpToken)) {
+            mgr.applyKeychainCredentials(postedPassword, postedSmtpToken);
+          }
+        } catch (e: unknown) {
+          // Non-fatal — save already succeeded; a restart will pick creds up.
+          logger.warn("Could not push fresh credentials to AccountManager; a restart will apply them", "SettingsServer", e);
+        }
+
         json(res, 200, { ok: true, credentialStorage: credStorage });
         return;
       }

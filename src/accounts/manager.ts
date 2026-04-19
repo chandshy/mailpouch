@@ -154,6 +154,58 @@ export class AccountManager extends EventEmitter {
     grantNotifications.emit("active-account-changed", { prev, next: accountId });
   }
 
+  /**
+   * Inject credentials freshly loaded from the OS keychain into every
+   * account that currently has an empty password slot. Patches the in-memory
+   * spec, the per-account SMTPService.config, and calls reinitialize() so
+   * the SMTP transporter is rebuilt with the credentials. IMAP picks up the
+   * new password automatically through connectAll() (which reads from the
+   * patched spec).
+   *
+   * Context: credentials are stored in the OS keychain (under
+   * service=mailpouch, account=bridge-password) rather than in the config
+   * file so ~/.mailpouch.json can be mode-0600 without also being a plaintext
+   * secret store. The AccountManager constructs services from the file-level
+   * registry at module load, BEFORE main() has read the keychain, which
+   * means every account spec starts with password = "". Without this
+   * propagation step the SMTP transporter auths with empty credentials and
+   * Bridge rejects with "Please configure the login" / "Missing credentials
+   * for PLAIN". This is specifically the regression the multi-account
+   * rollout introduced — the singleton-service world had module-level
+   * reinitialize() reading a single shared config that main() populated
+   * directly; per-account isolation broke that path.
+   *
+   * Accounts that already had a password (explicit in the file or
+   * previously propagated) are left alone; passing an empty string does
+   * nothing. Safe to call at boot after keychain load, and after every
+   * settings-UI credential save.
+   */
+  applyKeychainCredentials(password: string, smtpToken?: string): void {
+    if (!password && !smtpToken) return;
+    for (const [id, svcs] of this.perAccount) {
+      let mutated = false;
+      // Password: overwrite whenever the new value differs (covers both
+      // "empty → set after boot-time keychain load" and "rotated → replace
+      // old value after a settings-UI save"). Never overwrite to empty —
+      // that would nuke a good in-memory credential after a save that
+      // left the password field blank on purpose (user updated username
+      // only, for instance).
+      if (password && password !== svcs.spec.password) {
+        svcs.spec.password = password;
+        mutated = true;
+      }
+      if (smtpToken !== undefined && smtpToken !== svcs.spec.smtpToken) {
+        svcs.spec.smtpToken = smtpToken;
+        mutated = true;
+      }
+      if (mutated) {
+        svcs.smtp["config"] = specToRuntimeConfig(svcs.spec);
+        svcs.smtp.reinitialize();
+        logger.debug(`Applied keychain credentials to account "${id}"`, "AccountManager");
+      }
+    }
+  }
+
   /** Cleanly tear down every account's services. Called on shutdown. */
   async closeAll(): Promise<void> {
     for (const svcs of this.perAccount.values()) {
