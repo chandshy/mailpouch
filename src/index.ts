@@ -7,7 +7,7 @@
  * tool annotations, progress notifications, cursor-based pagination.
  */
 
-import { writeFileSync, existsSync, readFileSync } from "fs";
+import { writeFileSync, existsSync, readFileSync, chmodSync } from "fs";
 import { fileURLToPath as _fileURLToPath } from "url";
 import nodePath from "path";
 const _pkgVersion = (() => {
@@ -17,7 +17,6 @@ const _pkgVersion = (() => {
   } catch { return "unknown"; }
 })();
 import { homedir } from "os";
-import { deflateSync } from "zlib";
 import { createRequire as _createRequire } from "module";
 import { createConnection } from "net";
 import { spawn } from "child_process";
@@ -1509,89 +1508,13 @@ function trimForAnalytics(emails: EmailMessage[]): EmailMessage[] {
   }));
 }
 
-// ─── Daemon: Tray Icon Generation ────────────────────────────────────────────
-// Pure-Node PNG + ICO generation — no external dependencies.
-
-function _crc32(buf: Buffer): number {
-  const tbl = Array.from({ length: 256 }, (_, i) => {
-    let c = i;
-    for (let j = 0; j < 8; j++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
-    return c >>> 0;
-  });
-  let crc = 0xFFFFFFFF;
-  for (const b of buf) crc = (crc >>> 8) ^ tbl[(crc ^ b) & 0xFF];
-  return (~crc) >>> 0;
-}
-
-function _pngChunk(type: string, data: Buffer): Buffer {
-  const t   = Buffer.from(type, "ascii");
-  const len = Buffer.allocUnsafe(4); len.writeUInt32BE(data.length, 0);
-  const crc = Buffer.allocUnsafe(4); crc.writeUInt32BE(_crc32(Buffer.concat([t, data])), 0);
-  return Buffer.concat([len, t, data, crc]);
-}
-
-function _makeEnvelopePng(): Buffer {
-  const W = 32, H = 32;
-  const rowSize = 1 + W * 4;
-  const raw = Buffer.allocUnsafe(H * rowSize);
-  for (let y = 0; y < H; y++) {
-    raw[y * rowSize] = 0;
-    for (let x = 0; x < W; x++) {
-      const o = y * rowSize + 1 + x * 4;
-      raw[o] = 109; raw[o + 1] = 74; raw[o + 2] = 255; raw[o + 3] = 255;
-    }
-  }
-  function setWhite(x: number, y: number) {
-    if (x < 0 || x >= W || y < 0 || y >= H) return;
-    const o = y * rowSize + 1 + x * 4;
-    raw[o] = 255; raw[o + 1] = 255; raw[o + 2] = 255; raw[o + 3] = 255;
-  }
-  function drawLine(ax: number, ay: number, bx: number, by: number) {
-    const dx = Math.abs(bx - ax), dy = Math.abs(by - ay);
-    const sx = ax < bx ? 1 : -1, sy = ay < by ? 1 : -1;
-    let err = dx - dy;
-    for (;;) {
-      setWhite(ax, ay);
-      if (ax === bx && ay === by) break;
-      const e2 = 2 * err;
-      if (e2 > -dy) { err -= dy; ax += sx; }
-      if (e2 <  dx) { err += dx; ay += sy; }
-    }
-  }
-  const x1 = 3, y1 = 9, x2 = 28, y2 = 22;
-  for (let x = x1; x <= x2; x++) { setWhite(x, y1); setWhite(x, y2); }
-  for (let y = y1; y <= y2; y++) { setWhite(x1, y); setWhite(x2, y); }
-  const cx = Math.floor((x1 + x2) / 2);
-  const cy = y1 + Math.floor((y2 - y1) * 0.5);
-  drawLine(x1, y1, cx, cy);
-  drawLine(x2, y1, cx, cy);
-  const ihdr = Buffer.allocUnsafe(13);
-  ihdr.writeUInt32BE(W, 0); ihdr.writeUInt32BE(H, 4);
-  ihdr[8] = 8; ihdr[9] = 6; ihdr[10] = 0; ihdr[11] = 0; ihdr[12] = 0;
-  return Buffer.concat([
-    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
-    _pngChunk("IHDR", ihdr),
-    _pngChunk("IDAT", deflateSync(raw)),
-    _pngChunk("IEND", Buffer.alloc(0)),
-  ]);
-}
-
-function _pngToIco(png: Buffer): Buffer {
-  const hdr   = Buffer.from([0, 0, 1, 0, 1, 0]);
-  const entry = Buffer.allocUnsafe(16);
-  entry[0] = 32; entry[1] = 32;
-  entry[2] = 0;  entry[3] = 0;
-  entry.writeUInt16LE(1,  4);
-  entry.writeUInt16LE(32, 6);
-  entry.writeUInt32LE(png.length, 8);
-  entry.writeUInt32LE(22, 12);
-  return Buffer.concat([hdr, entry, png]);
-}
-
-const _trayIconPng = _makeEnvelopePng();
-const TRAY_ICON_B64 = process.platform === "win32"
-  ? _pngToIco(_trayIconPng).toString("base64")
-  : _trayIconPng.toString("base64");
+// ─── Daemon: Tray Icon ───────────────────────────────────────────────────────
+// Icon generator lives in src/utils/icon.ts and produces a brand-matching
+// rounded-square gradient envelope (64×64 base, multi-resolution ICO on
+// Windows). Lazy-computed at module load so tests that import index.ts for
+// non-tray reasons don't pay the raster cost when they never touch it.
+import { makeTrayIconBase64 } from "./utils/icon.js";
+const TRAY_ICON_B64 = makeTrayIconBase64();
 
 // ─── Daemon: Settings Server + Tray State ────────────────────────────────────
 
@@ -1790,7 +1713,101 @@ async function _rebuildTray(): Promise<void> {
   }
 }
 
+/**
+ * Resolve the systray2 native binary path for this platform and ensure
+ * the executable bit is set in every location it might be spawned from.
+ *
+ * Why this is non-trivial despite being a one-liner in spirit:
+ *
+ *   - systray2 v2.1.4 ships the three binaries inside the npm tarball
+ *     with mode 0644. On Linux/macOS that's `spawn … EACCES` at tray
+ *     init, which surfaces as a useless "Tray icon failed to start"
+ *     WARN with no hint at the fix.
+ *   - systray2's own `copyDir` feature copies the binary to
+ *     `~/.cache/node-systray/<version>/` on boot and spawns from there,
+ *     so chmoding only the source in `node_modules/` doesn't help after
+ *     the first run — the cache copy keeps the mode from whenever the
+ *     copy happened (possibly a previous broken install).
+ *   - systray2's internal chmod uses fs-extra's `chmod(path, '+x')`
+ *     which silently becomes a no-op under modern fs-extra (mode arg
+ *     must be a number). So we can't rely on it either.
+ *
+ * Fix: chmod 0755 on BOTH the source binary in node_modules and the
+ * cache copy, whichever exists. Idempotent; no-op on Windows.
+ */
+function _preflightTrayBinary(): string | null {
+  const platform = process.platform;
+  const basename = platform === "win32" ? "tray_windows_release.exe" :
+                   platform === "darwin" ? "tray_darwin_release" :
+                                          "tray_linux_release";
+  let resolvedSource: string | null = null;
+  // 1. Source binary inside the systray2 package.
+  try {
+    const moduleDir = nodePath.dirname(_trayRequire.resolve("systray2/package.json"));
+    const srcPath = nodePath.join(moduleDir, "traybin", basename);
+    if (existsSync(srcPath)) {
+      resolvedSource = srcPath;
+      if (platform !== "win32") {
+        try { chmodSync(srcPath, 0o755); } catch { /* non-fatal */ }
+      }
+    }
+  } catch {
+    // require.resolve failed — systray2 not installed, caller handles it.
+  }
+  // 2. Cache copy (systray2's copyDir destination). Path shape is
+  //    ~/.cache/node-systray/<version>/<binary>; version pulled from the
+  //    systray2 package we just resolved above.
+  if (platform !== "win32") {
+    try {
+      const pkg = _trayRequire("systray2/package.json") as { version?: string };
+      const version = pkg.version ?? "0";
+      const cachePath = nodePath.join(
+        homedir(), ".cache", "node-systray", version, basename,
+      );
+      if (existsSync(cachePath)) {
+        try { chmodSync(cachePath, 0o755); } catch { /* non-fatal */ }
+      }
+    } catch { /* non-fatal */ }
+  }
+  return resolvedSource;
+}
+
+/**
+ * Return a one-line DEBUG reason the tray should NOT start on this host
+ * (headless Linux, arm64 without a compatible binary, etc.), or null if
+ * the host looks capable. Called before we even try to spawn systray2
+ * so we can skip cleanly instead of emitting a scary WARN.
+ */
+function _trayPreconditionSkip(): string | null {
+  const platform = process.platform;
+  // Linux needs an X11 or Wayland server. SSH sessions, CI boxes, and
+  // plain containers have neither — systray2 would block indefinitely
+  // waiting for a display to attach to.
+  if (platform === "linux" && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) {
+    return "no display environment (DISPLAY / WAYLAND_DISPLAY unset) — tray skipped";
+  }
+  // systray2 ships x86_64 binaries only. On Apple Silicon, node x86_64
+  // via Rosetta works; pure arm64 node cannot exec the darwin binary.
+  // Same on aarch64 Linux. The preflight resolves to null in that case.
+  if ((platform === "darwin" || platform === "linux") && process.arch === "arm64") {
+    const bin = _preflightTrayBinary();
+    if (!bin) {
+      return `arm64 ${platform} host — systray2 ships x86_64 binaries only; tray disabled (run via Rosetta, or see systray2 upstream for arm64 builds)`;
+    }
+  }
+  return null;
+}
+
 async function _initTray(): Promise<void> {
+  const skipReason = _trayPreconditionSkip();
+  if (skipReason) {
+    logger.debug(`Tray: ${skipReason}`, "MCPServer");
+    return;
+  }
+  // Fix the mode-0644 shipping bug before systray2's native spawn.
+  // Does nothing on Windows. Only matters the first time per install.
+  _preflightTrayBinary();
+
   type SysTrayConstructor = typeof SysTrayClass;
   let ST: SysTrayConstructor | undefined;
   try {
