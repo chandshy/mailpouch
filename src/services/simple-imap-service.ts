@@ -325,12 +325,8 @@ export class SimpleIMAPService {
 
       // Check if using localhost (Proton Bridge)
       const isLocalhost = host === 'localhost' || host === '127.0.0.1';
-      // Env-var priority: MAILPOUCH_* > PM_BRIDGE_MCP_* > PROTONMAIL_MCP_*.
-      // Legacy names honored through v3.0.
       const allowInsecure = allowInsecureBridge
-        || process.env.MAILPOUCH_INSECURE_BRIDGE === '1'
-        || process.env.PM_BRIDGE_MCP_INSECURE_BRIDGE === '1'
-        || process.env.PROTONMAIL_MCP_INSECURE_BRIDGE === '1';
+        || process.env.MAILPOUCH_INSECURE_BRIDGE === '1';
 
       // Build TLS options
       let tlsOptions: Record<string, unknown> | undefined;

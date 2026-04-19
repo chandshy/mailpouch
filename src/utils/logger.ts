@@ -2,7 +2,7 @@
  * Logging utility for mailpouch
  */
 
-import { appendFile, existsSync } from "fs";
+import { appendFile } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 import { LogEntry } from "../types/index.js";
@@ -18,22 +18,9 @@ import { LogEntry } from "../types/index.js";
 const SENSITIVE_KEYS = /(password|token|secret|apikey|api_key|verifier|credential|authorization|bridgecertpath|attachments|content|^body$)/i;
 
 export function getLogFilePath(): string {
-  // Env-var priority: MAILPOUCH_* > PM_BRIDGE_MCP_* > PROTONMAIL_*. First truthy
-  // wins. Legacy names honored through v3.0.
-  const envPath = process.env.MAILPOUCH_LOG_FILE
-    || process.env.PM_BRIDGE_MCP_LOG_FILE
-    || process.env.PROTONMAIL_LOG_FILE;
+  const envPath = process.env.MAILPOUCH_LOG_FILE;
   if (envPath) return envPath;
-  // Read-old/write-new: if a legacy log file exists and the new one doesn't,
-  // keep appending so existing tail/grep workflows don't suddenly go silent.
-  const preferred = join(homedir(), ".mailpouch.log");
-  const legacyV2 = join(homedir(), ".pm-bridge-mcp.log");
-  const legacyV1 = join(homedir(), ".protonmail-mcp.log");
-  if (!existsSync(preferred)) {
-    if (existsSync(legacyV2)) return legacyV2;
-    if (existsSync(legacyV1)) return legacyV1;
-  }
-  return preferred;
+  return join(homedir(), ".mailpouch.log");
 }
 
 export class Logger {

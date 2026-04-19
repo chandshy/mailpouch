@@ -116,42 +116,15 @@ interface PendingFile {
 // ─── File paths ────────────────────────────────────────────────────────────────
 
 export function getPendingFilePath(): string {
-  // Env-var priority: MAILPOUCH_* > PM_BRIDGE_MCP_* > PROTONMAIL_*. Legacy
-  // names honored through v3.0.
-  const envPath = process.env.MAILPOUCH_PENDING
-    ?? process.env.PM_BRIDGE_MCP_PENDING
-    ?? process.env.PROTONMAIL_MCP_PENDING;
+  const envPath = process.env.MAILPOUCH_PENDING;
   if (envPath) return envPath;
-  // Read-old/write-new: prefer the new path, but if a stale pending record
-  // is sitting in a legacy file (and the new one doesn't exist yet), keep
-  // honoring it so an in-flight escalation isn't dropped on the floor mid-flow.
-  const preferred = join(homedir(), ".mailpouch.pending.json");
-  const legacyV2 = join(homedir(), ".pm-bridge-mcp.pending.json");
-  const legacyV1 = join(homedir(), ".protonmail-mcp.pending.json");
-  if (!existsSync(preferred)) {
-    if (existsSync(legacyV2)) return legacyV2;
-    if (existsSync(legacyV1)) return legacyV1;
-  }
-  return preferred;
+  return join(homedir(), ".mailpouch.pending.json");
 }
 
 export function getAuditLogPath(): string {
-  // Env-var priority: MAILPOUCH_* > PM_BRIDGE_MCP_* > PROTONMAIL_*. Legacy
-  // names honored through v3.0.
-  const envPath = process.env.MAILPOUCH_AUDIT
-    ?? process.env.PM_BRIDGE_MCP_AUDIT
-    ?? process.env.PROTONMAIL_MCP_AUDIT;
+  const envPath = process.env.MAILPOUCH_AUDIT;
   if (envPath) return envPath;
-  // Read-old/write-new: append to a legacy file when it's the only one
-  // present so the audit trail stays continuous across the rename.
-  const preferred = join(homedir(), ".mailpouch.audit.jsonl");
-  const legacyV2 = join(homedir(), ".pm-bridge-mcp.audit.jsonl");
-  const legacyV1 = join(homedir(), ".protonmail-mcp.audit.jsonl");
-  if (!existsSync(preferred)) {
-    if (existsSync(legacyV2)) return legacyV2;
-    if (existsSync(legacyV1)) return legacyV1;
-  }
-  return preferred;
+  return join(homedir(), ".mailpouch.audit.jsonl");
 }
 
 // ─── File I/O ─────────────────────────────────────────────────────────────────
