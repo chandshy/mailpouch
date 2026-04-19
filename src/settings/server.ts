@@ -19,7 +19,7 @@ import https from "https";
 import os from "os";
 import nodePath from "path";
 import { fileURLToPath } from "url";
-import { readFileSync, writeFileSync, renameSync, existsSync, statSync, openSync, readSync, closeSync } from "fs";
+import { readFileSync, writeFileSync, renameSync, existsSync, statSync, openSync, readSync, closeSync, chmodSync } from "fs";
 import { spawn, spawnSync } from "child_process";
 import { Socket } from "net";
 import { randomBytes, timingSafeEqual } from "crypto";
@@ -154,27 +154,26 @@ function buildHtml(configPath: string, csrfToken: string, runningPort = 8765): s
     process.platform === "win32"  ? "%APPDATA%\\protonmail\\bridge-v3\\cert.pem" :
     process.platform === "darwin" ? "~/Library/Application Support/protonmail/bridge-v3/cert.pem" :
                                     "~/.config/protonmail/bridge-v3/cert.pem";
-  const certPlatformHint = `Default export location: <code style="background:var(--surface3);padding:1px 5px;border-radius:3px;font-size:11px">${certBrowsePlaceholder}</code>. In-place Bridge cert: <code style="background:var(--surface3);padding:1px 5px;border-radius:3px;font-size:11px">${certInternalPath}</code>`;
-  // Safe-for-attribute version (double-quotes and other HTML metacharacters
-  // escaped) so we can interpolate into `placeholder="..."` without breaking
-  // the attribute on non-ASCII home directories.
-  const certBrowsePlaceholderAttr = certBrowsePlaceholder
+  // HTML-escape both paths before interpolating them into the hint / attribute:
+  // a home directory containing `<`, `&`, or `"` (legal in POSIX path names)
+  // would otherwise break the page or open an XSS vector. Same escape chain
+  // already applied to `configPath` further down.
+  const escapeHtml = (s: string): string => s
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+  const certBrowsePlaceholderAttr = escapeHtml(certBrowsePlaceholder);
+  const certInternalPathAttr = escapeHtml(certInternalPath);
+  const certPlatformHint = `Default export location: <code style="background:var(--surface3);padding:1px 5px;border-radius:3px;font-size:11px">${certBrowsePlaceholderAttr}</code>. In-place Bridge cert: <code style="background:var(--surface3);padding:1px 5px;border-radius:3px;font-size:11px">${certInternalPathAttr}</code>`;
   // configPath comes from process.env.MAILPOUCH_CONFIG and is injected
   // directly into two <code> elements via template-literal interpolation.
   // A path like `/home/u/<script>alert(1)</script>.json` (set by a malicious
   // env var or via path manipulation) would produce XSS in the settings page.
-  // HTML-escape the path before insertion.
-  const safeConfigPath = configPath
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
+  // HTML-escape the path before insertion (via the same escapeHtml helper
+  // used above for cert paths).
+  const safeConfigPath = escapeHtml(configPath);
 
   return `<!DOCTYPE html>
 <!-- NEW WIZARD UI -->
@@ -4435,9 +4434,8 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
       // canonical server-managed cert location.
       if (method === "POST" && path === "/api/upload-bridge-cert") {
         if (!requireCsrf(req, res)) return;
-        if (lan && accessToken && !hasValidAccessToken(req, url, accessToken)) {
-          json(res, 401, { error: "Access denied." }); return;
-        }
+        // LAN access-token gate is enforced globally at line ~4016 for every
+        // non-"/" path, so no per-endpoint check needed here.
         try {
           // Hard cap to prevent memory exhaustion on runaway uploads — a real
           // PEM cert is well under 10 KB, so 256 KB is a generous ceiling.
@@ -4450,7 +4448,12 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
           }
           const destPath = nodePath.join(os.homedir(), ".mailpouch-bridge-cert.pem");
           writeFileSync(destPath, text, { encoding: "utf8", mode: 0o600 });
-          json(res, 200, { ok: true, path: destPath, size: text.length });
+          // writeFileSync's `mode` only applies on first creation. If the
+          // file already existed with broader perms, tighten it now —
+          // otherwise the endpoint's 0600 contract silently regresses
+          // whenever the user re-uploads. chmod is a no-op on Windows.
+          try { chmodSync(destPath, 0o600); } catch { /* platform may not support chmod */ }
+          json(res, 200, { ok: true, path: destPath, size: Buffer.byteLength(text, "utf8") });
         } catch (e: unknown) {
           const msg = e instanceof Error ? e.message : String(e);
           if ((e as { code?: string })?.code === "TOO_LARGE") {
