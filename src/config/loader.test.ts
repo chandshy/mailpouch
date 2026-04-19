@@ -169,88 +169,26 @@ describe("defaultConfig", () => {
 });
 
 describe("getConfigPath", () => {
-  const ENV_KEYS = ["MAILPOUCH_CONFIG", "PM_BRIDGE_MCP_CONFIG", "PROTONMAIL_MCP_CONFIG"] as const;
   function withCleanEnv<T>(fn: () => T): T {
-    const saved: Record<string, string | undefined> = {};
-    for (const k of ENV_KEYS) { saved[k] = process.env[k]; delete process.env[k]; }
+    const saved = process.env.MAILPOUCH_CONFIG;
+    delete process.env.MAILPOUCH_CONFIG;
     try { return fn(); } finally {
-      for (const k of ENV_KEYS) {
-        if (saved[k] !== undefined) process.env[k] = saved[k];
-        else delete process.env[k];
-      }
+      if (saved !== undefined) process.env.MAILPOUCH_CONFIG = saved;
+      else delete process.env.MAILPOUCH_CONFIG;
     }
   }
 
-  it("returns the new ~/.mailpouch.json default when no env var is set and no legacy file exists", () => {
-    const existsMock = vi.mocked(existsSync);
-    existsMock.mockReturnValue(false);
+  it("returns the ~/.mailpouch.json default when MAILPOUCH_CONFIG is unset", () => {
     withCleanEnv(() => {
       expect(getConfigPath()).toBe(join(homedir(), ".mailpouch.json"));
     });
-    existsMock.mockReset();
   });
 
-  it("falls back to ~/.pm-bridge-mcp.json when only the v2.1 legacy path exists", () => {
-    const existsMock = vi.mocked(existsSync);
-    const legacy = join(homedir(), ".pm-bridge-mcp.json");
-    existsMock.mockImplementation((p: unknown) => p === legacy);
-    withCleanEnv(() => {
-      expect(getConfigPath()).toBe(legacy);
-    });
-    existsMock.mockReset();
-  });
-
-  it("falls back to ~/.protonmail-mcp.json when only the original legacy path exists", () => {
-    const existsMock = vi.mocked(existsSync);
-    const legacy = join(homedir(), ".protonmail-mcp.json");
-    existsMock.mockImplementation((p: unknown) => p === legacy);
-    withCleanEnv(() => {
-      expect(getConfigPath()).toBe(legacy);
-    });
-    existsMock.mockReset();
-  });
-
-  it("prefers the v2.1 legacy path over the original when both legacies exist", () => {
-    const existsMock = vi.mocked(existsSync);
-    const pmBridge = join(homedir(), ".pm-bridge-mcp.json");
-    const proton = join(homedir(), ".protonmail-mcp.json");
-    existsMock.mockImplementation((p: unknown) => p === pmBridge || p === proton);
-    withCleanEnv(() => {
-      expect(getConfigPath()).toBe(pmBridge);
-    });
-    existsMock.mockReset();
-  });
-
-  it("respects MAILPOUCH_CONFIG env var when path is within home dir (new name wins)", () => {
+  it("respects MAILPOUCH_CONFIG env var when path is within home dir", () => {
     withCleanEnv(() => {
       const customPath = join(homedir(), "custom-mailpouch.json");
       process.env.MAILPOUCH_CONFIG = customPath;
       expect(getConfigPath()).toBe(customPath);
-    });
-  });
-
-  it("honors PM_BRIDGE_MCP_CONFIG when MAILPOUCH_CONFIG is absent", () => {
-    withCleanEnv(() => {
-      const customPath = join(homedir(), "custom-v21.json");
-      process.env.PM_BRIDGE_MCP_CONFIG = customPath;
-      expect(getConfigPath()).toBe(customPath);
-    });
-  });
-
-  it("honors PROTONMAIL_MCP_CONFIG when the newer env names are absent", () => {
-    withCleanEnv(() => {
-      const customPath = join(homedir(), "custom-v1.json");
-      process.env.PROTONMAIL_MCP_CONFIG = customPath;
-      expect(getConfigPath()).toBe(customPath);
-    });
-  });
-
-  it("MAILPOUCH_CONFIG wins when every alias is set (priority chain)", () => {
-    withCleanEnv(() => {
-      process.env.MAILPOUCH_CONFIG = join(homedir(), "a.json");
-      process.env.PM_BRIDGE_MCP_CONFIG = join(homedir(), "b.json");
-      process.env.PROTONMAIL_MCP_CONFIG = join(homedir(), "c.json");
-      expect(getConfigPath()).toBe(join(homedir(), "a.json"));
     });
   });
 

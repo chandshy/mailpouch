@@ -95,4 +95,4 @@ other processes and shell history. Run `npm run settings` to open the settings U
 - `bridgeCertPath` — path to the TLS certificate exported from Bridge → Settings → Export TLS certificates. Leave empty to skip cert validation (not recommended).
 - `tlsMode` — `"starttls"` (default, correct for Bridge on ports 1025/1143) or `"ssl"` (implicit TLS, for ports 465/993 if Bridge is configured for SSL mode).
 
-The config file path can be overridden with the `MAILPOUCH_CONFIG` environment variable (must point to a path within the home directory). The legacy `PM_BRIDGE_MCP_CONFIG` and `PROTONMAIL_MCP_CONFIG` names are still accepted through v3.0.
+The config file path can be overridden with the `MAILPOUCH_CONFIG` environment variable (must point to a path within the home directory).

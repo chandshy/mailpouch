@@ -12,21 +12,12 @@
  */
 
 import type { ServerConfig } from "../config/schema.js";
-import { logger } from "../utils/logger.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const SERVICE_NAME = "mailpouch";
-/**
- * Legacy keychain service names we migrate away from at startup. Priority
- * order (first hit wins when both slots still exist under legacy names):
- *   1. v2.1 rename window — `pm-bridge-mcp`
- *   2. original — `protonmail-mcp-server`
- */
-const LEGACY_SERVICE_NAMES = ["pm-bridge-mcp", "protonmail-mcp-server"] as const;
 const KEY_PASSWORD = "bridge-password";
 const KEY_SMTP_TOKEN = "smtp-token";
-const ACCOUNT_KEYS = [KEY_PASSWORD, KEY_SMTP_TOKEN] as const;
 
 // ─── Lazy @napi-rs/keyring loading ────────────────────────────────────────────
 
@@ -178,76 +169,4 @@ export async function migrateFromConfig(
   saveConfigFn(config);
 
   return true;
-}
-
-// ─── Legacy keychain migration ────────────────────────────────────────────────
-
-export interface LegacyMigrationResult {
-  /** Entries copied from a legacy service name to `mailpouch`. */
-  migrated: number;
-  /**
-   * Legacy entries left in place because the `mailpouch` slot was already
-   * populated. Surfaces when a user manually added the new name and then
-   * the migration ran; we never overwrite the authoritative slot.
-   */
-  conflicts: number;
-}
-
-/**
- * One-shot migration of legacy keychain entries to the `mailpouch` service
- * name. Called once at server startup, before any `loadCredentialsFromKeychain`.
- *
- * For each legacy service × each account-key we know about:
- *   - read the legacy entry; if empty, skip
- *   - if the `mailpouch` slot is empty, copy the value over and delete the
- *     legacy entry (migration)
- *   - if the `mailpouch` slot is already populated, leave the legacy entry
- *     in place (conflict — operator resolves manually) and DO NOT overwrite
- *
- * All failures are non-fatal — a stranded credential just means the user
- * re-enters their Bridge password via the settings UI.
- */
-export async function migrateLegacyKeychainEntries(): Promise<LegacyMigrationResult> {
-  const result: LegacyMigrationResult = { migrated: 0, conflicts: 0 };
-  let keyring: KeyringModule | null;
-  try {
-    keyring = await getKeyring();
-  } catch {
-    return result;
-  }
-  if (!keyring) return result;
-
-  for (const legacyService of LEGACY_SERVICE_NAMES) {
-    for (const account of ACCOUNT_KEYS) {
-      try {
-        const legacyEntry = new keyring.Entry(legacyService, account);
-        const legacyValue = legacyEntry.getPassword();
-        if (!legacyValue) continue;
-
-        const newEntry = new keyring.Entry(SERVICE_NAME, account);
-        const newValue = newEntry.getPassword();
-        if (newValue) {
-          // Already populated under mailpouch — do not overwrite; leave
-          // legacy entry as-is so the operator can decide.
-          result.conflicts += 1;
-          continue;
-        }
-
-        newEntry.setPassword(legacyValue);
-        try { legacyEntry.deletePassword(); } catch { /* non-fatal */ }
-        logger.info(
-          `Keychain: migrated ${account} from '${legacyService}' to 'mailpouch'`,
-          "Keychain",
-        );
-        result.migrated += 1;
-      } catch (err) {
-        logger.debug(
-          `Keychain: migration probe failed for ${legacyService}/${account}`,
-          "Keychain",
-          err,
-        );
-      }
-    }
-  }
-  return result;
 }

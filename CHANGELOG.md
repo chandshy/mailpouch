@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+### Removed (breaking)
+- Legacy env-var aliases `PM_BRIDGE_MCP_*` and `PROTONMAIL_MCP_*` — only
+  `MAILPOUCH_*` is read now. Callers still setting the old names must update.
+- Legacy file-path fallbacks (`~/.pm-bridge-mcp-*`, `~/.protonmail-mcp-*`)
+  — the server now only reads/writes `~/.mailpouch*`. Installs that never
+  ran v2.2.0 must rename their config/scheduler/reminders files manually.
+- One-shot keychain migration from `protonmail-mcp-server` / `pm-bridge-mcp`
+  service entries to `mailpouch`. Users on those legacy entries must
+  re-enter their Bridge password via the settings UI.
+
 ## [2.2.0] — 2026-04-18
 ### Changed
 - **Product renamed to `mailpouch`** — the name better reflects the product's

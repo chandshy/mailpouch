@@ -68,13 +68,9 @@ export class SMTPService {
       ? this.config.smtp.smtpToken
       : this.config.smtp.password;
 
-    // Env-var priority: MAILPOUCH_* > PM_BRIDGE_MCP_* > PROTONMAIL_MCP_*. Legacy
-    // names honored through v3.0.
     const allowInsecure =
       this.config.smtp.allowInsecureBridge === true ||
-      process.env.MAILPOUCH_INSECURE_BRIDGE === "1" ||
-      process.env.PM_BRIDGE_MCP_INSECURE_BRIDGE === "1" ||
-      process.env.PROTONMAIL_MCP_INSECURE_BRIDGE === "1";
+      process.env.MAILPOUCH_INSECURE_BRIDGE === "1";
 
     // Build TLS options based on connection type
     let tlsOptions: Record<string, unknown>;
