@@ -215,6 +215,55 @@ describe("AccountManager", () => {
     expect(results[0]).toEqual({ id: "a", ok: false, error: "bridge down" });
     expect(results[1]).toEqual({ id: "b", ok: true });
   });
+
+  it("applyKeychainCredentials fills empty passwords on every account and reinits SMTP", () => {
+    mockRegistry.value = {
+      accounts: [mkSpec("a", { password: "" }), mkSpec("b", { password: "" })],
+      activeAccountId: "a",
+    };
+    const mgr = new AccountManager();
+    smtpReinit.mockClear();
+
+    mgr.applyKeychainCredentials("kc-password", "kc-token");
+
+    const list = mgr.list();
+    expect(list[0].spec.password).toBe("kc-password");
+    expect(list[1].spec.password).toBe("kc-password");
+    expect(list[0].spec.smtpToken).toBe("kc-token");
+    expect(list[1].spec.smtpToken).toBe("kc-token");
+    expect(smtpReinit).toHaveBeenCalledTimes(2);
+  });
+
+  it("applyKeychainCredentials replaces rotated passwords but never blanks a good one", () => {
+    mockRegistry.value = {
+      accounts: [mkSpec("a", { password: "old-pw" })],
+      activeAccountId: "a",
+    };
+    const mgr = new AccountManager();
+    smtpReinit.mockClear();
+
+    // Rotation case: new password differs → replace
+    mgr.applyKeychainCredentials("new-pw");
+    expect(mgr.list()[0].spec.password).toBe("new-pw");
+    expect(smtpReinit).toHaveBeenCalledTimes(1);
+
+    // Empty-string case: must NOT nuke the live credential
+    smtpReinit.mockClear();
+    mgr.applyKeychainCredentials("");
+    expect(mgr.list()[0].spec.password).toBe("new-pw");
+    expect(smtpReinit).toHaveBeenCalledTimes(0);
+  });
+
+  it("applyKeychainCredentials is a no-op when both inputs are empty", () => {
+    mockRegistry.value = {
+      accounts: [mkSpec("a")],
+      activeAccountId: "a",
+    };
+    const mgr = new AccountManager();
+    smtpReinit.mockClear();
+    mgr.applyKeychainCredentials("", undefined);
+    expect(smtpReinit).toHaveBeenCalledTimes(0);
+  });
 });
 
 describe("registerAccountManager / getAccountManager", () => {

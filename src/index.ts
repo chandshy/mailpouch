@@ -1960,6 +1960,14 @@ async function main() {
   // Rebuild the SMTP transporter now that credentials and cert path are loaded.
   // SMTPService is constructed at module load time (before config is read), so
   // its initial transporter has an empty password and no Bridge cert.
+  //
+  // This matters for BOTH the legacy module-level smtpService AND every
+  // per-account SMTPService inside the AccountManager. Keychain-stored
+  // credentials (the default) are only known after main() reads them above;
+  // before that every account spec had password = "". Push them down so
+  // IMAP/SMTP auth doesn't fail with "Please configure the login" / "Missing
+  // credentials for PLAIN".
+  accountManager.applyKeychainCredentials(config.smtp.password ?? "", config.smtp.smtpToken);
   smtpService.reinitialize();
 
   // ── Bridge reachability probe + optional auto-start ───────────────────────
