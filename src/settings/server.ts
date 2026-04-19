@@ -20,7 +20,7 @@ import os from "os";
 import nodePath from "path";
 import { fileURLToPath } from "url";
 import { readFileSync, writeFileSync, renameSync, existsSync, statSync, openSync, readSync, closeSync } from "fs";
-import { spawn } from "child_process";
+import { spawn, spawnSync } from "child_process";
 import { Socket } from "net";
 import { randomBytes, timingSafeEqual } from "crypto";
 import {
@@ -143,12 +143,27 @@ function buildHtml(configPath: string, csrfToken: string, runningPort = 8765): s
   const pkgNameJson     = JSON.stringify(pkgName);
   const runningPortJson = JSON.stringify(runningPort);
 
-  // Platform-specific Bridge cert hint — only show the relevant OS path
-  const certDefaultPath =
+  // Platform-specific cert path hint. Two paths are relevant:
+  //   1. Bridge's INTERNAL cert (advanced users who know the install layout)
+  //   2. The file the user gets when they click "Export TLS Certificate" in
+  //      Bridge, which defaults to their Downloads folder.
+  // We show (2) as the placeholder since that's the file most users reach
+  // for, and (1) as a hint line for operators who prefer the in-place cert.
+  const certBrowsePlaceholder = nodePath.join(os.homedir(), "Downloads", "cert.pem");
+  const certInternalPath =
     process.platform === "win32"  ? "%APPDATA%\\protonmail\\bridge-v3\\cert.pem" :
     process.platform === "darwin" ? "~/Library/Application Support/protonmail/bridge-v3/cert.pem" :
                                     "~/.config/protonmail/bridge-v3/cert.pem";
-  const certPlatformHint = `Default location: <code style="background:var(--surface3);padding:1px 5px;border-radius:3px;font-size:11px">${certDefaultPath}</code>`;
+  const certPlatformHint = `Default export location: <code style="background:var(--surface3);padding:1px 5px;border-radius:3px;font-size:11px">${certBrowsePlaceholder}</code>. In-place Bridge cert: <code style="background:var(--surface3);padding:1px 5px;border-radius:3px;font-size:11px">${certInternalPath}</code>`;
+  // Safe-for-attribute version (double-quotes and other HTML metacharacters
+  // escaped) so we can interpolate into `placeholder="..."` without breaking
+  // the attribute on non-ASCII home directories.
+  const certBrowsePlaceholderAttr = certBrowsePlaceholder
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
   // configPath comes from process.env.MAILPOUCH_CONFIG and is injected
   // directly into two <code> elements via template-literal interpolation.
   // A path like `/home/u/<script>alert(1)</script>.json` (set by a malicious
@@ -1049,8 +1064,13 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
         <div style="margin-bottom:20px">
           <div class="field">
             <label>Path to the exported cert.pem file <span style="color:var(--muted);font-weight:400">(optional)</span></label>
-            <input type="text" id="wiz-cert-path" placeholder="/path/to/cert.pem"
-              aria-label="Path to the exported cert.pem file">
+            <div style="display:flex;gap:8px;align-items:center">
+              <input type="text" id="wiz-cert-path" placeholder="${certBrowsePlaceholderAttr}"
+                aria-label="Path to the exported cert.pem file" style="flex:1">
+              <button class="btn btn-ghost" type="button" onclick="wizDetectCert()" style="white-space:nowrap" title="Scan home directory for cert.pem">Detect</button>
+              <button class="btn btn-ghost" type="button" onclick="document.getElementById('wiz-cert-file').click()" style="white-space:nowrap" title="Choose a cert.pem file from your disk">📁 Browse</button>
+              <input type="file" id="wiz-cert-file" accept=".pem,.crt" style="display:none" onchange="wizUploadCert(event)">
+            </div>
             <div class="hint">
               Export from Bridge → Help → Export TLS Certificate, then enter the path to <code style="background:var(--surface3);padding:1px 5px;border-radius:3px;font-size:11px">cert.pem</code>.<br>
               ${certPlatformHint}
@@ -1446,9 +1466,14 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
         <legend>Bridge TLS Certificate (optional but recommended)</legend>
         <div class="field">
           <label for="bridge-cert">Path to the exported cert.pem file</label>
-          <input type="text" id="bridge-cert" placeholder="/path/to/cert.pem">
+          <div style="display:flex;gap:8px;align-items:center">
+            <input type="text" id="bridge-cert" placeholder="${certBrowsePlaceholderAttr}" style="flex:1">
+            <button class="btn btn-ghost" type="button" onclick="detectCertPath()" style="white-space:nowrap" title="Scan home directory for cert.pem">Detect</button>
+            <button class="btn btn-ghost" type="button" onclick="document.getElementById('bridge-cert-file').click()" style="white-space:nowrap" title="Choose a cert.pem file from your disk">📁 Browse</button>
+            <input type="file" id="bridge-cert-file" accept=".pem,.crt" style="display:none" onchange="uploadCert(event, 'bridge-cert')">
+          </div>
           <div class="hint">
-            Export from Bridge → Help → Export TLS Certificate, then enter the path to <code>cert.pem</code>.<br>
+            Export from Bridge → Help → Export TLS Certificate, then click Browse to pick the file (or Detect to auto-scan your home directory).<br>
             ${certPlatformHint}
           </div>
         </div>
@@ -1604,7 +1629,12 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
       </div>
       <div class="field" style="margin-bottom:10px" id="af-cert-row">
         <label style="font-size:12px;color:#aaa">Bridge TLS cert path (Bridge accounts only)</label>
-        <input type="text" id="af-cert" placeholder="~/.config/protonmail/bridge-v3/cert.pem" style="width:100%;padding:6px;margin-top:4px;background:#222;color:#eee;border:1px solid #444;border-radius:6px;box-sizing:border-box">
+        <div style="display:flex;gap:6px;align-items:center;margin-top:4px">
+          <input type="text" id="af-cert" placeholder="${certBrowsePlaceholderAttr}" style="flex:1;padding:6px;background:#222;color:#eee;border:1px solid #444;border-radius:6px;box-sizing:border-box">
+          <button class="btn btn-ghost" type="button" onclick="detectCertPath('af-cert')" style="white-space:nowrap;padding:6px 10px" title="Scan home directory for cert.pem">Detect</button>
+          <button class="btn btn-ghost" type="button" onclick="document.getElementById('af-cert-file').click()" style="white-space:nowrap;padding:6px 10px" title="Choose a cert.pem file from your disk">📁 Browse</button>
+          <input type="file" id="af-cert-file" accept=".pem,.crt" style="display:none" onchange="uploadCert(event, 'af-cert')">
+        </div>
       </div>
       <input type="hidden" id="af-id">
       <input type="hidden" id="af-provider">
@@ -2721,6 +2751,67 @@ button.btn:disabled { opacity: .4; cursor: not-allowed; }
   window.wizSearchBridgePath = function() {
     return _doSearchBridge('wiz-bridge-path', 'wiz-bridge-path-hint', 'wiz-search-bridge-btn');
   };
+
+  // ── Bridge TLS cert auto-detect + upload ──────────────────────────────────
+  // Paired helpers so the Setup tab, the setup wizard, and the Account form
+  // all share a single path-detection + file-upload flow. Scanning candidate
+  // home-directory locations avoids manual path typing in the common case;
+  // the Browse-and-upload flow handles the hard case (arbitrary location)
+  // without the user ever seeing an absolute path. Both update the given
+  // text input so the rest of the settings save path is unchanged.
+  window.detectCertPath = async function(inputId) {
+    inputId = inputId || 'bridge-cert';
+    const input = document.getElementById(inputId);
+    if (!input) return;
+    try {
+      const r = await fetch('/api/find-bridge-cert', { headers: { 'X-CSRF-Token': CSRF } });
+      const d = await r.json();
+      if (d.found) {
+        input.value = d.path;
+        input.dispatchEvent(new Event('change'));
+      } else {
+        alert('No cert.pem found under your home directory. Click Browse to pick one manually, or export a cert via Bridge → Help → Export TLS Certificate.');
+      }
+    } catch (e) {
+      alert('Detection failed: ' + (e && e.message ? e.message : e));
+    }
+  };
+  window.wizDetectCert = function() { return window.detectCertPath('wiz-cert-path'); };
+
+  window.uploadCert = async function(ev, targetInputId) {
+    const file = ev.target && ev.target.files && ev.target.files[0];
+    if (!file) return;
+    // Size-guard client-side too so we don't waste a round-trip on a
+    // multi-megabyte accidental selection. Matches the server's 256 KB cap.
+    if (file.size > 256 * 1024) {
+      alert('File too large (max 256 KB for a PEM cert).');
+      ev.target.value = '';
+      return;
+    }
+    try {
+      const text = await file.text();
+      const r = await fetch('/api/upload-bridge-cert', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-pem-file', 'X-CSRF-Token': CSRF },
+        body: text,
+      });
+      const d = await r.json();
+      if (r.ok && d.path) {
+        const input = document.getElementById(targetInputId);
+        if (input) {
+          input.value = d.path;
+          input.dispatchEvent(new Event('change'));
+        }
+      } else {
+        alert('Upload failed: ' + (d.error || ('HTTP ' + r.status)));
+      }
+    } catch (e) {
+      alert('Upload error: ' + (e && e.message ? e.message : e));
+    } finally {
+      ev.target.value = ''; // allow re-picking the same file
+    }
+  };
+  window.wizUploadCert = function(ev) { return window.uploadCert(ev, 'wiz-cert-path'); };
 
   window.testConnections = async function() {
     const btn = document.getElementById('test-btn');
@@ -4287,8 +4378,87 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
             "/opt/proton-bridge/proton-bridge",
           ];
         }
+        let found = candidates.find(p => existsSync(p)) ?? null;
+        // POSIX fallback: `which` catches non-standard install prefixes
+        // (Homebrew pour, pacman AUR package, Flatpak bin shim, etc.) that
+        // our hardcoded candidate list misses. Quick sync call — `which`
+        // returns in <10 ms on all modern POSIX systems.
+        if (!found && platform !== "win32") {
+          for (const name of ["proton-bridge", "protonmail-bridge", "bridge"]) {
+            try {
+              const result = spawnSync("which", [name], { encoding: "utf8", timeout: 2000 });
+              const path = result.stdout?.trim();
+              if (result.status === 0 && path && existsSync(path)) {
+                found = path;
+                break;
+              }
+            } catch { /* which unavailable — nothing more to try */ }
+          }
+        }
+        json(res, 200, { found: found !== null, path: found, candidates });
+        return;
+      }
+
+      // ── GET /api/find-bridge-cert ─────────────────────────────────────────
+      // Scans the user's home directory for `cert.pem` at the locations most
+      // commonly used by Bridge's "Export TLS Certificate" dialog. Uses
+      // path.join so the paths are platform-correct (backslashes on Windows,
+      // forward slashes elsewhere).
+      if (method === "GET" && path === "/api/find-bridge-cert") {
+        const home = os.homedir();
+        const candidates: string[] = [
+          nodePath.join(home, "Downloads", "cert.pem"),
+          nodePath.join(home, "Documents", "cert.pem"),
+          nodePath.join(home, "Desktop", "cert.pem"),
+          nodePath.join(home, "cert.pem"),
+        ];
+        // Also check Bridge's in-place cert (rarely used by end users but
+        // occasionally the easier option on dev boxes).
+        if (process.platform === "win32" && process.env.APPDATA) {
+          candidates.push(nodePath.join(process.env.APPDATA, "protonmail", "bridge-v3", "cert.pem"));
+        } else if (process.platform === "darwin") {
+          candidates.push(nodePath.join(home, "Library", "Application Support", "protonmail", "bridge-v3", "cert.pem"));
+        } else {
+          candidates.push(nodePath.join(home, ".config", "protonmail", "bridge-v3", "cert.pem"));
+        }
         const found = candidates.find(p => existsSync(p)) ?? null;
         json(res, 200, { found: found !== null, path: found, candidates });
+        return;
+      }
+
+      // ── POST /api/upload-bridge-cert ──────────────────────────────────────
+      // Accepts a PEM-encoded certificate in the request body (text/plain or
+      // application/x-pem-file), validates the PEM preamble, and writes it
+      // to `~/.mailpouch-bridge-cert.pem` at mode 0600. Returns the resolved
+      // path so the UI can populate the cert-path field without the user
+      // typing anything. The upload replaces any previous copy — this is the
+      // canonical server-managed cert location.
+      if (method === "POST" && path === "/api/upload-bridge-cert") {
+        if (!requireCsrf(req, res)) return;
+        if (lan && accessToken && !hasValidAccessToken(req, url, accessToken)) {
+          json(res, 401, { error: "Access denied." }); return;
+        }
+        try {
+          // Hard cap to prevent memory exhaustion on runaway uploads — a real
+          // PEM cert is well under 10 KB, so 256 KB is a generous ceiling.
+          // readBodySafe returns a string (PEM is ASCII) already size-capped.
+          const MAX_CERT_BYTES = 256 * 1024;
+          const text = await readBodySafe(req, MAX_CERT_BYTES);
+          if (!text.includes("-----BEGIN CERTIFICATE-----") || !text.includes("-----END CERTIFICATE-----")) {
+            json(res, 400, { error: "Upload does not look like a PEM certificate (missing BEGIN/END markers)." });
+            return;
+          }
+          const destPath = nodePath.join(os.homedir(), ".mailpouch-bridge-cert.pem");
+          writeFileSync(destPath, text, { encoding: "utf8", mode: 0o600 });
+          json(res, 200, { ok: true, path: destPath, size: text.length });
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e);
+          if ((e as { code?: string })?.code === "TOO_LARGE") {
+            json(res, 413, { error: "Cert file too large (max 256 KB)." });
+          } else {
+            json(res, 500, { error: `Failed to save certificate: ${msg}` });
+          }
+        }
         return;
       }
 
