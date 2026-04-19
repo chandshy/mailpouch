@@ -1598,11 +1598,88 @@ const TRAY_ICON_B64 = process.platform === "win32"
 let _settingsStop:    (() => Promise<void>) | null = null;
 let _settingsEnabled: boolean = false;
 let _settingsUrl:     string  = "";
+/**
+ * True when `_settingsUrl` points at a standalone `mailpouch-settings`
+ * daemon we did NOT spawn — the port was already owned by another
+ * mailpouch UI at boot, and we're deferring to it. The tray "Disable
+ * Settings UI" action must not try to kill a process we don't own; it
+ * just detaches our own references.
+ */
+let _settingsExternal: boolean = false;
 let _trayInstance:    InstanceType<typeof SysTrayClass> | null = null;
 const _trayRequire = _createRequire(import.meta.url);
 
+/**
+ * Probe whether a mailpouch settings UI is already serving on `port`.
+ * Returns the base URL if the port is occupied by another mailpouch UI
+ * (identified by a valid `/api/status` response with the expected shape),
+ * or null if the port is free or occupied by something else.
+ *
+ * Used so we can defer to a user-run `mailpouch-settings` daemon instead
+ * of retrying + warning — the common "standalone settings UI plus stdio
+ * MCP in separate processes" setup was previously noisy.
+ */
+async function _probeExistingMailpouchUi(port: number): Promise<string | null> {
+  const http = await import("node:http");
+  return new Promise<string | null>((resolve) => {
+    let settled = false;
+    const finish = (url: string | null): void => {
+      if (settled) return;
+      settled = true;
+      resolve(url);
+    };
+    const req = http.request(
+      { host: "127.0.0.1", port, path: "/api/status", method: "GET", timeout: 750 },
+      (res) => {
+        let body = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk: string) => {
+          body += chunk;
+          // Body-size cap: a legit /api/status payload is well under 256 B.
+          // Anything >4 KB is either a chatty non-mailpouch listener or an
+          // attempt to RAM-bomb the probe; either way, abort + resolve so
+          // the Promise doesn't hang when we tear the socket down (res
+          // destroy does not reliably emit 'end' on an abort path).
+          if (body.length > 4096) { res.destroy(); finish(null); }
+        });
+        res.on("end", () => {
+          try {
+            const parsed = JSON.parse(body) as Record<string, unknown>;
+            if (typeof parsed.hasConfig === "boolean") {
+              finish(`http://localhost:${port}`);
+              return;
+            }
+          } catch { /* not JSON — not a mailpouch UI */ }
+          finish(null);
+        });
+        res.on("error",   () => finish(null));
+        res.on("close",   () => finish(null));
+        res.on("aborted", () => finish(null));
+      },
+    );
+    req.on("error", () => finish(null));
+    req.on("timeout", () => { req.destroy(); finish(null); });
+    req.end();
+  });
+}
+
 async function _startSettingsServerDaemon(): Promise<void> {
   const port = config.settingsPort ?? 8765;
+
+  // If a user-run `mailpouch-settings` instance is already serving on this
+  // port, reuse it silently rather than retry-and-warn. Probes with a short
+  // GET /api/status — any non-mailpouch listener (e.g. `python3 -m http.server`
+  // on the same port) responds with a different shape and falls through to
+  // the normal startup-then-EADDRINUSE path where the warning is accurate.
+  const existing = await _probeExistingMailpouchUi(port);
+  if (existing) {
+    _settingsUrl      = existing;
+    _settingsEnabled  = true;
+    _settingsExternal = true;
+    logger.info(`Reusing existing Settings UI at ${existing}`, "MCPServer");
+    return;
+  }
+
   const maxAttempts = 5;
   const retryMs     = 1000;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -1618,6 +1695,20 @@ async function _startSettingsServerDaemon(): Promise<void> {
       if (isInUse && attempt < maxAttempts) {
         logger.debug(`Settings UI port ${port} in use, retrying (${attempt}/${maxAttempts})…`, "MCPServer");
         await new Promise(r => setTimeout(r, retryMs));
+      } else if (isInUse) {
+        // Exhausted retries. The probe didn't confirm a reusable mailpouch UI
+        // on this port, but that's not proof it ISN'T mailpouch — the
+        // standalone daemon in LAN mode gates /api/status on an access token
+        // (401s without it), and that's indistinguishable from "random
+        // listener". Phrase the warning honestly.
+        logger.warn(
+          `Settings UI could not bind port ${port} — another process is listening there and did not identify itself as mailpouch. ` +
+          `If it's a mailpouch-settings instance in LAN mode, this MCP will share it silently once you supply the access token. ` +
+          `Otherwise change settingsPort in ~/.mailpouch.json (or set the PORT env var) and restart to pick a free port.`,
+          "MCPServer",
+          err,
+        );
+        return;
       } else {
         logger.warn("Settings UI failed to start", "MCPServer", err);
         return;
@@ -1627,6 +1718,18 @@ async function _startSettingsServerDaemon(): Promise<void> {
 }
 
 async function _stopSettingsServerDaemon(): Promise<void> {
+  // When we're reusing a standalone `mailpouch-settings` instance we
+  // didn't spawn, there's no process for us to stop — just detach our
+  // references so the tray toggle state stays consistent. Killing it
+  // would be wrong (we don't own its lifetime) AND impossible (no stop
+  // function was ever handed to us).
+  if (_settingsExternal) {
+    logger.info("Detaching from external Settings UI (process keeps running)", "MCPServer");
+    _settingsExternal = false;
+    _settingsEnabled  = false;
+    _settingsUrl      = "";
+    return;
+  }
   if (_settingsStop) {
     try {
       await _settingsStop();
@@ -1636,6 +1739,7 @@ async function _stopSettingsServerDaemon(): Promise<void> {
     } finally {
       _settingsStop    = null;
       _settingsEnabled = false;
+      _settingsUrl     = "";
     }
   }
 }
