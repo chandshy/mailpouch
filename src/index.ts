@@ -7,7 +7,7 @@
  * tool annotations, progress notifications, cursor-based pagination.
  */
 
-import { writeFileSync, existsSync, readFileSync, chmodSync } from "fs";
+import { writeFileSync, existsSync, readFileSync } from "fs";
 import { fileURLToPath as _fileURLToPath } from "url";
 import nodePath from "path";
 const _pkgVersion = (() => {
@@ -1713,100 +1713,19 @@ async function _rebuildTray(): Promise<void> {
   }
 }
 
-/**
- * Resolve the systray2 native binary path for this platform and ensure
- * the executable bit is set in every location it might be spawned from.
- *
- * Why this is non-trivial despite being a one-liner in spirit:
- *
- *   - systray2 v2.1.4 ships the three binaries inside the npm tarball
- *     with mode 0644. On Linux/macOS that's `spawn … EACCES` at tray
- *     init, which surfaces as a useless "Tray icon failed to start"
- *     WARN with no hint at the fix.
- *   - systray2's own `copyDir` feature copies the binary to
- *     `~/.cache/node-systray/<version>/` on boot and spawns from there,
- *     so chmoding only the source in `node_modules/` doesn't help after
- *     the first run — the cache copy keeps the mode from whenever the
- *     copy happened (possibly a previous broken install).
- *   - systray2's internal chmod uses fs-extra's `chmod(path, '+x')`
- *     which silently becomes a no-op under modern fs-extra (mode arg
- *     must be a number). So we can't rely on it either.
- *
- * Fix: chmod 0755 on BOTH the source binary in node_modules and the
- * cache copy, whichever exists. Idempotent; no-op on Windows.
- */
-function _preflightTrayBinary(): string | null {
-  const platform = process.platform;
-  const basename = platform === "win32" ? "tray_windows_release.exe" :
-                   platform === "darwin" ? "tray_darwin_release" :
-                                          "tray_linux_release";
-  let resolvedSource: string | null = null;
-  // 1. Source binary inside the systray2 package.
-  try {
-    const moduleDir = nodePath.dirname(_trayRequire.resolve("systray2/package.json"));
-    const srcPath = nodePath.join(moduleDir, "traybin", basename);
-    if (existsSync(srcPath)) {
-      resolvedSource = srcPath;
-      if (platform !== "win32") {
-        try { chmodSync(srcPath, 0o755); } catch { /* non-fatal */ }
-      }
-    }
-  } catch {
-    // require.resolve failed — systray2 not installed, caller handles it.
-  }
-  // 2. Cache copy (systray2's copyDir destination). Path shape is
-  //    ~/.cache/node-systray/<version>/<binary>; version pulled from the
-  //    systray2 package we just resolved above.
-  if (platform !== "win32") {
-    try {
-      const pkg = _trayRequire("systray2/package.json") as { version?: string };
-      const version = pkg.version ?? "0";
-      const cachePath = nodePath.join(
-        homedir(), ".cache", "node-systray", version, basename,
-      );
-      if (existsSync(cachePath)) {
-        try { chmodSync(cachePath, 0o755); } catch { /* non-fatal */ }
-      }
-    } catch { /* non-fatal */ }
-  }
-  return resolvedSource;
-}
-
-/**
- * Return a one-line DEBUG reason the tray should NOT start on this host
- * (headless Linux, arm64 without a compatible binary, etc.), or null if
- * the host looks capable. Called before we even try to spawn systray2
- * so we can skip cleanly instead of emitting a scary WARN.
- */
-function _trayPreconditionSkip(): string | null {
-  const platform = process.platform;
-  // Linux needs an X11 or Wayland server. SSH sessions, CI boxes, and
-  // plain containers have neither — systray2 would block indefinitely
-  // waiting for a display to attach to.
-  if (platform === "linux" && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) {
-    return "no display environment (DISPLAY / WAYLAND_DISPLAY unset) — tray skipped";
-  }
-  // systray2 ships x86_64 binaries only. On Apple Silicon, node x86_64
-  // via Rosetta works; pure arm64 node cannot exec the darwin binary.
-  // Same on aarch64 Linux. The preflight resolves to null in that case.
-  if ((platform === "darwin" || platform === "linux") && process.arch === "arm64") {
-    const bin = _preflightTrayBinary();
-    if (!bin) {
-      return `arm64 ${platform} host — systray2 ships x86_64 binaries only; tray disabled (run via Rosetta, or see systray2 upstream for arm64 builds)`;
-    }
-  }
-  return null;
-}
-
 async function _initTray(): Promise<void> {
-  const skipReason = _trayPreconditionSkip();
+  // Preflight + precondition checks live in src/utils/tray.ts so the
+  // standalone settings daemon (src/settings-main.ts) shares the exact
+  // same boot hygiene — the systray2 chmod bug and headless/arm64 skip
+  // logic are properties of the platform, not of any specific entry point.
+  const { preflightTrayBinary, trayPreconditionSkip } = await import("./utils/tray.js");
+  const skipReason = trayPreconditionSkip();
   if (skipReason) {
     logger.debug(`Tray: ${skipReason}`, "MCPServer");
     return;
   }
   // Fix the mode-0644 shipping bug before systray2's native spawn.
-  // Does nothing on Windows. Only matters the first time per install.
-  _preflightTrayBinary();
+  preflightTrayBinary();
 
   type SysTrayConstructor = typeof SysTrayClass;
   let ST: SysTrayConstructor | undefined;
