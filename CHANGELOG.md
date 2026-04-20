@@ -5,7 +5,107 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [Unreleased] — 3.0.0
+
+### Security
+- **Per-account Bridge passwords now route through the OS keychain on every
+  save path** (#93). The Accounts-tab CRUD endpoints previously wrote
+  plaintext passwords into `~/.mailpouch.json`; they now store them under
+  `bridge-password:<acct-id>` / `smtp-token:<acct-id>` keychain entries
+  (same `mailpouch` service name as the legacy single-account key) and
+  scrub the on-disk JSON. Legacy installs with the suffix-less
+  `bridge-password` key continue to work via a back-compat read path.
+  The in-memory `AccountManager` is also refreshed on every save so the
+  MCP reconnects immediately — no restart needed.
+- CSRF session-expired responses carry a machine-readable `code:
+  "session_expired"` and the settings-UI JS auto-reloads the page on
+  403 instead of surfacing the cryptic raw error (#82).
+
+### Added
+- **Native system-tray binding** (`native/tray/`) via napi-rs around the
+  `tauri-apps/tray-icon` Rust crate — the same crate Tauri ships in
+  production. Renders correctly on modern GNOME, NSStatusBar, and
+  Shell_NotifyIcon; replaces the `systray2` Go binary wherever a
+  prebuilt is available. systray2 stays as a fallback on platforms
+  without a committed prebuilt yet. (#88, #89, #90, #91, #92)
+- Prebuilts for linux-x64-gnu, linux-arm64-gnu, darwin-arm64,
+  win32-x64-msvc, and win32-arm64-msvc. darwin-x64 (Intel Mac) falls
+  back to systray2 cleanly (the GNOME rendering bug doesn't affect
+  macOS). CI workflow `.github/workflows/build-native-tray.yml`
+  produces prebuilts for the full 6-target matrix on every push.
+- Brand-matching tray icon generator (`src/utils/icon.ts`): 64×64 base
+  with a `#6D4AFF` → `#9B6DFF` gradient + rounded corners, matching
+  the settings-UI `.logo-icon` CSS byte-for-byte. Windows ICO packs
+  16/32/48/64 sub-sizes for hi-DPI sharpness. (#88)
+- **Persistent tray via `mailpouch-settings`** — the standalone
+  entry point now carries its own tray icon for its lifetime. Users
+  add it to their OS autostart (systemd user unit / LaunchAgent /
+  Windows Startup folder) and get a tray that stays resident so
+  clicking "Open Settings" anytime brings the UI back. The MCP's
+  embedded tray coexists via a probe-then-reuse check (#86, #89).
+- Bridge cert auto-detect + file-picker upload in the settings UI
+  — every cert-path field on the Setup tab, first-run wizard, and
+  Accounts form gets a **Detect** button (scans `~/Downloads`,
+  `~/Documents`, `~/Desktop`, `~/`, and Bridge's per-OS in-place
+  location) and a **📁 Browse** button (native file picker → POST
+  to new `/api/upload-bridge-cert` → written to
+  `~/.mailpouch-bridge-cert.pem` at mode 0600). No manual path
+  typing required. (#83)
+- `/api/search-bridge` now falls back to `which proton-bridge /
+  protonmail-bridge / bridge` on POSIX when the hardcoded
+  candidate list misses — catches Debian/Ubuntu's
+  `/usr/bin/protonmail-bridge` and Homebrew/AUR/Flatpak installs.
+  (#83)
+
+### Changed
+- `SMTPService` constructor no longer throws when the configured
+  Bridge cert path is unreachable — the error is deferred to the
+  first `sendEmail()` / `verifyConnection()` call. Previously a
+  stale or wrong `bridgeCertPath` crashed the MCP at module load,
+  before stdio came up, leaving no way to surface a structured
+  error to the client. The new `SMTPService.initError` field
+  carries the actionable message and `get_connection_status` now
+  surfaces it in the `smtp.initError` response field. (#84)
+- `AccountManager` gains `rebuildFromRegistryAsync()` + an
+  `applyKeychainCredentials(password, smtpToken?)` method that
+  the boot path and settings-save endpoints use to push fresh
+  credentials into the per-account SMTP/IMAP services without
+  an MCP restart. Closes a regression introduced by the
+  multi-account registry rollout where keychain-stored
+  credentials were never propagated to per-account services.
+  (#87, #93)
+- Settings-UI startup now **probes the configured port for an
+  existing mailpouch instance** before retrying the bind. When a
+  standalone `mailpouch-settings` daemon is already listening, the
+  MCP logs "Reusing existing Settings UI at …" and silently shares
+  the port instead of emitting a four-retry WARN cycle. Non-
+  mailpouch listeners still get the actionable "another process is
+  using this port" warning. (#86)
+
+### Fixed
+- Six detached-spawn sites (`.unref()` without a matching
+  `.on('error', …)` listener) hardened against `ENOENT` crashes on
+  hosts missing a target binary — including the "Restart Claude
+  Desktop" tray action that previously took the settings server
+  down on Linux (no Linux build of Claude Desktop exists). (#82)
+- Platform-aware Claude-Desktop detection via `existsSync` on
+  `/Applications/Claude.app`, `%LOCALAPPDATA%\AnthropicClaude\...`,
+  etc.; returns a structured `{ok:false, error:…}` response when the
+  binary isn't installed instead of crashing. (#82)
+- `loadConfig()` preserves `settingsPort` and `credentialStorage`
+  fields across load/save round-trips. The Settings-UI port field
+  was previously reverting to `8765` after every save even though
+  the intended value had persisted to disk; the read path was
+  silently dropping top-level fields. Validation mirrors the
+  `POST /api/config` merge path (`Math.round` → `[1, 65535]` range
+  check). (#85)
+- Tray icon click routing via napi-rs `ThreadsafeFunction` — the
+  default `ErrorStrategy::CalleeHandled` invokes the JS callback
+  Node-style as `(err, value)` so our `(id) => …` handler was
+  receiving `null` as the first arg and silently no-op'ing every
+  click. Switched to `ErrorStrategy::Fatal` so the id arrives as
+  the single callback argument. (#91)
+
 ### Removed (breaking)
 - Legacy env-var aliases `PM_BRIDGE_MCP_*` and `PROTONMAIL_MCP_*` — only
   `MAILPOUCH_*` is read now. Callers still setting the old names must update.
@@ -14,10 +114,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ran v2.2.0 must rename any `~/.pm-bridge-mcp*` / `~/.protonmail-mcp*`
   files to the matching `~/.mailpouch*` name. This covers config,
   scheduler store, reminders, log file, audit log, pending escalations,
-  pass audit, FTS database, and agent grants/audit files.
+  pass audit, FTS database, and agent grants/audit files. (#80)
 - One-shot keychain migration from `protonmail-mcp-server` / `pm-bridge-mcp`
   service entries to `mailpouch`. Users on those legacy entries must
-  re-enter their Bridge password via the settings UI.
+  re-enter their Bridge password via the settings UI. (#80)
+
+### Test-count + housekeeping
+- 1,566 → 1,588 passing tests (+22 regression tests across spawn
+  hardening, cert auto-detect, SMTP deferred-init, loader round-
+  trip, CSRF session-reload, icon format, tray preconditions, and
+  per-account keychain scrubbing).
+- 2,927 lines of stale documentation removed (autonomous-cycle
+  log, point-in-time audit snapshots, pre-rename design reviews).
+  (#81)
 
 ## [2.2.0] — 2026-04-18
 ### Changed

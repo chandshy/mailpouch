@@ -103,8 +103,11 @@ feat: add email filtering by date range
 ```
 src/
 ├── index.ts                    # Unified daemon: MCP server (69 tools, Resources, Prompts) + settings HTTP server + system tray
-├── settings-main.ts            # Standalone settings UI CLI entry point
-├── tray.ts                     # System tray icon (systray2)
+├── settings-main.ts            # Standalone settings-UI CLI entry point — hosts the persistent tray icon via mailpouch-settings
+├── accounts/
+│   ├── registry.ts             # Multi-account CRUD + per-account keychain routing
+│   ├── manager.ts              # Hot-swappable per-account SMTP/IMAP service pool
+│   └── types.ts                # AccountSpec + registry types
 ├── config/
 │   ├── schema.ts               # Tool list, categories, permission types
 │   └── loader.ts               # Config load/save, preset builder, keychain migration
@@ -112,14 +115,14 @@ src/
 │   ├── manager.ts              # Permission + rate-limit enforcement
 │   └── escalation.ts           # Human-gated escalation challenge system
 ├── security/
-│   ├── keychain.ts             # OS keychain integration (@napi-rs/keyring)
+│   ├── keychain.ts             # OS keychain integration (@napi-rs/keyring) — single-account + per-account helpers
 │   └── memory.ts               # Credential wipe helpers
 ├── settings/
 │   ├── security.ts             # Rate limiting, CSRF, origin validation, TLS
 │   ├── server.ts               # Browser-based settings UI (localhost:8765)
 │   └── tui.ts                  # Terminal UI for settings
 ├── services/
-│   ├── smtp-service.ts         # SMTP email sending (Nodemailer)
+│   ├── smtp-service.ts         # SMTP email sending (Nodemailer), deferred-init pattern
 │   ├── simple-imap-service.ts  # IMAP email reading (ImapFlow)
 │   ├── scheduler.ts            # Scheduled email delivery
 │   └── analytics-service.ts   # Email analytics computation
@@ -127,8 +130,17 @@ src/
 │   └── index.ts                # Shared TypeScript types
 └── utils/
     ├── helpers.ts              # ID generation, email validation, log sanitisation
+    ├── icon.ts                 # Pure-Node PNG/ICO generator for the brand-matching tray icon
+    ├── tray.ts                 # Unified tray facade — native backend → systray2 fallback
     ├── logger.ts               # Structured log store
     └── tracer.ts               # Lightweight request tracing
+
+native/
+└── tray/                       # Rust/napi-rs binding around tauri-apps/tray-icon
+    ├── src/lib.rs              # ~280-line Rust addon, threaded event loop, click tsfn
+    ├── Cargo.toml              # tray-icon + muda + napi + napi-derive
+    ├── index.js / index.d.ts   # napi-rs generated JS loader + types
+    └── index.<platform>.node   # Committed prebuilts: linux-x64-gnu, linux-arm64-gnu, darwin-arm64, win32-x64/arm64-msvc
 
 docs/
 ├── proton-bridge-imap.md
