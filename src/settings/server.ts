@@ -4512,13 +4512,18 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
           const name    = pkgJson.name    ?? "mailpouch";
 
           const latest = await new Promise<string>((resolve, reject) => {
+            // Resolve npm from the same bin/ dir as the running node binary so
+            // this works even when PATH is stripped (e.g. Claude Desktop stdio
+            // children, VS Code extension hosts).
             const isWin = process.platform === "win32";
+            const nodeDir = nodePath.dirname(process.execPath);
+            const npmResolved = nodePath.join(nodeDir, isWin ? "npm.cmd" : "npm");
             const [viewCmd, viewArgs] = isWin
-              ? ["cmd.exe", ["/c", "npm", "view", name, "version", "--json"]]
-              : ["npm",     ["view", name, "version", "--json"]];
+              ? [npmResolved, ["view", name, "version", "--json"]]
+              : [npmResolved, ["view", name, "version", "--json"]];
             const proc = spawn(viewCmd, viewArgs, {
               stdio: ["ignore", "pipe", "pipe"],
-              shell: false,
+              shell: isWin, // cmd scripts need shell on Windows
             });
             let out = "";
             let err = "";
@@ -4573,12 +4578,14 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
 
           const output = await new Promise<string>((resolve, reject) => {
             const isWin = process.platform === "win32";
+            const nodeDir = nodePath.dirname(process.execPath);
+            const npmResolved = nodePath.join(nodeDir, isWin ? "npm.cmd" : "npm");
             const [instCmd, instArgs] = isWin
-              ? ["cmd.exe", ["/c", "npm", "install", "-g", `${name}@latest`]]
-              : ["npm",     ["install", "-g", `${name}@latest`]];
+              ? [npmResolved, ["install", "-g", `${name}@latest`]]
+              : [npmResolved, ["install", "-g", `${name}@latest`]];
             const proc  = spawn(instCmd, instArgs, {
               stdio: ["ignore", "pipe", "pipe"],
-              shell: false,
+              shell: isWin,
             });
             let out = "";
             proc.stdout?.on("data", (d: Buffer) => { out += d.toString(); });
