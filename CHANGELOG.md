@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.4] — 2026-04-20
+
+### Fixed
+- **Volume trends bucket count was off by one near DST transitions** (#). The
+  `calculateVolumeTrends` implementation used `setDate`/`getDate` (local time)
+  to build bucket keys but `toISOString()` for the key string (UTC). Across a
+  daylight-saving transition two adjacent local calendar days could produce the
+  same UTC ISO date, collapsing 365 buckets to 364. Switched to pure UTC
+  arithmetic (`Date.UTC` + ms-per-day offset) which is DST-safe and always
+  produces exactly the requested number of buckets.
+
 ## [3.0.3] — 2026-04-20
 
 ### Fixed
