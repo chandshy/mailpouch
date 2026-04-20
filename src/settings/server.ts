@@ -4843,7 +4843,7 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
           if (body.providerType !== "proton-bridge" && body.providerType !== "imap") {
             json(res, 400, { error: "providerType must be 'proton-bridge' or 'imap'" }); return;
           }
-          const created = createAccount({
+          const created = await createAccount({
             name: body.name,
             providerType: body.providerType,
             smtpHost: String(body.smtpHost ?? ""),
@@ -4859,6 +4859,21 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
             autoStartBridge: typeof body.autoStartBridge === "boolean" ? body.autoStartBridge : undefined,
             bridgePath: typeof body.bridgePath === "string" ? body.bridgePath : undefined,
           });
+          // Push the new account's creds into the running AccountManager
+          // so the MCP can connect to it on the very next tool call,
+          // without requiring a restart. The in-memory `created` still
+          // carries the plaintext password (writeRegistry only scrubs
+          // the persisted copy); we forward it here and rely on the
+          // manager to treat empty specs appropriately.
+          try {
+            const mgr = getAccountManager();
+            if (mgr && (created.password || created.smtpToken)) {
+              await mgr.rebuildFromRegistryAsync();
+              mgr.applyKeychainCredentials(created.password || "", created.smtpToken);
+            }
+          } catch (e) {
+            logger.warn("Could not propagate new account creds to AccountManager", "Accounts", e);
+          }
           json(res, 201, { account: { ...created, password: created.password ? "••••••••" : "" } });
           return;
         }
@@ -4872,8 +4887,19 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
           catch { json(res, 400, { error: "Body must be JSON." }); return; }
           // Strip placeholder passwords — only overwrite when a real value arrives.
           if (body.password === "" || body.password === "••••••••") delete body.password;
-          const updated = updateAccount(patchMatch[1], body as Partial<AccountSpecShape>);
+          const updated = await updateAccount(patchMatch[1], body as Partial<AccountSpecShape>);
           if (!updated) { json(res, 404, { error: "Account not found." }); return; }
+          // Same propagation as create — a password rotation applied
+          // via PATCH should take effect immediately.
+          try {
+            const mgr = getAccountManager();
+            if (mgr && (updated.password || updated.smtpToken)) {
+              await mgr.rebuildFromRegistryAsync();
+              mgr.applyKeychainCredentials(updated.password || "", updated.smtpToken);
+            }
+          } catch (e) {
+            logger.warn("Could not propagate updated account creds to AccountManager", "Accounts", e);
+          }
           json(res, 200, { account: { ...updated, password: updated.password ? "••••••••" : "" } });
           return;
         }
@@ -4881,7 +4907,7 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
         // DELETE /api/accounts/:id
         if (method === "DELETE" && patchMatch) {
           if (!requireCsrf(req, res)) return;
-          const ok = deleteAccount(patchMatch[1]);
+          const ok = await deleteAccount(patchMatch[1]);
           if (!ok) { json(res, 400, { error: "Cannot delete — unknown account id or last remaining account." }); return; }
           json(res, 200, { ok: true });
           return;
@@ -4891,7 +4917,7 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
         const activateMatch = /^\/api\/accounts\/([A-Za-z0-9_\-]+)\/activate$/.exec(path);
         if (method === "POST" && activateMatch) {
           if (!requireCsrf(req, res)) return;
-          const set = setActiveAccount(activateMatch[1]);
+          const set = await setActiveAccount(activateMatch[1]);
           if (!set) { json(res, 404, { error: "Account not found." }); return; }
           // Hot-swap: ask the AccountManager to rebuild from the persisted
           // registry and flip its active pointer. Emits "active-changed"
@@ -4900,7 +4926,7 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
           let restartRequired = true;
           if (mgr) {
             try {
-              mgr.rebuildFromRegistry();
+              await mgr.rebuildFromRegistryAsync();
               await mgr.setActive(set.id);
               restartRequired = false;
             } catch (err) {

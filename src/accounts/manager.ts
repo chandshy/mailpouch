@@ -27,7 +27,7 @@ import { SMTPService } from "../services/smtp-service.js";
 import { SimpleIMAPService } from "../services/simple-imap-service.js";
 import type { ProtonMailConfig } from "../types/index.js";
 import type { AccountSpec } from "./types.js";
-import { readRegistry } from "./registry.js";
+import { readRegistry, readRegistryWithSecrets } from "./registry.js";
 import { notifications as grantNotifications } from "../agents/notifications.js";
 import { EventEmitter } from "events";
 
@@ -80,6 +80,12 @@ export class AccountManager extends EventEmitter {
    * Preserves in-flight service instances for accounts that still exist;
    * tears down instances for accounts that were deleted; constructs new
    * instances for accounts that were added.
+   *
+   * Synchronous variant that reads the on-disk state WITHOUT pulling
+   * plaintext creds from the keychain — intended for the construction
+   * path where we can't block on an async keychain call. Use
+   * `rebuildFromRegistryAsync()` (below) when you need the creds
+   * populated — main() calls the async version right after boot.
    */
   rebuildFromRegistry(): void {
     const reg = readRegistry();
@@ -110,6 +116,45 @@ export class AccountManager extends EventEmitter {
       svcs.imap.disconnect().catch(() => {});
     }
     // Ensure activeAccountId points at a real entry.
+    if (!this.perAccount.has(reg.activeAccountId) && this.perAccount.size > 0) {
+      this._activeAccountId = [...this.perAccount.keys()][0];
+    } else {
+      this._activeAccountId = reg.activeAccountId;
+    }
+  }
+
+  /**
+   * Async rebuild that fills credentials from the OS keychain. Called
+   * by main() right after boot and after any Accounts-tab mutation
+   * that lands via the settings-UI server — ensures the in-memory
+   * services have the passwords the user persisted, even though the
+   * on-disk config blanks them.
+   */
+  async rebuildFromRegistryAsync(): Promise<void> {
+    const reg = await readRegistryWithSecrets();
+    const seen = new Set<string>();
+    for (const spec of reg.accounts) {
+      seen.add(spec.id);
+      const existing = this.perAccount.get(spec.id);
+      if (existing) {
+        existing.spec = spec;
+        existing.smtp["config"] = specToRuntimeConfig(spec);
+        existing.smtp.reinitialize();
+        continue;
+      }
+      const svcs: AccountServices = {
+        spec,
+        imap: new SimpleIMAPService(),
+        smtp: new SMTPService(specToRuntimeConfig(spec)),
+      };
+      this.perAccount.set(spec.id, svcs);
+    }
+    for (const [id, svcs] of this.perAccount) {
+      if (seen.has(id)) continue;
+      this.perAccount.delete(id);
+      svcs.smtp.close().catch(() => {});
+      svcs.imap.disconnect().catch(() => {});
+    }
     if (!this.perAccount.has(reg.activeAccountId) && this.perAccount.size > 0) {
       this._activeAccountId = [...this.perAccount.keys()][0];
     } else {

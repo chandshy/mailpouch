@@ -19,6 +19,21 @@ const SERVICE_NAME = "mailpouch";
 const KEY_PASSWORD = "bridge-password";
 const KEY_SMTP_TOKEN = "smtp-token";
 
+/**
+ * Build the keychain account key for a per-account credential. Multi-
+ * account support (see src/accounts/) needs one keychain entry per
+ * configured mailbox so passwords don't collide or leak across
+ * accounts. The single-account legacy keys (`bridge-password`,
+ * `smtp-token`) remain for backwards compatibility — they're what
+ * `loadCredentials()` / `saveCredentials()` at the top level read.
+ */
+function accountPasswordKey(accountId: string): string {
+  return `bridge-password:${accountId}`;
+}
+function accountSmtpTokenKey(accountId: string): string {
+  return `smtp-token:${accountId}`;
+}
+
 // ─── Lazy @napi-rs/keyring loading ────────────────────────────────────────────
 
 interface EntryClass {
@@ -132,6 +147,79 @@ export async function deleteCredentials(): Promise<boolean> {
 
     new keyring.Entry(SERVICE_NAME, KEY_PASSWORD).deletePassword();
     new keyring.Entry(SERVICE_NAME, KEY_SMTP_TOKEN).deletePassword();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// ─── Per-account helpers ──────────────────────────────────────────────────────
+
+/**
+ * Load the password / smtp-token stored in the keychain for a
+ * specific account. Returns null when the keychain is unavailable or
+ * when neither value is set for that account — callers can treat
+ * those two cases the same (blank credentials).
+ */
+export async function loadAccountCredentials(
+  accountId: string,
+): Promise<{ password: string; smtpToken: string } | null> {
+  try {
+    const keyring = await getKeyring();
+    if (!keyring) return null;
+    const password = new keyring.Entry(SERVICE_NAME, accountPasswordKey(accountId)).getPassword() ?? "";
+    const smtpToken = new keyring.Entry(SERVICE_NAME, accountSmtpTokenKey(accountId)).getPassword() ?? "";
+    if (!password && !smtpToken) return null;
+    return { password, smtpToken };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Save an account's password / smtp-token into the keychain. Empty
+ * strings are silently skipped (the keychain entry keeps whatever
+ * value it had before) — this lets the Accounts UI send back
+ * "•••••••" as a placeholder when the user didn't change the field
+ * without blowing away the real value. Returns true on any success
+ * (at least one value stored), false if the keychain is unavailable
+ * or both inputs are empty.
+ */
+export async function saveAccountCredentials(
+  accountId: string,
+  password: string,
+  smtpToken: string,
+): Promise<boolean> {
+  try {
+    const keyring = await getKeyring();
+    if (!keyring) return false;
+    let wrote = false;
+    if (password) {
+      new keyring.Entry(SERVICE_NAME, accountPasswordKey(accountId)).setPassword(password);
+      wrote = true;
+    }
+    if (smtpToken) {
+      new keyring.Entry(SERVICE_NAME, accountSmtpTokenKey(accountId)).setPassword(smtpToken);
+      wrote = true;
+    }
+    return wrote;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Remove an account's keychain entries. Called when an account is
+ * deleted via the Accounts tab — leaving stranded keychain entries
+ * would accumulate cruft and leak old passwords on next `backup-
+ * keychain` run.
+ */
+export async function deleteAccountCredentials(accountId: string): Promise<boolean> {
+  try {
+    const keyring = await getKeyring();
+    if (!keyring) return false;
+    try { new keyring.Entry(SERVICE_NAME, accountPasswordKey(accountId)).deletePassword(); } catch { /* not set */ }
+    try { new keyring.Entry(SERVICE_NAME, accountSmtpTokenKey(accountId)).deletePassword(); } catch { /* not set */ }
     return true;
   } catch {
     return false;

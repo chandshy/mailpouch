@@ -1897,13 +1897,18 @@ async function main() {
   // SMTPService is constructed at module load time (before config is read), so
   // its initial transporter has an empty password and no Bridge cert.
   //
-  // This matters for BOTH the legacy module-level smtpService AND every
-  // per-account SMTPService inside the AccountManager. Keychain-stored
-  // credentials (the default) are only known after main() reads them above;
-  // before that every account spec had password = "". Push them down so
-  // IMAP/SMTP auth doesn't fail with "Please configure the login" / "Missing
-  // credentials for PLAIN".
+  // applyKeychainCredentials handles the legacy single-account path where
+  // the top-level `connection.password` drives everything. The async
+  // rebuild handles the multi-account case: each account's password lives
+  // under a per-account keychain entry (see src/security/keychain.ts
+  // accountPasswordKey) and has to be loaded separately. Do both — they're
+  // cheap and idempotent.
   accountManager.applyKeychainCredentials(config.smtp.password ?? "", config.smtp.smtpToken);
+  try {
+    await accountManager.rebuildFromRegistryAsync();
+  } catch (e: unknown) {
+    logger.warn("Async registry rebuild failed (falling back to sync view)", "MCPServer", e);
+  }
   smtpService.reinitialize();
 
   // ── Bridge reachability probe + optional auto-start ───────────────────────

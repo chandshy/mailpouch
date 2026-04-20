@@ -51,6 +51,13 @@ vi.mock("../security/keychain.js", () => ({
   loadCredentials: vi.fn(),
   saveCredentials: vi.fn(),
   migrateFromConfig: vi.fn(),
+  // Per-account helpers added for multi-account keychain routing.
+  // Returning false / null across the board makes the registry's
+  // writeRegistry fall back to its plaintext-on-disk legacy path,
+  // matching what these tests were originally written against.
+  loadAccountCredentials: vi.fn(() => Promise.resolve(null)),
+  saveAccountCredentials: vi.fn(() => Promise.resolve(false)),
+  deleteAccountCredentials: vi.fn(() => Promise.resolve(false)),
 }));
 
 import {
@@ -101,9 +108,9 @@ describe("accounts registry", () => {
     expect(readRegistry().accounts[0].providerType).toBe("imap");
   });
 
-  it("createAccount appends, writes back, and assigns a short id", () => {
+  it("createAccount appends, writes back, and assigns a short id", async () => {
     seedConfig({}); // minimal — triggers legacy migration to one primary account
-    const created = createAccount({
+    const created = await createAccount({
       name: "Work Fastmail", providerType: "imap",
       smtpHost: "smtp.fastmail.com", smtpPort: 587,
       imapHost: "imap.fastmail.com", imapPort: 993,
@@ -115,86 +122,109 @@ describe("accounts registry", () => {
     expect(reg.accounts.map(a => a.id)).toContain(created.id);
   });
 
-  it("updateAccount patches fields and preserves the id", () => {
+  it("updateAccount patches fields and preserves the id", async () => {
     seedConfig({});
-    const created = createAccount({
+    const created = await createAccount({
       name: "Test", providerType: "imap",
       smtpHost: "s", smtpPort: 1, imapHost: "i", imapPort: 1,
       username: "u", password: "pw",
     });
-    const patched = updateAccount(created.id, { name: "Renamed" });
+    const patched = await updateAccount(created.id, { name: "Renamed" });
     expect(patched?.name).toBe("Renamed");
     expect(patched?.id).toBe(created.id);
   });
 
-  it("updateAccount returns null for an unknown id", () => {
+  it("updateAccount returns null for an unknown id", async () => {
     seedConfig({});
-    expect(updateAccount("acct-missing", { name: "X" })).toBeNull();
+    expect(await updateAccount("acct-missing", { name: "X" })).toBeNull();
   });
 
-  it("deleteAccount refuses to drop the last remaining account", () => {
+  it("deleteAccount refuses to drop the last remaining account", async () => {
     seedConfig({});
     const reg = readRegistry();
-    expect(deleteAccount(reg.activeAccountId)).toBe(false);
+    expect(await deleteAccount(reg.activeAccountId)).toBe(false);
     expect(readRegistry().accounts).toHaveLength(1);
   });
 
-  it("deleteAccount drops a non-active account and leaves the rest alone", () => {
+  it("deleteAccount drops a non-active account and leaves the rest alone", async () => {
     seedConfig({});
-    const extra = createAccount({
+    const extra = await createAccount({
       name: "Extra", providerType: "imap",
       smtpHost: "s", smtpPort: 1, imapHost: "i", imapPort: 1,
       username: "u", password: "pw",
     });
-    expect(deleteAccount(extra.id)).toBe(true);
+    expect(await deleteAccount(extra.id)).toBe(true);
     expect(readRegistry().accounts.some(a => a.id === extra.id)).toBe(false);
   });
 
-  it("deleteAccount reassigns the active id when the active account is dropped", () => {
+  it("deleteAccount reassigns the active id when the active account is dropped", async () => {
     seedConfig({});
-    const extra = createAccount({
+    const extra = await createAccount({
       name: "Extra", providerType: "imap",
       smtpHost: "s", smtpPort: 1, imapHost: "i", imapPort: 1,
       username: "u", password: "pw",
     });
-    setActiveAccount(extra.id);
+    await setActiveAccount(extra.id);
     expect(readRegistry().activeAccountId).toBe(extra.id);
-    deleteAccount(extra.id);
+    await deleteAccount(extra.id);
     const reg = readRegistry();
     expect(reg.activeAccountId).not.toBe(extra.id);
     expect(reg.accounts).toHaveLength(1);
   });
 
-  it("setActiveAccount switches which account mirrors into connection", () => {
+  it("setActiveAccount switches which account mirrors into connection", async () => {
     seedConfig({});
-    const other = createAccount({
+    const other = await createAccount({
       name: "Other", providerType: "imap",
       smtpHost: "smtp.other", smtpPort: 587, imapHost: "imap.other", imapPort: 993,
       username: "other@x", password: "pw",
     });
-    setActiveAccount(other.id);
+    await setActiveAccount(other.id);
     // Loading config should now show the mirrored settings.
     const cfg = JSON.parse(diskByPath.get(CONFIG_PATH) ?? "{}") as ServerConfig;
     expect(cfg.connection.smtpHost).toBe("smtp.other");
     expect(cfg.activeAccountId).toBe(other.id);
   });
 
-  it("setActiveAccount returns null for an unknown id", () => {
+  it("setActiveAccount returns null for an unknown id", async () => {
     seedConfig({});
-    expect(setActiveAccount("acct-bogus")).toBeNull();
+    expect(await setActiveAccount("acct-bogus")).toBeNull();
   });
 
-  it("listStatuses exposes the isActive flag and last-check metadata", () => {
+  it("listStatuses exposes the isActive flag and last-check metadata", async () => {
     seedConfig({});
-    const extra = createAccount({
+    const extra = await createAccount({
       name: "B", providerType: "imap",
       smtpHost: "s", smtpPort: 1, imapHost: "i", imapPort: 1,
       username: "u", password: "pw",
     });
-    setActiveAccount(extra.id);
+    await setActiveAccount(extra.id);
     const statuses = listStatuses();
     expect(statuses).toHaveLength(2);
     const active = statuses.find(s => s.isActive);
     expect(active?.id).toBe(extra.id);
+  });
+
+  it("SECURITY: writeRegistry via createAccount keeps plaintext passwords off disk when keychain is available", async () => {
+    // Override the shared keychain mock just for this test to simulate
+    // a working OS keychain. saveAccountCredentials returning true
+    // signals "stored in keychain, caller should scrub the on-disk
+    // copy." This is the regression test for the bug the user hit:
+    // adding an account via the Accounts tab dumped plaintext into
+    // ~/.mailpouch.json.
+    const keychain = await import("../security/keychain.js");
+    vi.mocked(keychain.saveAccountCredentials).mockResolvedValue(true);
+    seedConfig({});
+    await createAccount({
+      name: "Secret", providerType: "imap",
+      smtpHost: "s", smtpPort: 1, imapHost: "i", imapPort: 1,
+      username: "u", password: "PLAINTEXT-SHOULD-NOT-PERSIST",
+    });
+    const onDisk = JSON.parse(diskByPath.get(CONFIG_PATH) ?? "{}") as ServerConfig;
+    const acct = onDisk.accounts?.find(a => a.name === "Secret");
+    expect(acct).toBeDefined();
+    expect(acct!.password).toBe("");                             // scrubbed
+    expect(onDisk.connection.password).toBe("");                 // legacy mirror scrubbed
+    expect(onDisk.credentialStorage).toBe("keychain");           // marker set
   });
 });
