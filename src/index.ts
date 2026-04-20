@@ -2051,7 +2051,12 @@ async function main() {
     // Skip when running as a respawn child (stdio:ignore, no real MCP session).
     if (!process.env.MAILPOUCH_RESPAWN) {
       await _startSettingsServerDaemon();
-      _initTray().catch((err: unknown) => logger.warn("Tray init error", "MCPServer", err));
+      // Only the process that owns the settings server gets a tray.
+      // If another MCP already holds the port, _settingsExternal is true
+      // and that process already has the tray — skip to avoid duplicates.
+      if (!_settingsExternal) {
+        _initTray().catch((err: unknown) => logger.warn("Tray init error", "MCPServer", err));
+      }
     }
   } catch (error) {
     logger.error("Server startup failed", "MCPServer", error);
