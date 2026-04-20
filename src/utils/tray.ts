@@ -35,9 +35,21 @@ const _require = createRequire(import.meta.url);
  * of which backend is in use, so callers don't branch on backend type.
  */
 export interface TrayHandle {
-  /** Update the menu items in place. */
+  /**
+   * Update the menu items in place.
+   *
+   * Native backend: real implementation — atomically swaps the menu
+   * the user sees on next click.
+   *
+   * systray2 backend: best-effort no-op. The legacy backend's
+   * stdin-protocol menu update is fragile across the systray2 Go
+   * binary's restart/redraw paths, and in practice the standalone
+   * settings daemon (the only systray2 user today) never mutates its
+   * menu after construction. Don't rely on `setMenu()` taking effect
+   * when `backend === "systray2"`; check the field if it matters.
+   */
   setMenu(items: TrayItem[]): void;
-  /** Replace the tray icon (PNG bytes). */
+  /** Replace the tray icon (PNG bytes for native; ICO on Windows for systray2). */
   setIcon(pngBytes: Buffer): void;
   /** Update the hover tooltip. */
   setTooltip(tooltip: string): void;
@@ -55,7 +67,23 @@ export interface TrayItem {
 }
 
 export interface CreateTrayOptions {
+  /**
+   * Raw PNG bytes for the icon. The native backend takes this as-is
+   * and re-rasters internally for hi-DPI. The systray2 backend on
+   * Windows would historically prefer a multi-resolution ICO for
+   * crisp DPI scaling — supply that via `iconLegacyOverride` if you
+   * need it; otherwise the same PNG is used for both backends and
+   * Windows downsamples per the platform's default rules.
+   */
   iconPng: Buffer;
+  /**
+   * Optional override sent to the systray2 backend instead of
+   * `iconPng`. Use to ship a Windows multi-resolution ICO (via
+   * `makeTrayIconBytes("win32")`) when you care about hi-DPI tray
+   * sharpness on the legacy backend. Ignored for the native
+   * backend, which only accepts PNG.
+   */
+  iconLegacyOverride?: Buffer;
   tooltip: string;
   items: TrayItem[];
   /** Called with the activated item's `id` whenever the user clicks. */
@@ -80,15 +108,25 @@ interface NativeTrayModule { Tray: NativeTrayConstructor }
 
 /**
  * Try to load the native tray addon. Returns null if unavailable —
- * happens when no prebuilt exists for the current platform/arch (the
- * built distribution ships @mailpouch/tray-native-* via npm
- * `optionalDependencies`; npm only installs the matching one).
+ * happens when no `.node` prebuilt for the current platform/arch is
+ * present in `native/tray/`.
+ *
+ * Current packaging: the four committed prebuilts (linux-x64-gnu,
+ * darwin-arm64, win32-x64-msvc, win32-arm64-msvc) ship inside the
+ * main mailpouch npm package via `package.json`'s `files` field.
+ * Targets that haven't been built yet (linux-arm64-gnu, darwin-x64)
+ * fall through to the systray2 backend. A future PR may switch to
+ * the napi-rs-standard pattern of one `@mailpouch/tray-native-*`
+ * subpackage per target wired via `optionalDependencies` — keeping
+ * the install size small for end users — but for now everything
+ * lives in-tree for simpler CI plumbing.
  *
  * Module location resolution:
- *   1. `@mailpouch/tray-native` — npm-published addon (production)
+ *   1. `@mailpouch/tray-native` — present only if a future PR splits
+ *      prebuilts into subpackages
  *   2. `../../native/tray` relative to compiled `dist/utils/tray.js`
- *      — the in-repo build for development (cargo build inside
- *      native/tray/ produces index.js + the .node sibling)
+ *      — the in-repo build (cargo + napi build produce index.js +
+ *      the per-platform .node sibling)
  */
 function _loadNativeTray(): NativeTrayModule | null {
   const candidates = [
@@ -149,19 +187,35 @@ export function preflightTrayBinary(platform: NodeJS.Platform = process.platform
 }
 
 /**
- * Return a one-line DEBUG reason to skip tray startup, or null if the
- * host looks capable. Callers should log the reason and return before
- * spawning systray2 to avoid blocked reads / scary WARNs on headless
- * hosts.
+ * Generic, backend-agnostic skip check — returns a one-line DEBUG
+ * reason when the host can't show a system tray at all (headless
+ * Linux with no X11/Wayland), or null when a tray is feasible.
+ *
+ * Use this BEFORE calling `createTray()` since it applies regardless
+ * of which backend wins. The `systray2`-specific arm64 / x86_64-only
+ * concerns live in `systray2PreconditionSkip` below.
  */
 export function trayPreconditionSkip(
   platform: NodeJS.Platform = process.platform,
-  arch: string = process.arch,
+  _arch: string = process.arch,
   env: NodeJS.ProcessEnv = process.env,
 ): string | null {
   if (platform === "linux" && !env.DISPLAY && !env.WAYLAND_DISPLAY) {
     return "no display environment (DISPLAY / WAYLAND_DISPLAY unset) — tray skipped";
   }
+  return null;
+}
+
+/**
+ * systray2-specific skip check. Used by the createTray fallback path
+ * to decide whether the systray2 backend is even worth attempting on
+ * this host — the native backend may have already covered an arm64
+ * platform that systray2 can't.
+ */
+export function systray2PreconditionSkip(
+  platform: NodeJS.Platform = process.platform,
+  arch: string = process.arch,
+): string | null {
   if ((platform === "darwin" || platform === "linux") && arch === "arm64") {
     const bin = preflightTrayBinary(platform);
     if (!bin) {
@@ -209,14 +263,19 @@ export function createTray(opts: CreateTrayOptions): TrayHandle {
  */
 function _createSystray2Fallback(opts: CreateTrayOptions): TrayHandle {
   // Apply systray2's boot hygiene (chmod the binary, etc.) before
-  // construction. Skip-precondition cases (headless / arm64) are the
-  // caller's responsibility; if they didn't gate, we surface the
-  // failure as a thrown error here.
-  preflightTrayBinary();
-  const skip = trayPreconditionSkip();
+  // construction. The systray2-specific arm64 / x86_64-only check
+  // lives in `systray2PreconditionSkip` — if it returns a reason,
+  // the systray2 backend can't start on this host.
+  const skip = systray2PreconditionSkip();
   if (skip) {
     throw new Error(`Tray cannot start: ${skip}`);
   }
+  preflightTrayBinary();
+
+  // systray2 uses platform-format bytes (multi-res ICO on Windows for
+  // crisp DPI scaling, PNG elsewhere). Caller can override; otherwise
+  // we accept the PNG and let Windows downsample.
+  const initialBytes = opts.iconLegacyOverride ?? opts.iconPng;
 
   type SystrayMenuItem = { title: string; tooltip: string; checked: boolean; enabled: boolean };
   type SystrayCtor = new (config: {
@@ -239,7 +298,7 @@ function _createSystray2Fallback(opts: CreateTrayOptions): TrayHandle {
   } catch (e) {
     throw new Error(
       `No tray backend available: native prebuilt not installed AND systray2 not loadable (${(e as Error).message}). ` +
-      `Install @mailpouch/tray-native-<platform> or systray2 to enable the tray.`,
+      `Either ship a @mailpouch/tray-native-<platform> prebuilt or install systray2 to enable the tray.`,
     );
   }
 
@@ -252,11 +311,20 @@ function _createSystray2Fallback(opts: CreateTrayOptions): TrayHandle {
     return { title: i.label, tooltip: "", checked: false, enabled: i.enabled !== false };
   });
 
+  // Track current icon + tooltip so partial updates (setIcon without
+  // touching tooltip, or vice-versa) don't clobber the other field.
+  // systray2's `update-menu` action replaces the WHOLE menu config, so
+  // every send has to include both values; without local state we'd
+  // revert to the original `opts.iconPng` / `opts.tooltip` on each
+  // update call.
+  let currentIconB64 = initialBytes.toString("base64");
+  let currentTooltip = opts.tooltip;
+
   const tray = new SysTray({
     menu: {
-      icon: opts.iconPng.toString("base64"),
+      icon: currentIconB64,
       title: "",
-      tooltip: opts.tooltip,
+      tooltip: currentTooltip,
       items: sysItems,
     },
     debug: false,
@@ -270,19 +338,27 @@ function _createSystray2Fallback(opts: CreateTrayOptions): TrayHandle {
     }),
   ).catch(() => { /* ignore — best-effort fallback */ });
 
+  const sendUpdate = (): void => {
+    void tray.sendAction({
+      type: "update-menu",
+      menu: { icon: currentIconB64, title: "", tooltip: currentTooltip, items: sysItems },
+    });
+  };
+
   return {
     backend: "systray2",
     setMenu: (_items) => {
-      // Best-effort no-op: systray2's `update-menu` is async and
-      // the wrapper would need re-mapping; the rare case where this
-      // matters (settings UI re-render) is acceptable to ignore on
-      // the legacy backend. Native callers get a real implementation.
+      // Documented on the TrayHandle interface — silent no-op on
+      // this backend. Real menu updates require a native restart of
+      // the systray2 binary which the wrapper isn't set up for.
     },
     setIcon: (bytes) => {
-      void tray.sendAction({ type: "update-menu", menu: { icon: bytes.toString("base64"), title: "", tooltip: opts.tooltip, items: sysItems } });
+      currentIconB64 = bytes.toString("base64");
+      sendUpdate();
     },
     setTooltip: (s) => {
-      void tray.sendAction({ type: "update-menu", menu: { icon: opts.iconPng.toString("base64"), title: "", tooltip: s, items: sysItems } });
+      currentTooltip = s;
+      sendUpdate();
     },
     destroy: () => { try { tray.kill(false); } catch { /* already gone */ } },
   };

@@ -34,7 +34,7 @@ import {
 import { startSettingsServer } from "./settings/server.js";
 import { loadConfig } from "./config/loader.js";
 import { createTray, trayPreconditionSkip, type TrayHandle } from "./utils/tray.js";
-import { makeIconPng } from "./utils/icon.js";
+import { makeIconPng, makeTrayIconBytes } from "./utils/icon.js";
 
 // ─── Parse CLI flags ──────────────────────────────────────────────────────────
 
@@ -150,6 +150,10 @@ function _startTrayIcon(url: string): void {
   try {
     _activeTray = createTray({
       iconPng: makeIconPng(64),
+      // Hi-DPI override for the systray2 fallback path on Windows —
+      // multi-resolution ICO so the tray stays crisp at 100/125/150/200%
+      // scaling. Native backend ignores this.
+      iconLegacyOverride: process.platform === "win32" ? makeTrayIconBytes("win32") : undefined,
       tooltip: "mailpouch — Proton Mail via Bridge",
       items: [
         { id: "header",   label: "mailpouch", enabled: false },
