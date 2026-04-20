@@ -4,7 +4,8 @@
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 2.x.x   | :white_check_mark: |
+| 3.x.x   | :white_check_mark: |
+| 2.x.x   | :white_check_mark: (security fixes only) |
 | 1.x.x   | :x:                |
 
 ## Reporting a Vulnerability
@@ -82,9 +83,11 @@ When using this MCP server:
 
 ### Credential Management
 - **Never commit** credentials to version control
-- Credentials are stored in `~/.mailpouch.json` (mode 0600) or your OS keychain — never in environment variables or `.env` files
+- **OS keychain is the default credential store** — Bridge passwords and SMTP tokens live under the `mailpouch` service, keyed per account (`bridge-password:<acct-id>` / `smtp-token:<acct-id>`). The single-account legacy key names (`bridge-password` / `smtp-token`, no suffix) are still honored for back-compat on pre-v3 installs.
+- `~/.mailpouch.json` (mode 0600) holds only non-secret config. The `credentialStorage: "keychain"` marker signals that secrets are keychain-backed; the `password` and `smtpToken` fields are always blanked on disk when the keychain is reachable.
+- Credentials are never read from environment variables or `.env` files
 - Use **Proton Bridge passwords**, not your main Proton Mail password
-- Rotate credentials regularly
+- Rotate credentials regularly via the settings UI — saves route straight to the keychain and the running MCP picks up the rotation without a restart
 
 ### Network Security
 - Use **localhost (127.0.0.1)** for Proton Bridge connections
@@ -123,6 +126,7 @@ Security patches will be released as:
 |------------|---------|--------------------------------|----------|----------|
 | 2026-03-17 | 2.0.0   | Security hardening (25 findings from 3 audit loops) | Various  | Resolved |
 | 2026-03-18 | 2.1.0+  | 48-cycle autonomous audit: input validation, type safety, injection prevention, CSRF, path traversal, rate limiting across all 48 tool handlers | Various  | Resolved |
+| 2026-04-20 | 3.0.0   | Per-account Bridge passwords wrote plaintext to `~/.mailpouch.json` via Accounts-tab CRUD paths (create / update / setActive / delete all funnelled through `writeRegistry` → `saveConfig` with no keychain routing). Legacy Setup-tab path was correctly encrypted. | High | Resolved via [PR #93](https://github.com/chandshy/mailpouch/pull/93) — writeRegistry now saves secrets to keychain under per-account keys, scrubs on-disk JSON, and refreshes the running AccountManager on every save |
 
 ---
 
