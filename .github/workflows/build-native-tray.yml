@@ -137,7 +137,7 @@ jobs:
           echo "Built: $file ($(stat --printf='%s' "$file" 2>/dev/null || stat -f%z "$file") bytes)"
 
       - name: Upload prebuilt artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: tray-${{ matrix.arch_label }}
           path: native/tray/index.${{ matrix.arch_label }}.node
