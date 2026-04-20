@@ -30,7 +30,7 @@
 #![deny(clippy::all)]
 
 use napi::bindgen_prelude::*;
-use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
+use napi::threadsafe_function::{ErrorStrategy, ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi::JsFunction;
 use napi_derive::napi;
 use std::sync::{Arc, Mutex};
@@ -81,6 +81,9 @@ pub struct Tray {
     cmd_tx: Arc<Mutex<Option<crossbeam_channel::Sender<TrayCommand>>>>,
 }
 
+/// Type alias so the (long) ThreadsafeFunction<…> form only appears once.
+type ClickTsfn = ThreadsafeFunction<String, ErrorStrategy::Fatal>;
+
 #[napi]
 impl Tray {
     /// Construct a tray. The icon and menu can be set later; passing
@@ -118,8 +121,26 @@ impl Tray {
 
         // Build the threadsafe-fn AFTER the input validation so we
         // don't leak a tsfn handle on early-error paths.
-        let tsfn: ThreadsafeFunction<String> =
-            on_click.create_threadsafe_function(0, |ctx| Ok(vec![ctx.value]))?;
+        //
+        // ErrorStrategy::Fatal means the JS callback receives the
+        // value directly as its first argument — `(id) => ...`. The
+        // default CalleeHandled strategy invokes the callback Node-
+        // style as `(err, value) => ...`, which made our JS handler
+        // see `err = null` as the id and silently no-op on every
+        // click. Fatal is the right choice for a tray click: there's
+        // no recoverable error to surface to JS, and if anything in
+        // the Rust-side conversion fails we'd rather crash the
+        // worker than swallow the click.
+        //
+        // The callback converts the Rust String to a JsString
+        // explicitly via `ctx.env.create_string`. Without the
+        // conversion napi-rs would marshal an undefined value.
+        let tsfn: ClickTsfn = on_click.create_threadsafe_function(
+            0,
+            |ctx: napi::threadsafe_function::ThreadSafeCallContext<String>| {
+                ctx.env.create_string(&ctx.value).map(|s| vec![s])
+            },
+        )?;
 
         let initial_tooltip = tooltip.clone();
 
@@ -224,7 +245,7 @@ fn run_tray_loop(
     initial_tooltip: String,
     initial_items: Vec<MenuItemSpec>,
     cmd_rx: crossbeam_channel::Receiver<TrayCommand>,
-    tsfn: ThreadsafeFunction<String>,
+    tsfn: ClickTsfn,
 ) {
     use muda::{Menu, MenuEvent, PredefinedMenuItem};
     use std::collections::HashMap;
@@ -339,13 +360,20 @@ fn run_tray_loop(
 
         // Drain menu events fired by user interaction. Each event
         // carries a MenuId we can convert back to the JS id. We
-        // just forward via tsfn — JS owns the dispatch table.
+        // forward via tsfn — JS owns the dispatch table.
         while let Ok(ev) = menu_events.try_recv() {
             let id = ev.id().0.clone();
             if id_lookup.contains_key(&id) {
-                tsfn.call(Ok(id), ThreadsafeFunctionCallMode::NonBlocking);
+                // ErrorStrategy::Fatal — pass the value directly, not Ok(...).
+                tsfn.call(id, ThreadsafeFunctionCallMode::NonBlocking);
             }
         }
+        // Drain tray-icon events (left-click on icon, etc.) so they
+        // don't pile up indefinitely on the crossbeam channel. We
+        // don't forward them to JS yet; add a second tsfn here when
+        // a use case appears (e.g. "left-click the icon, open
+        // settings immediately without showing the menu").
+        while tray_icon::TrayIconEvent::receiver().try_recv().is_ok() { /* drop */ }
         // Sleep briefly to avoid busy-looping. 50 ms gives a
         // perceptually instant click response while keeping the
         // worker idle most of the time.
