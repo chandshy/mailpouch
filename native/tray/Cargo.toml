@@ -41,7 +41,7 @@ crossbeam-channel = "0.5"
 # decide to host the loop on. Bring the matching glib version so we
 # have access to MainContext::default().iteration() from the loop.
 gtk  = "0.18"
-glib = "0.18"
+glib = "0.20"
 
 [build-dependencies]
 napi-build = "2"
