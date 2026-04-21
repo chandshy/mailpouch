@@ -4512,18 +4512,23 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
           const name    = pkgJson.name    ?? "mailpouch";
 
           const latest = await new Promise<string>((resolve, reject) => {
-            // Resolve npm from the same bin/ dir as the running node binary so
-            // this works even when PATH is stripped (e.g. Claude Desktop stdio
-            // children, VS Code extension hosts).
+            // npm is a shell script (#!/usr/bin/env node) so it needs both the
+            // resolved npm path AND node on PATH. GUI MCP clients strip PATH, so
+            // we inject node's bin dir into the child's PATH explicitly.
             const isWin = process.platform === "win32";
             const nodeDir = nodePath.dirname(process.execPath);
+            const pathSep = isWin ? ";" : ":";
+            const childEnv = {
+              ...process.env,
+              PATH: process.env.PATH
+                ? `${nodeDir}${pathSep}${process.env.PATH}`
+                : nodeDir,
+            };
             const npmResolved = nodePath.join(nodeDir, isWin ? "npm.cmd" : "npm");
-            const [viewCmd, viewArgs] = isWin
-              ? [npmResolved, ["view", name, "version", "--json"]]
-              : [npmResolved, ["view", name, "version", "--json"]];
-            const proc = spawn(viewCmd, viewArgs, {
+            const proc = spawn(npmResolved, ["view", name, "version", "--json"], {
               stdio: ["ignore", "pipe", "pipe"],
-              shell: isWin, // cmd scripts need shell on Windows
+              shell: isWin,
+              env: childEnv,
             });
             let out = "";
             let err = "";
@@ -4579,13 +4584,18 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
           const output = await new Promise<string>((resolve, reject) => {
             const isWin = process.platform === "win32";
             const nodeDir = nodePath.dirname(process.execPath);
+            const pathSep = isWin ? ";" : ":";
+            const childEnv = {
+              ...process.env,
+              PATH: process.env.PATH
+                ? `${nodeDir}${pathSep}${process.env.PATH}`
+                : nodeDir,
+            };
             const npmResolved = nodePath.join(nodeDir, isWin ? "npm.cmd" : "npm");
-            const [instCmd, instArgs] = isWin
-              ? [npmResolved, ["install", "-g", `${name}@latest`]]
-              : [npmResolved, ["install", "-g", `${name}@latest`]];
-            const proc  = spawn(instCmd, instArgs, {
+            const proc = spawn(npmResolved, ["install", "-g", `${name}@latest`], {
               stdio: ["ignore", "pipe", "pipe"],
               shell: isWin,
+              env: childEnv,
             });
             let out = "";
             proc.stdout?.on("data", (d: Buffer) => { out += d.toString(); });
