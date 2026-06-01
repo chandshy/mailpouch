@@ -387,6 +387,13 @@ export interface ServerConfig {
   activeAccountId?: string;
   /** Fire native OS notifications on new pending grants (default true). */
   desktopNotificationsEnabled?: boolean;
+  /**
+   * Auto-open the Settings UI Agents tab in the browser when a new remote agent
+   * registers, so the user can approve/deny the connection immediately
+   * (default true). Skipped on headless hosts (no display). Set false on a
+   * remote/headless deployment to suppress the auto-popup.
+   */
+  autoOpenApprovalWindow?: boolean;
   /** Outbound webhook endpoints that receive grant-change events. */
   webhooks?: WebhookEndpointShape[];
   /**

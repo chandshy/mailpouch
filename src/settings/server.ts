@@ -833,6 +833,9 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
         if (typeof body.desktopNotificationsEnabled === "boolean") {
           current.desktopNotificationsEnabled = body.desktopNotificationsEnabled;
         }
+        if (typeof body.autoOpenApprovalWindow === "boolean") {
+          current.autoOpenApprovalWindow = body.autoOpenApprovalWindow;
+        }
         if (body.tosAcknowledged && typeof body.tosAcknowledged === "object") {
           const t = body.tosAcknowledged as Record<string, unknown>;
           if (typeof t.accepted === "boolean" && typeof t.timestamp === "string") {

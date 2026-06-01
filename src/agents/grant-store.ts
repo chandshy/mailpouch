@@ -28,6 +28,8 @@ interface StoreFile {
 export interface CreatePendingArgs {
   clientId: string;
   clientName: string;
+  /** IP the agent registered from (for display on the approval card). */
+  registeredFromIp?: string;
 }
 
 export interface ApproveArgs {
@@ -166,6 +168,7 @@ export class AgentGrantStore {
         preset: "read_only", // placeholder — replaced on approve
         createdAt: new Date().toISOString(),
         totalCalls: 0,
+        ...(args.registeredFromIp ? { registeredFromIp: args.registeredFromIp } : {}),
       };
       this.grants.set(args.clientId, grant);
       this.persist();

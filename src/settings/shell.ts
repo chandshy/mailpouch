@@ -334,7 +334,20 @@ ${buildStyles(cspNonce)}
     loadEscalations();
     loadAuditLog();
     setInterval(loadEscalations, 15_000);
+    // Deep-link: an auto-opened approval window points at #agents so the user
+    // lands directly on the Agents tab to approve/deny the new connection.
+    maybeOpenHashTab();
   });
+
+  // Focus a tab from the URL hash (e.g. #agents). Used by the auto-opened
+  // approval window and by manual navigation to #agents.
+  function maybeOpenHashTab() {
+    const id = (location.hash || '').replace(/^#/, '').split('/')[0];
+    if (!id) return;
+    const btn = document.querySelector('[data-tab="' + id + '"]');
+    if (btn && !btn.disabled) showTab(id, btn);
+  }
+  window.addEventListener('hashchange', maybeOpenHashTab);
 
   async function refresh() {
     try {
@@ -592,6 +605,9 @@ ${buildStyles(cspNonce)}
       const lastCall = g.lastCallAt ? new Date(g.lastCallAt).toLocaleString() : 'never';
       const expiry = g.conditions && g.conditions.expiresAt
         ? 'expires ' + new Date(g.conditions.expiresAt).toLocaleString() : 'no expiry';
+      // Registration context shown on the card so the user has info to decide.
+      const registered = g.createdAt ? new Date(g.createdAt).toLocaleString() : '';
+      const fromIp = g.registeredFromIp ? ' · from ' + esc(g.registeredFromIp) : '';
       const cidEsc  = esc(g.clientId);
       const nameEsc = esc(g.clientName);
       const condsJson = esc(JSON.stringify(g.conditions || null));
@@ -612,6 +628,9 @@ ${buildStyles(cspNonce)}
               '<div style="font-size:12px;color:#888;margin-top:4px">' +
                 badge + ' · preset ' + esc(g.preset) + ' · ' + esc(expiry) + ' · ' + g.totalCalls + ' calls · last ' + esc(lastCall) +
               '</div>' +
+              (g.status === 'pending' && (registered || fromIp)
+                ? '<div style="font-size:12px;color:#888;margin-top:2px">registered ' + esc(registered) + fromIp + '</div>'
+                : '') +
               (g.note ? '<div style="font-size:12px;color:#aaa;margin-top:4px;font-style:italic">' + esc(g.note) + '</div>' : '') +
             '</div>' +
             '<div style="display:flex;gap:6px;flex-wrap:wrap">' + buttons + '</div>' +
@@ -1098,6 +1117,8 @@ ${buildStyles(cspNonce)}
     if (confirmEl) confirmEl.checked = c.requireDestructiveConfirm !== false;
     var desktopNotifEl = document.getElementById('desktop-notifications');
     if (desktopNotifEl) desktopNotifEl.checked = c.desktopNotificationsEnabled !== false;
+    var autoOpenEl = document.getElementById('auto-open-approval');
+    if (autoOpenEl) autoOpenEl.checked = c.autoOpenApprovalWindow !== false;
     set('sl-api-key',        cn.simpleloginApiKey  ? '••••••••' : '');
     set('sl-base-url',       cn.simpleloginBaseUrl || '');
     set('pass-access-token', cn.passAccessToken    ? '••••••••' : '');
@@ -1196,6 +1217,7 @@ ${buildStyles(cspNonce)}
         },
         requireDestructiveConfirm: !!(document.getElementById('require-destructive-confirm') && document.getElementById('require-destructive-confirm').checked),
         desktopNotificationsEnabled: !!(document.getElementById('desktop-notifications') && document.getElementById('desktop-notifications').checked),
+        autoOpenApprovalWindow: !!(document.getElementById('auto-open-approval') && document.getElementById('auto-open-approval').checked),
         settingsPort: (function(){ var p = parseInt(get('settings-port'), 10); return isNaN(p) ? 8766 : p; })(),
       };
       const r = await fetch('/api/config', {

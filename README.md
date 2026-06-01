@@ -407,7 +407,7 @@ The same standalone behaviour is available from the main binary via `mailpouch -
 
 Tabs:
 
-- **Setup** — credentials, SMTP/IMAP hosts and ports, Bridge TLS certificate, Optional Integrations (SimpleLogin API key, Proton Pass PAT + CLI path), debug mode, auto-start Bridge, insecure-connection toggle, destructive-confirm toggle, desktop notifications toggle, settings port
+- **Setup** — credentials, SMTP/IMAP hosts and ports, Bridge TLS certificate, Optional Integrations (SimpleLogin API key, Proton Pass PAT + CLI path), debug mode, auto-start Bridge, insecure-connection toggle, destructive-confirm toggle, desktop notifications toggle, auto-open approval window toggle, settings port
 - **Accounts** — per-account Bridge credentials; hot-swap the active account
 - **Permissions** — preset selector, per-tool enable/rate-limit toggles, tool-tier (`core` / `extended` / `complete`), destructive-confirm toggle
 - **Agents** — per-client (OAuth `client_id`) approvable grants with folder allowlists, IP pins, per-tool rate caps, expiry, and account binding
@@ -469,7 +469,7 @@ Grant lifecycle: `pending` → `active` → `revoked` | `expired`. Each grant ca
 | `conditions.maxCallsPerHourByTool` | Per-tool hourly rate cap |
 | `conditions.accountId` | Bind the agent to a single multi-account id |
 
-Approve, deny, revoke, and "approve-with-conditions" all live in the **Agents** tab of the settings UI. The tab streams live updates over SSE from `GET /api/notifications` — new pending grants surface without a reload.
+Approve, deny, revoke, and "approve-with-conditions" all live in the **Agents** tab of the settings UI. The tab streams live updates over SSE from `GET /api/notifications` — new pending grants surface without a reload. When a new agent registers, mailpouch also **auto-opens this tab in your browser** (and fires a desktop notification + tray badge) so you can approve or deny the connection right away; the pending card shows the agent's name, registering IP, and time. The agent's tool calls stay blocked until you approve. Auto-open is on by default (`autoOpenApprovalWindow`, Setup-tab toggle), skipped on headless hosts.
 
 Every gated tool call writes one row to an append-only JSONL audit log at `~/.mailpouch-agent-audit.jsonl` (mode `0600`). Rows carry a truncated sha256 `argHash` — **never argument values, never response bodies** — so "same call repeated" patterns are observable without creating a parallel on-disk copy of your email. The log rotates at 10 MB and keeps 3 gzipped generations.
 

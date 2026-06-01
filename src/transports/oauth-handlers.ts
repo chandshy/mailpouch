@@ -181,7 +181,10 @@ export class OAuthHandlers {
   private readonly store: OAuthStore;
   private readonly cfg: OAuthEndpointsConfig;
   private readonly limiter: TokenBucketLimiter;
-  private readonly onClientRegistered?: (c: { client_id: string; client_name?: string }) => void;
+  private readonly onClientRegistered?: (c: { client_id: string; client_name?: string; ip?: string }) => void;
+  /** Extracts the caller IP from a request (injected to avoid importing http.ts
+   *  here, which would create an import cycle). */
+  private readonly ipExtractor?: (req: IncomingMessage) => string;
   /**
    * XPORT-008: per-process secret used to HMAC the consent CSRF token. The
    * token has no server-side state — it is `HMAC(client_id)` minted by the GET
@@ -195,12 +198,14 @@ export class OAuthHandlers {
     store: OAuthStore,
     cfg: OAuthEndpointsConfig,
     limiter: TokenBucketLimiter,
-    onClientRegistered?: (c: { client_id: string; client_name?: string }) => void,
+    onClientRegistered?: (c: { client_id: string; client_name?: string; ip?: string }) => void,
+    ipExtractor?: (req: IncomingMessage) => string,
   ) {
     this.store = store;
     this.cfg = cfg;
     this.limiter = limiter;
     this.onClientRegistered = onClientRegistered;
+    this.ipExtractor = ipExtractor;
     if (!cfg.adminPassword) throw new Error("OAuth admin password is required");
   }
 
@@ -333,7 +338,10 @@ export class OAuthHandlers {
     // Fire-and-forget: let the transport create the pending AgentGrant so
     // the user can approve in the settings UI. Handler errors are swallowed
     // — DCR itself succeeded and the caller should still get their client_id.
-    try { this.onClientRegistered?.({ client_id: client.client_id, client_name: client.client_name }); }
+    try {
+      const ip = this.ipExtractor?.(req);
+      this.onClientRegistered?.({ client_id: client.client_id, client_name: client.client_name, ip });
+    }
     catch (hookErr) { logger.warn("onClientRegistered hook threw (non-fatal)", "OAuth", hookErr); }
 
     json(res, 201, client);

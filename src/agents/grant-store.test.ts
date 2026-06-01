@@ -30,6 +30,14 @@ describe("AgentGrantStore", () => {
     expect(s2.get("pmc_1")?.status).toBe("pending");
   });
 
+  it("createPending records and persists the registering IP for the approval card", () => {
+    const s1 = new AgentGrantStore(path);
+    const g = s1.createPending({ clientId: "pmc_ip", clientName: "Remote Agent", registeredFromIp: "192.168.1.50" });
+    expect(g.registeredFromIp).toBe("192.168.1.50");
+    const s2 = new AgentGrantStore(path);
+    expect(s2.get("pmc_ip")?.registeredFromIp).toBe("192.168.1.50");
+  });
+
   it("a peer's status change is not reverted by a later local mutation (reloadMerge refresh)", () => {
     // Two store instances over the same file (two processes). B holds a stale
     // `pending` copy; A approves the grant; then B mutates an UNRELATED grant.

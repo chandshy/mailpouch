@@ -172,6 +172,17 @@ export function buildSetupHtml(p: SetupParams): string {
             Disable if you prefer to check the Agents tab manually.
           </div>
         </div>
+        <div class="field" style="margin-top:6px">
+          <label class="toggle-wrap" style="width:fit-content">
+            <span class="toggle"><input type="checkbox" id="auto-open-approval" checked><span class="slider"></span></span>
+            <span>Auto-open the approval window when an agent connects</span>
+          </label>
+          <div class="hint" style="margin-top:4px">
+            When a new remote agent registers, automatically open this Settings UI to the Agents tab so you can
+            approve or deny the connection right away. On by default; skipped on headless hosts. Turn off on a
+            remote/headless deployment.
+          </div>
+        </div>
         <div class="field" style="margin-top:14px">
           <label for="settings-port">Settings UI port</label>
           <input type="number" id="settings-port" min="1" max="65535" placeholder="8766" style="width:120px"

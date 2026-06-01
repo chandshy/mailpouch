@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.0.72] — 2026-05-31
 
+### Added — approval window pops up when a new remote agent connects
+
+- When a remote/HTTP (OAuth) agent registers (DCR), mailpouch now **auto-opens the Settings UI Agents tab in the browser** so the user can approve or deny the connection immediately — on top of the existing desktop notification + tray badge. The agent stays **blocked until approved** (the pending-grant gate already returns an actionable "pending user approval" error to the agent). Authentication between the agent and the server remains automatic (OAuth DCR + PKCE); the only human step is approve/deny.
+- The pending agent's **registering IP and time** are captured at DCR and shown on its approval card, so the user has context to decide. (`AgentGrant.registeredFromIp`, threaded from the registration request via the `onClientRegistered` hook.)
+- Auto-open is gated: only when a **display is present** (skipped on headless/remote hosts), the UI is up, and at most once per ~10s (a registration burst opens one tab, which lists all pending). Controlled by a new **`autoOpenApprovalWindow`** setting (default on) with a Setup-tab toggle. The settings UI gained `#agents` hash deep-linking (used by the auto-open and available for manual navigation).
+- New `auto-open-approval.ts` pure decision helper + tests; `grant-store` test covers the persisted IP. Local stdio clients are unaffected (still auto-trusted); static-bearer clients still bypass the grant gate by design.
+
 ### Fixed — IMAP IDLE socket error crashed the whole process (primary "keeps crashing" cause)
 
 - **Bug:** the background IMAP IDLE client (`runIdleLoop`, `src/services/simple-imap-service.ts`) was constructed with `'exists'`/`'expunge'` listeners but **no `'error'` listener**. `imapflow` extends `EventEmitter`, and an `EventEmitter` that emits `'error'` with no listener **throws synchronously** — which became an `uncaughtException`, and `src/index.ts` routes `uncaughtException`/`unhandledRejection` straight into `gracefulShutdown` → `process.exit`. IDLE sockets to a local Proton Bridge reset routinely (Bridge sleep/restart/session caps), so a single mid-IDLE socket reset took the entire MCP server down — the recurring crash. The main `connect()` path already attached `'error'`/`'close'` listeners; the IDLE client did not.

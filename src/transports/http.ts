@@ -30,6 +30,8 @@ import { createServer, type IncomingMessage, type ServerResponse } from "http";
 import { createServer as createSecureServer } from "https";
 import { readFileSync } from "fs";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
+import { randomUUID } from "crypto";
 import type { Server as McpServer } from "@modelcontextprotocol/sdk/server/index.js";
 import { logger } from "../utils/logger.js";
 import { OAuthStore } from "./oauth-store.js";
@@ -40,8 +42,16 @@ import { notifications } from "../agents/notifications.js";
 import { runWithCaller } from "../agents/caller-context.js";
 
 export interface HttpTransportOptions {
-  /** MCP server instance to wire the transport into. */
+  /** MCP server instance to wire the transport into (fallback for single-session use). */
   server: McpServer;
+  /**
+   * Factory that builds a fresh MCP server with all handlers registered. The
+   * MCP SDK binds one Server to one transport, so each client session needs its
+   * own Server. When provided, a new Server + transport pair is created per
+   * session (keyed by Mcp-Session-Id). When omitted, falls back to a single
+   * shared `server` (only safe for one session at a time).
+   */
+  createServer?: () => McpServer;
   /** Bind host. Default 127.0.0.1 (localhost-only). Use 0.0.0.0 for LAN exposure. */
   host?: string;
   /** Port to listen on. */
@@ -177,8 +187,11 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
     throw new Error("HTTP transport requires remoteBearerToken to be set in the config (or enable OAuth)");
   }
 
-  const transport = new StreamableHTTPServerTransport({});
-  await opts.server.connect(transport);
+  // One transport per client session (keyed by Mcp-Session-Id). The MCP SDK
+  // binds one Server to one transport, so each session also gets its own Server
+  // via opts.createServer. A new session is created when an unsessioned POST
+  // carries an `initialize` request; subsequent requests route by session id.
+  const sessions = new Map<string, StreamableHTTPServerTransport>();
 
   // Rate limiters — one bucket per client IP for unauthed endpoints; one
   // bucket per token (sha256-fingerprint) for authed /mcp calls.
@@ -242,8 +255,9 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
         { issuer, resource: `${issuer}${path}`, adminPassword: opts.oauthAdminPassword },
         unauthLimiter,
         opts.agentGrants
-          ? (c) => opts.agentGrants!.createPending({ clientId: c.client_id, clientName: c.client_name ?? "" })
+          ? (c) => opts.agentGrants!.createPending({ clientId: c.client_id, clientName: c.client_name ?? "", registeredFromIp: c.ip })
           : undefined,
+        clientIp,
       )
     : null;
 
@@ -359,6 +373,35 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
 
     try {
       const body = req.method === "GET" ? undefined : await readJsonBody(req);
+
+      // Route to the per-session transport. Existing session → reuse it.
+      const sessionId = req.headers["mcp-session-id"];
+      const sid = Array.isArray(sessionId) ? sessionId[0] : sessionId;
+      let transport: StreamableHTTPServerTransport | undefined = sid ? sessions.get(sid) : undefined;
+
+      if (!transport) {
+        // No existing session. Only an `initialize` POST may open one.
+        if (req.method === "POST" && isInitializeRequest(body)) {
+          const created = new StreamableHTTPServerTransport({
+            sessionIdGenerator: () => randomUUID(),
+            onsessioninitialized: (newId) => { sessions.set(newId, created); },
+          });
+          created.onclose = () => { if (created.sessionId) sessions.delete(created.sessionId); };
+          const mcp = opts.createServer ? opts.createServer() : opts.server;
+          await mcp.connect(created);
+          transport = created;
+        } else {
+          res.statusCode = 400;
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({
+            jsonrpc: "2.0",
+            error: { code: -32000, message: "Bad Request: no valid session ID (send an initialize request first)" },
+            id: null,
+          }));
+          return;
+        }
+      }
+
       // Wrap the dispatcher in an async-local caller context so the tool
       // layer can identify the agent without threading it through every
       // function signature. Static bearer uses a well-known clientId so
@@ -370,7 +413,7 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
           ip: caller,
           staticBearer: isStaticBearer,
         },
-        async () => { await transport.handleRequest(req, res, body); },
+        async () => { await transport!.handleRequest(req, res, body); },
       );
     } catch (err: unknown) {
       logger.error("HTTP transport request failed", "HttpTransport", err);
@@ -409,7 +452,10 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
     close: async () => {
       clearInterval(sweep);
       unsubGrantChanges();
-      try { await transport.close(); } catch { /* best effort */ }
+      for (const t of sessions.values()) {
+        try { await t.close(); } catch { /* best effort */ }
+      }
+      sessions.clear();
       await new Promise<void>((resolve) => server.close(() => resolve()));
     },
   };

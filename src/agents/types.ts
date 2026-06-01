@@ -62,6 +62,12 @@ export interface AgentGrant {
   totalCalls: number;
   /** Optional note the user attached on approval. */
   note?: string;
+  /**
+   * IP the agent registered (DCR'd) from, captured at registration time and
+   * shown on the approval card so the user has context to approve/deny the
+   * connection. Optional — older stored grants won't have it.
+   */
+  registeredFromIp?: string;
 }
 
 /** Result returned by the permission check when gating a tool call. */

@@ -349,6 +349,9 @@ export function loadConfig(): ServerConfig | null {
       desktopNotificationsEnabled: typeof parsed.desktopNotificationsEnabled === "boolean"
         ? parsed.desktopNotificationsEnabled
         : undefined,
+      autoOpenApprovalWindow: typeof parsed.autoOpenApprovalWindow === "boolean"
+        ? parsed.autoOpenApprovalWindow
+        : undefined,
       webhooks: Array.isArray(parsed.webhooks) ? parsed.webhooks : undefined,
     };
     tags.found = true;
