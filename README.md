@@ -14,7 +14,7 @@ It is real because the primitives are real: OAuth 2.1 with PKCE S256, RFC 7591 d
 [![Node.js](https://img.shields.io/badge/node-%3E%3D20.0.0-brightgreen.svg)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-6.0-blue.svg)](https://www.typescriptlang.org/)
 [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-1.29+-green.svg)](https://github.com/modelcontextprotocol/sdk)
-[![Tests](https://img.shields.io/badge/tests-1%2C611%20passing-brightgreen.svg)](#development)
+[![Tests](https://img.shields.io/badge/tests-1%2C967%20passing-brightgreen.svg)](#development)
 
 **Read, compose, and manage your encrypted Proton Mail inbox from any AI assistant — over stdio or remote HTTP — with human-controlled permissions.**
 
@@ -63,7 +63,7 @@ Your emails are decrypted on your own machine by Proton Bridge. This server neve
 - **Multi-account** — configure more than one Proton / IMAP account; hot-swap the active account from the Settings UI with no server restart. Tools accept an optional `account_id` argument to route a single call to a specific account. See [`src/accounts/`](src/accounts/).
 - **Per-agent grants** — each MCP client (identified by its OAuth `client_id`) is gated by its own approvable grant, with optional folder allowlists, IP pins, per-tool rate caps, expiry, and account binding. Separate from the global preset and the escalation flow. See [`src/agents/`](src/agents/).
 - **Live notifications** — desktop toasts (no extra deps) and outbound webhooks (CloudEvents / Slack / Discord, HMAC-signed, retried) fire on grant-state changes. See [`src/notifications/`](src/notifications/).
-- **1,611 tests passing** (Vitest); minimal `any` usage in production source (private Node.js readline internals only).
+- **1,967 tests passing** (Vitest); minimal `any` usage in production source (private Node.js readline internals only).
 
 **Documentation:** [HELP.md](HELP.md) (task-oriented how-tos) · [README_FIRST_AI.md](README_FIRST_AI.md) (agent API reference) · [docs/index.md](docs/index.md) (full index)
 
@@ -556,7 +556,7 @@ npm install
 
 npm run build          # compile TypeScript to dist/
 npm run dev            # watch mode (recompiles on save)
-npm run test           # run test suite (Vitest, 1,611 tests)
+npm run test           # run test suite (Vitest, 1,967 tests)
 npm run test:coverage  # coverage report
 npm run lint           # TypeScript type check (tsc --noEmit)
 npm run settings       # start standalone settings UI (after build)
