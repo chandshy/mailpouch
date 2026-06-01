@@ -50,6 +50,7 @@ import { AgentAuditLog, hashArgs } from "./agents/audit.js";
 import { currentCaller } from "./agents/caller-context.js";
 import { registerAgentServices } from "./agents/registry.js";
 import { notifications as agentNotifications } from "./agents/notifications.js";
+import { shouldAutoOpenApproval } from "./agents/auto-open-approval.js";
 import { AccountManager, registerAccountManager } from "./accounts/manager.js";
 import { DesktopNotifier } from "./notifications/desktop.js";
 import { WebhookDispatcher } from "./notifications/webhooks.js";
@@ -224,8 +225,32 @@ registerAgentServices(agentGrants, agentAudit);
 // every event (no restart needed when toggling / adding endpoints).
 const desktopNotifier = new DesktopNotifier();
 const webhookDispatcher = new WebhookDispatcher();
+// Epoch ms the approval window was last auto-opened — throttles a burst of
+// registrations so we open at most one tab (it lists all pending agents).
+let _lastApprovalOpenAtMs = 0;
 agentNotifications.subscribe((ev) => {
   const cfg = loadConfig();
+  // A new remote agent registered → surface an approval window on screen so the
+  // user can approve/deny the connection immediately (the Agents tab lists it
+  // with its name + source IP). Gated to: feature on, a display present, our UI
+  // up, and not within the burst-throttle window. _settingsUrl/_settingsEnabled
+  // are module vars set once the settings server binds (this callback runs at
+  // event time, long after module init, so they're populated).
+  if (ev.kind === "grant-created") {
+    const open = shouldAutoOpenApproval({
+      enabled: cfg?.autoOpenApprovalWindow !== false,
+      hasDisplay: trayPreconditionSkip() === null,
+      settingsEnabled: _settingsEnabled,
+      settingsUrl: _settingsUrl,
+      nowMs: Date.now(),
+      lastOpenedAtMs: _lastApprovalOpenAtMs,
+    });
+    if (open) {
+      _lastApprovalOpenAtMs = Date.now();
+      try { openBrowser(`${_settingsUrl}#agents`); }
+      catch (err: unknown) { logger.debug("auto-open approval window failed", "MCPServer", err); }
+    }
+  }
   // Desktop: default ON; only skip when explicitly disabled.
   if (cfg?.desktopNotificationsEnabled !== false) {
     const titleByKind: Record<string, string> = {
@@ -458,6 +483,7 @@ function activeToolTier(): ReturnType<typeof parseToolTier> {
   return parseToolTier(cfg?.toolTier);
 }
 
+function registerHandlers(server: Server): void {
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   const tier = activeToolTier();
   const visible = toolsForTier(tier);
@@ -1347,6 +1373,50 @@ Then, if the user approves, use send_email with to="${recipient}" to send it.`,
       throw new McpError(ErrorCode.InvalidRequest, `Unknown prompt: ${name}`);
   }
 });
+}
+
+// Build a fresh MCP server instance with all handlers registered. The HTTP
+// transport calls this per client session so each session gets its own Server
+// (the MCP SDK binds one Server to one transport). Without it, a single shared
+// stateless transport 500s after the first initialize. (2026-06-01)
+export function createSessionServer(): Server {
+  const s = new Server(
+    { name: "mailpouch", version: _pkgVersion },
+    {
+      capabilities: {
+        tools: { listChanged: false },
+        resources: { listChanged: false, subscribe: false },
+        prompts: { listChanged: false },
+      },
+    },
+  );
+  // Capture the MCP handshake's connection info onto this agent's grant for
+  // display in the Agents tab. The `initialize` request runs inside
+  // runWithCaller(), so currentCaller() yields the session's OAuth clientId
+  // here. Identity is the server-issued clientId; the client's self-reported
+  // name/version are display-only. Bearer/stdio callers have no per-agent grant
+  // (trusted), so this is a no-op for them.
+  s.oninitialized = () => {
+    try {
+      const caller = currentCaller();
+      if (!caller || caller.staticBearer || !caller.clientId) return;
+      const info = s.getClientVersion(); // { name, version? } | undefined
+      agentGrants.recordConnection(caller.clientId, {
+        mcpClientName: info?.name,
+        mcpClientVersion: info?.version,
+        transport: "http",
+        registeredFromIp: caller.ip,
+      });
+    } catch (err: unknown) {
+      logger.debug("Failed to record agent handshake connection info", "MCPServer", err);
+    }
+  };
+  registerHandlers(s);
+  return s;
+}
+
+// Register handlers on the module-level server (used by the stdio transport).
+registerHandlers(server);
 
 // ═════════════════════════════════════════════════════════════════════════════
 // STARTUP & LIFECYCLE
@@ -2364,6 +2434,7 @@ async function main() {
       const { startHttpTransport } = await import("./transports/http.js");
       const handle = await startHttpTransport({
         server,
+        createServer: createSessionServer,
         host: remoteCn.remoteHost || "127.0.0.1",
         port: remoteCn.remotePort ?? 8788,
         path: remoteCn.remotePath || "/mcp",

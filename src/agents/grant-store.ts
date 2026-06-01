@@ -177,6 +177,29 @@ export class AgentGrantStore {
     });
   }
 
+  /**
+   * Record live connection info captured at the MCP `initialize` handshake onto
+   * an existing grant (display-only; does NOT change status or identity). No-op
+   * if the clientId has no grant — an unregistered caller is handled by the
+   * grant gate, not here.
+   */
+  recordConnection(
+    clientId: string,
+    info: { mcpClientName?: string; mcpClientVersion?: string; transport?: "http" | "stdio"; registeredFromIp?: string },
+  ): AgentGrant | null {
+    return this.mutate(() => {
+      const g = this.grants.get(clientId);
+      if (!g) return null;
+      if (info.mcpClientName) g.mcpClientName = info.mcpClientName;
+      if (info.mcpClientVersion) g.mcpClientVersion = info.mcpClientVersion;
+      if (info.transport) g.transport = info.transport;
+      if (info.registeredFromIp && !g.registeredFromIp) g.registeredFromIp = info.registeredFromIp;
+      g.lastConnectedAt = new Date().toISOString();
+      this.persist();
+      return g;
+    });
+  }
+
   approve(args: ApproveArgs): AgentGrant | null {
     return this.mutate(() => {
       const g = this.grants.get(args.clientId);

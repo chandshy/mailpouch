@@ -38,6 +38,28 @@ describe("AgentGrantStore", () => {
     expect(s2.get("pmc_ip")?.registeredFromIp).toBe("192.168.1.50");
   });
 
+  it("recordConnection stores the MCP handshake info on an existing grant and persists it", () => {
+    const s1 = new AgentGrantStore(path);
+    s1.createPending({ clientId: "pmc_h", clientName: "DCR Name" });
+    const updated = s1.recordConnection("pmc_h", {
+      mcpClientName: "claude-ai", mcpClientVersion: "1.2.3", transport: "http", registeredFromIp: "10.0.0.9",
+    });
+    expect(updated?.mcpClientName).toBe("claude-ai");
+    expect(updated?.mcpClientVersion).toBe("1.2.3");
+    expect(updated?.transport).toBe("http");
+    expect(updated?.lastConnectedAt).toBeTruthy();
+    expect(updated?.status).toBe("pending"); // unchanged — display only
+    const s2 = new AgentGrantStore(path);
+    expect(s2.get("pmc_h")?.mcpClientName).toBe("claude-ai");
+    expect(s2.get("pmc_h")?.lastConnectedAt).toBeTruthy();
+  });
+
+  it("recordConnection is a no-op for an unknown clientId", () => {
+    const s = new AgentGrantStore(path);
+    expect(s.recordConnection("pmc_missing", { mcpClientName: "x" })).toBeNull();
+    expect(s.get("pmc_missing")).toBeUndefined();
+  });
+
   it("a peer's status change is not reverted by a later local mutation (reloadMerge refresh)", () => {
     // Two store instances over the same file (two processes). B holds a stale
     // `pending` copy; A approves the grant; then B mutates an UNRELATED grant.

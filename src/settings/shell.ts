@@ -608,6 +608,12 @@ ${buildStyles(cspNonce)}
       // Registration context shown on the card so the user has info to decide.
       const registered = g.createdAt ? new Date(g.createdAt).toLocaleString() : '';
       const fromIp = g.registeredFromIp ? ' · from ' + esc(g.registeredFromIp) : '';
+      // Live MCP-handshake connection info (distinct from the DCR client_name).
+      const mcpClient = g.mcpClientName
+        ? 'MCP client: ' + esc(g.mcpClientName) + (g.mcpClientVersion ? ' v' + esc(g.mcpClientVersion) : '')
+          + (g.transport ? ' · ' + esc(g.transport) : '')
+          + (g.lastConnectedAt ? ' · last connected ' + esc(new Date(g.lastConnectedAt).toLocaleString()) : '')
+        : '';
       const cidEsc  = esc(g.clientId);
       const nameEsc = esc(g.clientName);
       const condsJson = esc(JSON.stringify(g.conditions || null));
@@ -631,6 +637,7 @@ ${buildStyles(cspNonce)}
               (g.status === 'pending' && (registered || fromIp)
                 ? '<div style="font-size:12px;color:#888;margin-top:2px">registered ' + esc(registered) + fromIp + '</div>'
                 : '') +
+              (mcpClient ? '<div style="font-size:12px;color:#888;margin-top:2px">' + mcpClient + '</div>' : '') +
               (g.note ? '<div style="font-size:12px;color:#aaa;margin-top:4px;font-style:italic">' + esc(g.note) + '</div>' : '') +
             '</div>' +
             '<div style="display:flex;gap:6px;flex-wrap:wrap">' + buttons + '</div>' +

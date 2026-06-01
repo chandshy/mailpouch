@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.0.72] — 2026-05-31
 
+### Added — agents' MCP handshake connection info captured + shown in the Agents tab
+
+- On the MCP `initialize` handshake, mailpouch now records the connecting agent's **self-reported MCP client name + version**, the **transport**, and a **last-connected** timestamp onto its grant, and shows them on the Agents-tab card (distinct from the DCR-supplied client name). Captured in the per-session `createSessionServer().oninitialized` hook via `server.getClientVersion()` + `currentCaller()`, persisted by a new no-mutation `AgentGrantStore.recordConnection()`. Display-only — **identity remains the stable server-issued OAuth `client_id`**, never the spoofable client name.
+- This makes the register → one-time approve → remembered-on-reconnect → revocable flow (OAuth Dynamic Client Registration) show real connection info per agent. **Non-local agents must use OAuth** to register/appear/approve: set `connection.remoteMode: true` + `remoteOauthEnabled: true` + an admin password (`remoteOauthAdminPassword`, keychain preferred) in `~/.mailpouch.json` and restart. A shared **static bearer token has no per-agent identity, so bearer agents bypass registration by design** and won't appear — switch to OAuth for per-agent visibility/approval. (Bearer/stdio remain trusted/bypassing.)
+- `grant-store` tests cover `recordConnection` (updates + persists handshake info; no-op for an unknown clientId).
+
 ### Added — approval window pops up when a new remote agent connects
 
 - When a remote/HTTP (OAuth) agent registers (DCR), mailpouch now **auto-opens the Settings UI Agents tab in the browser** so the user can approve or deny the connection immediately — on top of the existing desktop notification + tray badge. The agent stays **blocked until approved** (the pending-grant gate already returns an actionable "pending user approval" error to the agent). Authentication between the agent and the server remains automatic (OAuth DCR + PKCE); the only human step is approve/deny.
