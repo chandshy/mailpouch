@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Also fixed:** the Bridge watchdog `setInterval` callback (`startBridgeWatchdog`, `src/index.ts`) ran `await Promise.all([isBridgeReachable…])` and `await launchProtonBridge()` with **no outer try/catch** — a rejection there became an `unhandledRejection` → the same `gracefulShutdown` → exit, firing every 30s precisely while Bridge was flapping. Wrapped the whole tick body in try/catch.
 - **Test:** `src/services/idle-error-listener.test.ts` asserts the IDLE client registers an `'error'` listener; verified to fail before the fix and pass after.
 
+### Added — tray icon blinks a red ⚠ triangle while the mail connection is failing
+
+- When mailpouch can't maintain its IMAP connection (a login/credential failure, or an ongoing connection problem), the system-tray icon now **alternates between the normal envelope and a red warning triangle every 5 seconds**, and the tray tooltip shows the reason (e.g. the login-failed message). It restores to the steady normal icon automatically once the connection recovers. Driven by the `idleAuthFailure` / `idleLastIssue` state from the IDLE reconnect policy; the warning icon is generated in-code (`makeWarningIconPng`, no new asset) to match the existing zero-asset icon pipeline. The 5s timer is `unref`'d and cleared on shutdown.
+
 ### Changed — IDLE reconnect stops on a login failure; backs off on transient issues
 
 - The IMAP IDLE loop (`runIdleLoop`, `simple-imap-service.ts`) previously retried *every* failure on a fixed exponential backoff — including a rejected login, which just hammered Bridge until it returned "too many login attempts" and locked the account out. Now the loop **classifies the failure**:

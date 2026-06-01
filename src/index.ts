@@ -1615,7 +1615,7 @@ function trimForAnalytics(emails: EmailMessage[]): EmailMessage[] {
 // rounded-square gradient envelope (64×64 base, multi-resolution ICO on
 // Windows). Lazy-computed at module load so tests that import index.ts for
 // non-tray reasons don't pay the raster cost when they never touch it.
-import { makeIconPng, makeTrayIconBytes } from "./utils/icon.js";
+import { makeIconPng, makeTrayIconBytes, makeWarningIconPng, makeWarningTrayIconBytes } from "./utils/icon.js";
 import { createTray, preflightTrayBinary, trayPreconditionSkip, inheritDisplayFromParent, type TrayHandle, type TrayItem } from "./utils/tray.js";
 import { buildSettingsTrayMenu } from "./utils/tray-menu.js";
 
@@ -1638,6 +1638,44 @@ let _settingsUnavailableReason: string | undefined;
 let _settingsExternal: boolean = false;
 let _trayInstance:    TrayHandle | null = null;
 let _trayTooltip:     string = "mailpouch";
+// ── Health blink: while the mail connection is failing (IMAP login failure or
+// an ongoing connection problem), the tray icon alternates between the normal
+// envelope and a red ⚠ triangle every 5s so the operator can't miss it. ─────
+let _trayHealthTimer: ReturnType<typeof setInterval> | null = null;
+let _trayDegraded:    boolean = false; // currently in the blink regime
+let _trayBlinkWarn:   boolean = false; // which icon is showing this tick
+let _normalTrayBytes: Buffer | null = null;
+let _warnTrayBytes:   Buffer | null = null;
+
+/** True while mailpouch can't maintain its mail connection — drives the blink. */
+function _mailConnectionFailing(): boolean {
+  return !!(imapService.idleAuthFailure || imapService.idleLastIssue);
+}
+
+/** Runs every 5s. Blinks the icon while failing; restores it once recovered. */
+function _tickTrayHealth(): void {
+  if (!_trayInstance || !_normalTrayBytes || !_warnTrayBytes) return;
+  try {
+    if (_mailConnectionFailing()) {
+      _trayDegraded = true;
+      _trayBlinkWarn = !_trayBlinkWarn;
+      _trayInstance.setIcon(_trayBlinkWarn ? _warnTrayBytes : _normalTrayBytes);
+      const reason = imapService.idleAuthFailure?.message
+        ?? imapService.idleLastIssue?.message
+        ?? "mail connection problem";
+      const tip = `mailpouch · ⚠ ${reason}`;
+      if (tip !== _trayTooltip) { _trayInstance.setTooltip(tip); _trayTooltip = tip; }
+    } else if (_trayDegraded) {
+      // Recovered — stop blinking, restore the normal icon + tooltip/menu.
+      _trayDegraded = false;
+      _trayBlinkWarn = false;
+      _trayInstance.setIcon(_normalTrayBytes);
+      _rebuildTray();
+    }
+  } catch (err: unknown) {
+    logger.debug("Tray health tick failed", "MCPServer", err);
+  }
+}
 
 /**
  * Probe whether a mailpouch settings UI is already serving on `port`.
@@ -1886,6 +1924,15 @@ async function _initTray(): Promise<void> {
     });
     _trayInstance = tray;
     logger.info(`System tray icon active (${tray.backend} backend)`, "MCPServer");
+
+    // Precompute the normal + warning icon bytes once, in the format this
+    // backend's setIcon() expects (native takes PNG; systray2 the platform
+    // bytes — ICO on Windows), then start the 5s health-blink timer.
+    const usePng = tray.backend !== "systray2";
+    _normalTrayBytes = usePng ? makeIconPng(64) : makeTrayIconBytes();
+    _warnTrayBytes   = usePng ? makeWarningIconPng(64) : makeWarningTrayIconBytes();
+    _trayHealthTimer = setInterval(_tickTrayHealth, 5000);
+    _trayHealthTimer.unref();
 
     // Keep the tray menu in sync with grant changes (new pending → badge,
     // approved/revoked → count update).
@@ -2375,6 +2422,7 @@ async function gracefulShutdown(signal: string): Promise<void> {
 
   try {
     // 0. Destroy tray first so the icon vanishes immediately on click.
+    if (_trayHealthTimer) { clearInterval(_trayHealthTimer); _trayHealthTimer = null; }
     if (_trayInstance) {
       try { _trayInstance.destroy(); } catch { /* ignore */ }
       _trayInstance = null;

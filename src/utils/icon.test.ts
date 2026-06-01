@@ -19,6 +19,9 @@ import {
   pngsToIco,
   makeTrayIconBytes,
   renderIconRgba,
+  makeWarningIconPng,
+  makeWarningTrayIconBytes,
+  renderWarningRgba,
 } from "./icon.js";
 
 const PNG_SIG = Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
@@ -43,6 +46,34 @@ describe("icon generator", () => {
   it("renderIconRgba produces a buffer of size * size * 4 bytes", () => {
     const rgba = renderIconRgba(16);
     expect(rgba.length).toBe(16 * 16 * 4);
+  });
+
+  it("makeWarningIconPng returns a valid PNG distinct from the normal icon", () => {
+    const warn = makeWarningIconPng(64);
+    expect(warn.subarray(0, 8)).toEqual(PNG_SIG);
+    expect(warn.readUInt32BE(16)).toBe(64); // IHDR width
+    expect(warn.equals(makeIconPng(64))).toBe(false); // visibly different icon
+  });
+
+  it("warning icon is a red triangle: transparent apex corners, red+opaque near the base center", () => {
+    const S = 64;
+    const rgba = renderWarningRgba(S);
+    const at = (x: number, y: number) => {
+      const i = (y * S + x) * 4;
+      return { r: rgba[i], g: rgba[i + 1], b: rgba[i + 2], a: rgba[i + 3] };
+    };
+    // Bottom-left CANVAS corner is outside the triangle → transparent.
+    expect(at(1, 1).a).toBe(0);
+    // A point low-center sits inside the triangle and is red-dominant + opaque.
+    const base = at(Math.round(S * 0.5), Math.round(S * 0.85));
+    expect(base.a).toBeGreaterThan(200);
+    expect(base.r).toBeGreaterThan(base.g + 40);
+    expect(base.r).toBeGreaterThan(base.b + 40);
+  });
+
+  it("makeWarningTrayIconBytes returns ICO on win32, PNG elsewhere", () => {
+    expect(makeWarningTrayIconBytes("linux").subarray(0, 8)).toEqual(PNG_SIG);
+    expect(makeWarningTrayIconBytes("win32").subarray(0, 4)).toEqual(ICO_SIG);
   });
 
   it("renders transparent corners (rounded-rect mask) and opaque center", () => {
