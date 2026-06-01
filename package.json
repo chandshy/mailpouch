@@ -27,6 +27,7 @@
     "check:npm-audit": "node scripts/check-npm-audit.mjs",
     "check:licenses": "node scripts/check-licenses.mjs",
     "check:tarball": "node scripts/smoke-tarball.mjs",
+    "check:bulk:live": "node scripts/check-bulk-live.mjs",
     "preship:fast": "node scripts/preship.mjs fast",
     "preship": "node scripts/preship.mjs",
     "preship:release": "node scripts/preship.mjs release",

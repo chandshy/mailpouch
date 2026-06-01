@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Also fixed:** the Bridge watchdog `setInterval` callback (`startBridgeWatchdog`, `src/index.ts`) ran `await Promise.all([isBridgeReachable…])` and `await launchProtonBridge()` with **no outer try/catch** — a rejection there became an `unhandledRejection` → the same `gracefulShutdown` → exit, firing every 30s precisely while Bridge was flapping. Wrapped the whole tick body in try/catch.
 - **Test:** `src/services/idle-error-listener.test.ts` asserts the IDLE client registers an `'error'` listener; verified to fail before the fix and pass after.
 
+### Added — `npm run check:bulk:live`, a safe live-Bridge bulk audit
+
+- A self-scoped probe (`scripts/check-bulk-live.mjs`) that exercises the real `SimpleIMAPService` bulk tools against live Proton Bridge to confirm moves actually **land** (not just self-report success), including a move out of the real **"All Mail"** union — the Bridge-specific axis Greenmail can't reproduce. It **never calls `wipe()`** and only creates/deletes its own uniquely-named `Folders/BulkLive*-<ts>` folders and `[bulklive-<ts>] …` messages; existing mail is never touched. A bare run prints the plan; `--confirm` is required to execute. Verdicts: PASS / FALSE-SUCCESS (the bug) / HONEST-FAIL / SKIP.
+
 ### Changed — default settings-UI port is now 8766 (was 8765)
 
 - The default `settingsPort` moved from **8765 → 8766** across every code site (loader, schema, `index.ts`, `settings-main`, settings server, setup UI) and the docs. Installs that pin `settingsPort` in `~/.mailpouch.json` are unaffected; only the unset-default changes. This also steps the default off 8765, a port commonly taken by ad-hoc local HTTP servers.
