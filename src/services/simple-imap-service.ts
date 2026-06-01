@@ -18,6 +18,7 @@ import {
   MAX_TOTAL_ATTACHMENT_BYTES,
 } from '../utils/helpers.js';
 import { buildBridgeTlsOptions, readPinnedBridgeCert } from './bridge-tls.js';
+import { classifyError } from '../utils/error-classify.js';
 import { tracer, type SpanTags } from '../utils/tracer.js';
 import { BRIDGE_MIN_VERSION } from '../config/schema.js';
 
@@ -3192,10 +3193,21 @@ export class SimpleIMAPService {
 
   private idleClient: ImapFlow | null = null;
   private idleActive: boolean = false;
+  /** Set when the IDLE loop STOPS itself due to a login/credential failure, so
+   *  the UI and logs can surface it. It is deliberately NOT retried (retrying a
+   *  bad password just locks the account out). Cleared on a successful connect
+   *  or when startIdle() is called again (e.g. after credentials are updated). */
+  public idleAuthFailure: { message: string; at: Date } | null = null;
+  /** Most recent transient (non-auth) connection issue, while the loop keeps
+   *  retrying with backoff. Cleared on a successful connect. */
+  public idleLastIssue: { category: string; message: string; at: Date } | null = null;
 
   /** Start a background IMAP IDLE connection on INBOX to receive push invalidations. */
   async startIdle(): Promise<void> {
     if (this.idleActive || !this.connectionConfig) return;
+    // A fresh start clears any prior auth-stop so updated credentials get a
+    // real attempt (the loop stops itself again if they're still wrong).
+    this.idleAuthFailure = null;
     this.idleActive = true;
 
     // Run in background — don't await
@@ -3271,9 +3283,12 @@ export class SimpleIMAPService {
     // exponentially on repeated failures so a session-capped Bridge (which
     // answers "454 too many login attempts") isn't hammered every 30s — which
     // previously turned one auth failure into thousands of leaked sockets/day.
-    const BASE_BACKOFF_MS = 30_000;
-    const MAX_BACKOFF_MS = 5 * 60_000;
-    let backoff = BASE_BACKOFF_MS;
+    // Backoff schedule for TRANSIENT (non-auth) failures: 1, 5, 15, 30 minutes,
+    // then hold at 30. A login/credential failure is NOT retried at all (see the
+    // catch below) — hammering a bad password just trips Bridge's "too many
+    // login attempts" lockout and never recovers on its own.
+    const BACKOFF_SCHEDULE_MS = [60_000, 5 * 60_000, 15 * 60_000, 30 * 60_000];
+    let backoffIdx = 0;
 
     const reapIdleClient = async (): Promise<void> => {
       if (!this.idleClient) return;
@@ -3321,7 +3336,10 @@ export class SimpleIMAPService {
         });
 
         await this.idleClient.connect();
-        backoff = BASE_BACKOFF_MS; // connected cleanly — reset the failure backoff
+        // Connected (and authenticated) cleanly — clear failure state.
+        backoffIdx = 0;
+        this.idleAuthFailure = null;
+        this.idleLastIssue = null;
         const lock = await this.idleClient.getMailboxLock('INBOX');
 
         try {
@@ -3346,13 +3364,45 @@ export class SimpleIMAPService {
       } catch (err) {
         // Close the failed client so its socket is reaped, not orphaned.
         await reapIdleClient();
-        logger.debug(`IDLE connection dropped, will retry in ${Math.round(backoff / 1000)}s`, 'IMAPService', err);
+
+        const cls = classifyError(err);
+        const shape = err as { message?: string; responseText?: string };
+        const text = `${shape?.message ?? ''} ${shape?.responseText ?? ''}`.toLowerCase();
+        // A genuine rejected login is terminal; "too many login attempts" is a
+        // transient lockout (caused BY retrying) that DOES clear on its own, so
+        // treat that as a backoff case rather than a permanent stop.
+        const throttled = /too many login attempts|rate limit|try again later|temporarily/.test(text);
+
+        if (cls.category === 'auth' && !throttled) {
+          this.idleAuthFailure = { message: cls.message, at: new Date() };
+          this.idleActive = false;
+          logger.error(
+            `IMAP login failed — ${cls.message} Halting reconnect attempts to avoid locking the account out. ` +
+            `Fix the Bridge password in Settings → Connection, then restart the server (or relaunch from your MCP client) to retry.`,
+            'IMAPService',
+            err,
+          );
+          break; // STOP — do not reconnect on a credential failure
+        }
+
+        // Transient issue: surface it and retry on the 1 / 5 / 15 / 30-minute
+        // schedule (holding at 30), so we never silently spin or hammer Bridge.
+        this.idleLastIssue = { category: cls.category, message: cls.message, at: new Date() };
+        const waitMs = BACKOFF_SCHEDULE_MS[Math.min(backoffIdx, BACKOFF_SCHEDULE_MS.length - 1)];
+        backoffIdx++;
+        logger.warn(
+          `IMAP connection issue — ${cls.message}${throttled ? ' (server is rate-limiting logins)' : ''} ` +
+          `Retrying in ${Math.round(waitMs / 60_000)} min.`,
+          'IMAPService',
+          err,
+        );
+        if (this.idleActive) await interruptibleSleep(waitMs);
+        continue; // skip the post-success short delay below
       }
 
-      if (this.idleActive) {
-        await interruptibleSleep(backoff);
-        backoff = Math.min(backoff * 2, MAX_BACKOFF_MS); // escalate while failing
-      }
+      // Normal end of an IDLE cycle (server closed idle / change detected):
+      // reconnect promptly rather than waiting a full backoff step.
+      if (this.idleActive) await interruptibleSleep(1000);
     }
 
     await reapIdleClient();

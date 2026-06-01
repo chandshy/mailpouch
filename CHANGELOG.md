@@ -14,6 +14,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Also fixed:** the Bridge watchdog `setInterval` callback (`startBridgeWatchdog`, `src/index.ts`) ran `await Promise.all([isBridgeReachable…])` and `await launchProtonBridge()` with **no outer try/catch** — a rejection there became an `unhandledRejection` → the same `gracefulShutdown` → exit, firing every 30s precisely while Bridge was flapping. Wrapped the whole tick body in try/catch.
 - **Test:** `src/services/idle-error-listener.test.ts` asserts the IDLE client registers an `'error'` listener; verified to fail before the fix and pass after.
 
+### Changed — IDLE reconnect stops on a login failure; backs off on transient issues
+
+- The IMAP IDLE loop (`runIdleLoop`, `simple-imap-service.ts`) previously retried *every* failure on a fixed exponential backoff — including a rejected login, which just hammered Bridge until it returned "too many login attempts" and locked the account out. Now the loop **classifies the failure**:
+  - **Login/credential failure** (`classifyError` → `auth`, e.g. wrong Bridge password): logs a prominent `error` ("IMAP login failed — … Fix the Bridge password in Settings → Connection, then restart …") and **stops reconnecting** (`idleAuthFailure` is set for surfacing). It does not retry a bad password into a lockout. Restarting (or relaunching from the MCP client) clears the stop and retries with the new credentials.
+  - **Transient issue** (connection lost / timeout / `too many login attempts` throttle): logs a `warn` with the reason and the next retry time, and retries on a **1 → 5 → 15 → 30-minute** schedule (holding at 30), recording `idleLastIssue`. A throttle is treated as transient (it self-clears) rather than a permanent stop.
+- New `idle-reconnect-policy.test.ts` covers all three branches (auth-stop, connection-retry, throttle-retry).
+
 ### Fixed — connection check showed "✅ Reachable" during an auth failure (454)
 
 - Both the browser "Check Now"/"Test Connections" (`/api/test-connection`) and the terminal-UI test only did a **TCP port probe** (`tcpCheck`), so a Bridge that accepts the socket but rejects AUTH — a 454 throttle or a stale Bridge password — was still shown as green "Reachable". A new shared module `src/settings/connection-check.ts` now does **TCP reachability AND a STARTTLS+AUTH probe** with the saved credentials, distinguishing `reachable` from `authenticated`. The UI renders three states: ✅ Connected / ⚠ Port open · auth failed (with the server's reason, e.g. the 454) / ❌ Unreachable — it can no longer show green while auth is broken.
