@@ -14,6 +14,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Also fixed:** the Bridge watchdog `setInterval` callback (`startBridgeWatchdog`, `src/index.ts`) ran `await Promise.all([isBridgeReachable…])` and `await launchProtonBridge()` with **no outer try/catch** — a rejection there became an `unhandledRejection` → the same `gracefulShutdown` → exit, firing every 30s precisely while Bridge was flapping. Wrapped the whole tick body in try/catch.
 - **Test:** `src/services/idle-error-listener.test.ts` asserts the IDLE client registers an `'error'` listener; verified to fail before the fix and pass after.
 
+### Added — tools return an actionable error when the connection is broken
+
+- When an agent calls a mailbox tool while mailpouch can't connect, it now gets a clear, operator-actionable error instead of an opaque "IMAP operation failed" / hang — so the user knows exactly what to go fix. A new `ConnectionStateError` (`error-classify.ts`) is surfaced **verbatim** by `safeErrorMessage`.
+  - **Login failure recorded** → every IMAP tool fast-fails (via `ensureConnection`) with *"mailpouch can't sign in to your Proton mailbox — … Open the mailpouch Settings UI → Connection, update the Bridge password, then restart mailpouch."* and **does not re-attempt the login** (so tool calls can't re-trip Bridge's "too many login attempts" lockout).
+  - **Reconnect that fails on auth** records the failure (so later calls fast-fail and the tray blink kicks in) and returns the same guidance.
+  - **Bridge unreachable** → *"mailpouch couldn't reach Proton Bridge — … Make sure Proton Bridge is running and signed in, then try again."*
+  - **`send_email`** auth failures now return the same actionable message rather than a bare "Invalid login: 454 …".
+- `idle-reconnect-policy.test.ts` covers the fast-fail (no reconnect attempt), the reconnect-auth path (records failure), and the Bridge-unreachable path.
+
 ### Added — tray icon blinks a red ⚠ triangle while the mail connection is failing
 
 - When mailpouch can't maintain its IMAP connection (a login/credential failure, or an ongoing connection problem), the system-tray icon now **alternates between the normal envelope and a red warning triangle every 5 seconds**, and the tray tooltip shows the reason (e.g. the login-failed message). It restores to the steady normal icon automatically once the connection recovers. Driven by the `idleAuthFailure` / `idleLastIssue` state from the IDLE reconnect policy; the warning icon is generated in-code (`makeWarningIconPng`, no new asset) to match the existing zero-asset icon pipeline. The 5s timer is `unref`'d and cleared on shutdown.

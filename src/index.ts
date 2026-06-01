@@ -56,7 +56,7 @@ import { WebhookDispatcher } from "./notifications/webhooks.js";
 import { logger, getLogFilePath } from "./utils/logger.js";
 import { acquireSingletonLock, releaseSingletonLock } from "./utils/singleton-lock.js";
 import { isValidEmail, validateTargetFolder, requireNumericEmailId } from "./utils/helpers.js";
-import { classifyError } from "./utils/error-classify.js";
+import { classifyError, ConnectionStateError } from "./utils/error-classify.js";
 import { permissions } from "./permissions/manager.js";
 import { loadConfig, defaultConfig, migrateCredentials, loadCredentialsFromKeychain, loadAuxiliaryCredentialsFromKeychain } from "./config/loader.js";
 import type { ToolName } from "./config/schema.js";
@@ -359,6 +359,10 @@ function safeErrorMessage(error: unknown): string {
   // McpError instances originate from our own validated handlers — their
   // messages are already safe to surface directly to the caller.
   if (error instanceof McpError) return error.message;
+  // ConnectionStateError carries operator-actionable guidance (fix the Bridge
+  // password / start Bridge) written for a human — surface it verbatim so the
+  // agent can relay exactly what the user needs to go fix.
+  if (error instanceof ConnectionStateError) return error.message;
   const msg = error.message.toLowerCase();
   if (
     msg.includes("invalid email") ||

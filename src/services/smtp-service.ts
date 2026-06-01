@@ -11,6 +11,7 @@ import { logger } from "../utils/logger.js";
 import { buildBridgeTlsOptions, readPinnedBridgeCert } from "./bridge-tls.js";
 import { parseEmails, parseEmailsDetailed, isValidEmail, sanitizeForLog } from "../utils/helpers.js";
 import { tracer } from "../utils/tracer.js";
+import { classifyError } from "../utils/error-classify.js";
 import { BackoffTracker, isTransientAbuseError } from "../utils/backoff.js";
 
 /**
@@ -505,9 +506,16 @@ export class SMTPService {
         this.backoff.record("terminal");
         logger.error("Failed to send email", "SMTPService", error);
       }
+      // Make a credential failure actionable: tell the user what to go fix
+      // rather than relaying an opaque "Invalid login: 454 …" to the agent.
+      const cls = classifyError(error);
+      const actionable = cls.category === "auth"
+        ? `mailpouch can't sign in to send mail — ${cls.message} ` +
+          `Update the Bridge password in the mailpouch Settings UI → Connection, then restart mailpouch.`
+        : error instanceof Error ? error.message : "Unknown error";
       return {
         success: false,
-        error: error instanceof Error ? error.message : "Unknown error",
+        error: actionable,
       };
     }
     }); // end tracer.span('smtp.sendEmail')

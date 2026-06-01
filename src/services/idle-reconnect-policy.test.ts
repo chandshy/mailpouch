@@ -33,6 +33,8 @@ vi.mock("imapflow", () => {
 vi.mock("mailparser", () => ({ simpleParser: vi.fn() }));
 
 import { SimpleIMAPService } from "./simple-imap-service.js";
+import { ConnectionStateError } from "../utils/error-classify.js";
+import { ImapFlow } from "imapflow";
 
 function primeConfig(svc: SimpleIMAPService) {
   (svc as unknown as { connectionConfig: unknown }).connectionConfig = {
@@ -99,5 +101,53 @@ describe("IDLE reconnect policy", () => {
     expect((svc as unknown as { idleAuthFailure: unknown }).idleAuthFailure).toBeNull();
 
     svc.stopIdle();
+  });
+});
+
+describe("tool calls get an actionable error when the connection is bad", () => {
+  let prev: string | undefined;
+  beforeEach(() => {
+    prev = process.env.MAILPOUCH_INSECURE_BRIDGE;
+    process.env.MAILPOUCH_INSECURE_BRIDGE = "1";
+  });
+  afterEach(() => {
+    if (prev !== undefined) process.env.MAILPOUCH_INSECURE_BRIDGE = prev;
+    else delete process.env.MAILPOUCH_INSECURE_BRIDGE;
+  });
+
+  // ensureConnection is the chokepoint every IMAP tool passes through.
+  const ensureConnection = (svc: SimpleIMAPService) =>
+    (svc as unknown as { ensureConnection(): Promise<void> }).ensureConnection();
+
+  it("fast-fails with actionable guidance and does NOT re-attempt login when a login failure is recorded", async () => {
+    const svc = new SimpleIMAPService();
+    primeConfig(svc);
+    (svc as unknown as { idleAuthFailure: unknown }).idleAuthFailure = {
+      message: "Mail server authentication failed. Check the mailbox credentials in Settings.",
+      at: new Date(),
+    };
+    const ctor = ImapFlow as unknown as ReturnType<typeof vi.fn>;
+    ctor.mockClear();
+
+    await expect(ensureConnection(svc)).rejects.toBeInstanceOf(ConnectionStateError);
+    await expect(ensureConnection(svc)).rejects.toThrow(/Bridge password/i);
+    // Crucially: it did NOT open a new connection (no lockout-feeding retry).
+    expect(ctor).not.toHaveBeenCalled();
+  });
+
+  it("on a reconnect login failure: throws actionable error AND records the failure (so the tray blinks + later calls fast-fail)", async () => {
+    state.mode = "auth";
+    const svc = new SimpleIMAPService();
+    primeConfig(svc);
+    await expect(ensureConnection(svc)).rejects.toThrow(/sign in to your Proton mailbox/i);
+    expect((svc as unknown as { idleAuthFailure: unknown }).idleAuthFailure).not.toBeNull();
+  });
+
+  it("on a reconnect connection failure: actionable 'Bridge not reachable' (does not record an auth failure)", async () => {
+    state.mode = "conn";
+    const svc = new SimpleIMAPService();
+    primeConfig(svc);
+    await expect(ensureConnection(svc)).rejects.toThrow(/reach Proton Bridge/i);
+    expect((svc as unknown as { idleAuthFailure: unknown }).idleAuthFailure ?? null).toBeNull();
   });
 });

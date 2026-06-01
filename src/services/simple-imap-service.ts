@@ -18,7 +18,7 @@ import {
   MAX_TOTAL_ATTACHMENT_BYTES,
 } from '../utils/helpers.js';
 import { buildBridgeTlsOptions, readPinnedBridgeCert } from './bridge-tls.js';
-import { classifyError } from '../utils/error-classify.js';
+import { classifyError, ConnectionStateError } from '../utils/error-classify.js';
 import { tracer, type SpanTags } from '../utils/tracer.js';
 import { BRIDGE_MIN_VERSION } from '../config/schema.js';
 
@@ -882,9 +882,37 @@ export class SimpleIMAPService {
    * Ensure connection is active, reconnect if needed
    */
   private async ensureConnection(): Promise<void> {
+    // Known login failure → fail fast with operator-actionable guidance and do
+    // NOT re-attempt (another bad-password login just re-trips Bridge's "too
+    // many login attempts" lockout). This is what an agent's tool call gets, so
+    // the user is told exactly what to fix rather than an opaque failure.
+    if (this.idleAuthFailure) {
+      throw new ConnectionStateError(
+        `mailpouch can't sign in to your Proton mailbox — ${this.idleAuthFailure.message} ` +
+        `Open the mailpouch Settings UI → Connection, update the Bridge password, then restart mailpouch. ` +
+        `Mailbox tools won't work until this is fixed.`,
+      );
+    }
     if (!this.isConnected || !this.client) {
       logger.warn('IMAP connection lost, attempting to reconnect', 'IMAPService');
-      await this.reconnect();
+      try {
+        await this.reconnect();
+      } catch (err) {
+        const cls = classifyError(err);
+        if (cls.category === 'auth') {
+          // Record it so further calls fail fast (no repeated lockout-feeding
+          // attempts) and the tray surfaces the warning blink.
+          this.idleAuthFailure = { message: cls.message, at: new Date() };
+          throw new ConnectionStateError(
+            `mailpouch can't sign in to your Proton mailbox — ${cls.message} ` +
+            `Open the mailpouch Settings UI → Connection, update the Bridge password, then restart mailpouch.`,
+          );
+        }
+        throw new ConnectionStateError(
+          `mailpouch couldn't reach Proton Bridge — ${cls.message} ` +
+          `Make sure Proton Bridge is running and signed in, then try again.`,
+        );
+      }
     }
   }
 
