@@ -49,6 +49,7 @@ import {
   buildPermissions,
   configExists,
 } from "../config/loader.js";
+import { checkConnections } from "./connection-check.js";
 import {
   ALL_TOOLS,
   PERMISSION_PRESETS,
@@ -964,11 +965,18 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
           json(res, 400, { error: "imapHost must be localhost or a private LAN address." }); return;
         }
 
-        const [smtp, imap] = await Promise.all([
-          tcpCheck(smtpHost, smtpPort),
-          tcpCheck(imapHost, imapPort),
-        ]);
-        json(res, 200, { smtp, imap });
+        // Real check: TCP reachability AND a STARTTLS+AUTH probe with the saved
+        // credentials, so a port that's open but failing auth (e.g. a 454
+        // throttle / wrong Bridge password) is NOT reported as a green
+        // "reachable". `smtp`/`imap` stay as the reachability booleans for
+        // backward compatibility; `smtpAuth`/`imapAuth` carry the auth verdict.
+        const checked = await checkConnections({ smtpHost, smtpPort, imapHost, imapPort });
+        json(res, 200, {
+          smtp: checked.smtp.reachable,
+          imap: checked.imap.reachable,
+          smtpAuth: { authenticated: checked.smtp.authenticated, error: checked.smtp.error },
+          imapAuth: { authenticated: checked.imap.authenticated, error: checked.imap.error },
+        });
         return;
       }
 

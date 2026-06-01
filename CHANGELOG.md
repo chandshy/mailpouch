@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Also fixed:** the Bridge watchdog `setInterval` callback (`startBridgeWatchdog`, `src/index.ts`) ran `await Promise.all([isBridgeReachable…])` and `await launchProtonBridge()` with **no outer try/catch** — a rejection there became an `unhandledRejection` → the same `gracefulShutdown` → exit, firing every 30s precisely while Bridge was flapping. Wrapped the whole tick body in try/catch.
 - **Test:** `src/services/idle-error-listener.test.ts` asserts the IDLE client registers an `'error'` listener; verified to fail before the fix and pass after.
 
+### Fixed — connection check showed "✅ Reachable" during an auth failure (454)
+
+- Both the browser "Check Now"/"Test Connections" (`/api/test-connection`) and the terminal-UI test only did a **TCP port probe** (`tcpCheck`), so a Bridge that accepts the socket but rejects AUTH — a 454 throttle or a stale Bridge password — was still shown as green "Reachable". A new shared module `src/settings/connection-check.ts` now does **TCP reachability AND a STARTTLS+AUTH probe** with the saved credentials, distinguishing `reachable` from `authenticated`. The UI renders three states: ✅ Connected / ⚠ Port open · auth failed (with the server's reason, e.g. the 454) / ❌ Unreachable — it can no longer show green while auth is broken.
+- **Hard timeout:** `imapflow`/`nodemailer` don't reliably honor their own connect/socket timeouts when a server accepts the socket then stalls mid-AUTH (observed against Bridge during a 454), so each probe is wrapped in a wall-clock cap — the check (and the "Check Now" spinner) always returns instead of hanging.
+- Both UIs (browser settings + `tui.ts`) now share one faithful probe; `connection-check.test.ts` covers reachable/authenticated/unreachable/no-creds/auth-stall verdicts.
+
 ### Added — `npm run check:bulk:live`, a safe live-Bridge bulk audit
 
 - A self-scoped probe (`scripts/check-bulk-live.mjs`) that exercises the real `SimpleIMAPService` bulk tools against live Proton Bridge to confirm moves actually **land** (not just self-report success), including a move out of the real **"All Mail"** union — the Bridge-specific axis Greenmail can't reproduce. It **never calls `wipe()`** and only creates/deletes its own uniquely-named `Folders/BulkLive*-<ts>` folders and `[bulklive-<ts>] …` messages; existing mail is never touched. A bare run prints the plan; `--confirm` is required to execute. Verdicts: PASS / FALSE-SUCCESS (the bug) / HONEST-FAIL / SKIP.

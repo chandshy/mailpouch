@@ -801,12 +801,20 @@ ${buildStyles(cspNonce)}
         d = await _wizRunTest();
       }
 
-      smtpSt.textContent = d.smtp ? '✅ Reachable' : '❌ Unreachable';
-      smtpSt.className   = 'conn-row-status ' + (d.smtp ? 'ok' : 'fail');
-      imapSt.textContent = d.imap ? '✅ Reachable' : '❌ Unreachable';
-      imapSt.className   = 'conn-row-status ' + (d.imap ? 'ok' : 'fail');
-      smtpRow.className  = 'conn-row ' + (d.smtp ? 'ok' : 'fail');
-      imapRow.className  = 'conn-row ' + (d.imap ? 'ok' : 'fail');
+      var sst = connStatusText(d.smtp, d.smtpAuth);
+      var ist = connStatusText(d.imap, d.imapAuth);
+      // Auth failed counts as a non-ok row (amber/red), so the wizard doesn't
+      // look "all good" while a 454 is happening.
+      var smtpOk = d.smtp && (!d.smtpAuth || d.smtpAuth.authenticated !== false);
+      var imapOk = d.imap && (!d.imapAuth || d.imapAuth.authenticated !== false);
+      smtpSt.textContent = sst.text;
+      smtpSt.className   = 'conn-row-status ' + (smtpOk ? 'ok' : 'fail');
+      imapSt.textContent = ist.text;
+      imapSt.className   = 'conn-row-status ' + (imapOk ? 'ok' : 'fail');
+      smtpRow.className  = 'conn-row ' + (smtpOk ? 'ok' : 'fail');
+      imapRow.className  = 'conn-row ' + (imapOk ? 'ok' : 'fail');
+      // Progression still only requires reachability (credentials may be
+      // entered/saved in a later step); auth state is shown but not gating.
       const allOk = d.smtp && d.imap;
       hint.style.display = allOk ? 'none' : '';
       W.bridgeTested = allOk;
@@ -1334,8 +1342,13 @@ ${buildStyles(cspNonce)}
         data = await _runTest();
       }
 
-      res.textContent = (data.smtp ? '✅ SMTP' : '❌ SMTP') + '  ' + (data.imap ? '✅ IMAP' : '❌ IMAP');
-      res.style.color = (data.smtp && data.imap) ? 'var(--success)' : 'var(--danger)';
+      var ss = connStatusText(data.smtp, data.smtpAuth);
+      var iss = connStatusText(data.imap, data.imapAuth);
+      res.innerHTML = 'SMTP: ' + escHtml(ss.text) + '<br>IMAP: ' + escHtml(iss.text);
+      // Green only when BOTH authenticated; amber if any port-open-but-auth-failed; red if anything unreachable.
+      var bothAuthed = data.smtpAuth && data.imapAuth && data.smtpAuth.authenticated === true && data.imapAuth.authenticated === true;
+      var anyUnreachable = !data.smtp || !data.imap;
+      res.style.color = bothAuthed ? 'var(--success)' : (anyUnreachable ? 'var(--danger)' : 'var(--warning, #b26a00)');
     } catch(e) {
       res.textContent = 'Error: ' + e.message;
       res.style.color = 'var(--danger)';
@@ -1835,6 +1848,16 @@ ${buildStyles(cspNonce)}
     }
   }
 
+  // Map a (reachable, auth) pair to a label + color. Crucially, a port that is
+  // open but failing auth (e.g. a 454) is shown as a WARNING, never green —
+  // "reachable" alone never implies a working connection.
+  function connStatusText(reachable, auth) {
+    if (!reachable) return { text: '❌ Unreachable', color: 'var(--danger)' };
+    if (auth && auth.authenticated === true) return { text: '✅ Connected', color: 'var(--success)' };
+    if (auth && auth.authenticated === false) return { text: '⚠ Port open · auth failed' + (auth.error ? ' (' + auth.error + ')' : ''), color: 'var(--warning, #b26a00)' };
+    return { text: '◐ Port open · auth not tested', color: 'var(--muted)' };
+  }
+
   async function runStatusCheck() {
     const btn     = document.getElementById('status-check-btn');
     const res     = document.getElementById('status-check-result');
@@ -1852,10 +1875,12 @@ ${buildStyles(cspNonce)}
         }),
       });
       const data = await r.json();
-      document.getElementById('smtp-check-status').textContent = data.smtp ? '✅ Reachable' : '❌ Unreachable';
-      document.getElementById('smtp-check-status').style.color = data.smtp ? 'var(--success)' : 'var(--danger)';
-      document.getElementById('imap-check-status').textContent = data.imap ? '✅ Reachable' : '❌ Unreachable';
-      document.getElementById('imap-check-status').style.color = data.imap ? 'var(--success)' : 'var(--danger)';
+      var ss = connStatusText(data.smtp, data.smtpAuth);
+      var iss = connStatusText(data.imap, data.imapAuth);
+      document.getElementById('smtp-check-status').textContent = ss.text;
+      document.getElementById('smtp-check-status').style.color = ss.color;
+      document.getElementById('imap-check-status').textContent = iss.text;
+      document.getElementById('imap-check-status').style.color = iss.color;
       results.style.display = ''; res.textContent = '';
     } catch(e) {
       res.textContent = 'Error: ' + e.message;

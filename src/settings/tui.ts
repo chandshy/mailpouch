@@ -24,6 +24,7 @@ import {
   configExists,
   getConfigPath,
 } from "../config/loader.js";
+import { checkConnections, type ProtocolCheck } from "./connection-check.js";
 import {
   ALL_TOOLS,
   TOOL_CATEGORIES,
@@ -242,6 +243,15 @@ function c(colour: keyof typeof C, text: string): string {
   return C[colour] + text + C.reset;
 }
 
+/** Render a connection probe result. A port that is open but failing auth
+ *  (e.g. a 454) is shown as a warning, never as a green "reachable". */
+function protoLabel(pc: ProtocolCheck): string {
+  if (!pc.reachable) return c("bRed", "❌ unreachable");
+  if (pc.authenticated === true) return c("bGreen", "✅ connected");
+  if (pc.authenticated === false) return c("yellow", "⚠ port open · auth failed" + (pc.error ? " (" + pc.error + ")" : ""));
+  return C.gray + "◐ port open · auth not tested" + C.reset;
+}
+
 // ─── ANSI Interactive TUI ─────────────────────────────────────────────────────
 
 type AnsiView = "main" | "config" | "preset" | "escalation" | "test" | "server";
@@ -250,7 +260,7 @@ interface AnsiState {
   view: AnsiView;
   menuIdx: number;
   presetIdx: number;
-  testResults: { smtp: boolean | null; imap: boolean | null } | null;
+  testResults: { smtp: ProtocolCheck | null; imap: ProtocolCheck | null } | null;
   serverPort: number;
   serverStarted: boolean;
   cfg: ServerConfig;
@@ -437,7 +447,7 @@ function ansiDraw(st: AnsiState): void {
     } else if (st.testResults.smtp === null) {
       out.push(C.yellow + "checking…" + C.reset);
     } else {
-      out.push(st.testResults.smtp ? c("bGreen", "✅ reachable") : c("bRed", "❌ unreachable"));
+      out.push(protoLabel(st.testResults.smtp));
     }
     out.push("\n");
 
@@ -447,11 +457,11 @@ function ansiDraw(st: AnsiState): void {
     } else if (st.testResults.imap === null) {
       out.push(C.yellow + "checking…" + C.reset);
     } else {
-      out.push(st.testResults.imap ? c("bGreen", "✅ reachable") : c("bRed", "❌ unreachable"));
+      out.push(protoLabel(st.testResults.imap));
     }
     out.push("\n\n");
 
-    if (st.testResults && !st.testResults.smtp && !st.testResults.imap) {
+    if (st.testResults && st.testResults.smtp?.reachable === false && st.testResults.imap?.reachable === false) {
       out.push(c("yellow", "  ⚠  Make sure Proton Bridge is running and signed in.\n"));
       out.push(C.gray + "     Download: https://proton.me/mail/bridge\n" + C.reset);
     }
@@ -709,11 +719,13 @@ export async function runAnsiTUI(serverPort: number, startServerFn: (port: numbe
         st.testResults = { smtp: null, imap: null };
         redraw();
         const cn = st.cfg.connection;
-        const [smtp, imap] = await Promise.all([
-          tcpCheck(cn.smtpHost, cn.smtpPort),
-          tcpCheck(cn.imapHost, cn.imapPort),
-        ]);
-        st.testResults = { smtp, imap };
+        // Real check: TCP reachability AND a STARTTLS+AUTH probe, so a 454 /
+        // bad-password (port open, auth failing) is NOT shown as reachable.
+        const checked = await checkConnections({
+          smtpHost: cn.smtpHost, smtpPort: cn.smtpPort,
+          imapHost: cn.imapHost, imapPort: cn.imapPort,
+        });
+        st.testResults = { smtp: checked.smtp, imap: checked.imap };
         redraw();
       }
 

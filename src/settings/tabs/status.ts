@@ -33,7 +33,7 @@ export function buildStatusHtml(p: StatusParams): string {
 
   <div class="card">
     <div class="card-title">Connection Check</div>
-    <div class="card-desc">Checks whether SMTP and IMAP ports are reachable from this machine.</div>
+    <div class="card-desc">Checks whether SMTP and IMAP are reachable <em>and</em> that the saved credentials actually authenticate — a port that's open but failing auth (e.g. a Bridge 454) is flagged, not shown as connected.</div>
     <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
       <button class="btn btn-ghost" data-action="runStatusCheck" id="status-check-btn">Check Now</button>
       <div id="status-check-result" style="font-size:13px;color:var(--muted)"></div>
