@@ -2367,6 +2367,17 @@ async function main() {
       catch (err: unknown) { logger.debug("agent-grant counter flush failed", "MCPServer", err); }
     }, 5 * 60_000).unref();
 
+    // Expire pending agent approvals after 5 minutes: if the user doesn't
+    // Approve/Deny in time, the request is deleted (token revoked) and the
+    // agent must connect/auth again. Swept every 30s for promptness.
+    const PENDING_APPROVAL_TTL_MS = 5 * 60_000;
+    setInterval(() => {
+      try {
+        const n = agentGrants.expireStalePending(PENDING_APPROVAL_TTL_MS);
+        if (n > 0) logger.info(`Expired ${n} pending agent approval request(s) after ${PENDING_APPROVAL_TTL_MS / 60_000} min`, "MCPServer");
+      } catch (err: unknown) { logger.debug("pending-approval expiry sweep failed", "MCPServer", err); }
+    }, 30_000).unref();
+
     // ── Background auto-sync ────────────────────────────────────────────────
     if (config.autoSync && (config.syncInterval ?? 0) > 0) {
       const intervalMs = (config.syncInterval as number) * 60 * 1000;
@@ -2418,14 +2429,23 @@ async function main() {
     const { loadRemoteSecrets } = await import("./security/keychain.js");
     const remoteSecrets = await loadRemoteSecrets();
     const effectiveBearer = remoteSecrets?.remoteBearerToken || remoteCn?.remoteBearerToken || "";
-    const effectiveAdminPassword = remoteSecrets?.remoteOauthAdminPassword || remoteCn?.remoteOauthAdminPassword || "";
     const hasBearer = !!effectiveBearer;
-    const hasOAuth  = !!remoteCn?.remoteOauthEnabled && !!effectiveAdminPassword;
+    // OAuth is always automatic-consent: each agent authenticates automatically
+    // (DCR + PKCE) and the per-agent grant Approve/Deny (pending → 5-min expiry)
+    // is the only human gate. An admin password is no longer supported.
+    const hasOAuth  = !!remoteCn?.remoteOauthEnabled;
+    if (remoteSecrets?.remoteOauthAdminPassword || remoteCn?.remoteOauthAdminPassword) {
+      logger.warn(
+        "remoteOauthAdminPassword is configured but is no longer supported and will be ignored — " +
+        "OAuth uses automatic consent; agents are gated solely by per-agent Approve/Deny in the Agents tab.",
+        "MCPServer",
+      );
+    }
     if (remoteCn?.remoteMode) {
       if (!hasBearer && !hasOAuth) {
         logger.error(
           "remoteMode is set but no authentication is configured. " +
-          "Set remoteBearerToken OR both remoteOauthEnabled and remoteOauthAdminPassword in ~/.mailpouch.json (or via keychain). " +
+          "Set remoteBearerToken OR remoteOauthEnabled in ~/.mailpouch.json (or via keychain). " +
           "Refusing to start without auth — edit the config or remove remoteMode to use stdio.",
           "MCPServer"
         );
@@ -2442,7 +2462,6 @@ async function main() {
         tlsCertPath: remoteCn.remoteTlsCertPath || undefined,
         tlsKeyPath:  remoteCn.remoteTlsKeyPath  || undefined,
         oauthEnabled: !!remoteCn.remoteOauthEnabled,
-        oauthAdminPassword: effectiveAdminPassword || undefined,
         oauthIssuer: remoteCn.remoteOauthIssuer || undefined,
         rateLimitPerSecond: remoteCn.remoteRateLimitPerSecond ?? undefined,
         rateLimitBurst: remoteCn.remoteRateLimitBurst ?? undefined,

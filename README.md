@@ -53,7 +53,7 @@ Your emails are decrypted on your own machine by Proton Bridge. This server neve
 - **Destructive-tool confirmation** — uses MCP elicitation when the client supports it (Claude Desktop, Cline) so the user sees a prompt before any delete / trash / spam / `alias_delete` / `pass_get` runs. Falls back to a required `{ confirmed: true }` argument for clients without elicitation.
 - **5 permission presets** — read-only by default; write access requires explicit opt-in. Per-tool overrides and rate limits via the **Custom** preset.
 - **Human-gated escalation** — agents request elevated permissions, you approve via browser UI or terminal; the agent cannot approve its own requests.
-- **Browser-based settings UI** at `localhost:8766` — auto-starts with the daemon; setup wizard, live connection test, per-tool toggles, escalation approval panel, OAuth admin password.
+- **Browser-based settings UI** at `localhost:8766` — auto-starts with the daemon; setup wizard, live connection test, per-tool toggles, escalation approval panel, per-agent Approve/Deny.
 - **Native system tray icon** — always visible, clickable menu opens the settings UI or quits. Rendered via a bundled Rust (napi-rs) binding around the `tauri-apps/tray-icon` crate — the same one Tauri ships in production — so the tray behaves correctly on modern GNOME (where the legacy Go-binary library shows a generic placeholder), NSStatusBar on macOS, and Shell_NotifyIcon on Windows. Prebuilts for linux-x64/arm64, darwin-arm64, win32-x64/arm64 ship inside the main package; darwin-x64 (Intel Mac) falls back to the legacy Go backend cleanly.
 - **6 MCP prompts** — triage inbox, compose reply, daily briefing, find subscriptions, thread summary, draft in my voice.
 - **MCP Resources** — individual emails and folders addressable via `email://` and `folder://` URIs.
@@ -254,7 +254,6 @@ Enable it via the Setup tab → **Remote (HTTP) mode**, or by setting these in `
     "remoteTlsCertPath": "/path/to/cert.pem",
     "remoteTlsKeyPath":  "/path/to/key.pem",
     "remoteOauthEnabled": true,
-    "remoteOauthAdminPassword": "<consent-password>",
     "remoteOauthIssuer": "https://mcp.example.com",
     "remoteRateLimitPerSecond": 20,
     "remoteRateLimitBurst": 40
@@ -265,7 +264,7 @@ Enable it via the Setup tab → **Remote (HTTP) mode**, or by setting these in `
 **Auth modes** (mix freely on the same listener):
 
 - **Static bearer** — programmatic clients send `Authorization: Bearer <token>`. Constant-time comparison.
-- **OAuth 2.1 + PKCE-S256** — MCP hosts self-register via `POST /oauth/register` (RFC 7591), discover endpoints via `GET /.well-known/oauth-authorization-server` (RFC 8414) and `GET /.well-known/oauth-protected-resource` (RFC 9728), then run a PKCE consent flow gated on the admin password. Refresh and revocation supported.
+- **OAuth 2.1 + PKCE-S256** — MCP hosts self-register via `POST /oauth/register` (RFC 7591), discover endpoints via `GET /.well-known/oauth-authorization-server` (RFC 8414) and `GET /.well-known/oauth-protected-resource` (RFC 9728), then complete a PKCE flow with **automatic consent** (no admin password — `GET /oauth/authorize` issues a code immediately). The human gate is the per-agent **Approve/Deny** in the Agents tab: the issued token is inert until you approve the agent, and a pending request expires after 5 minutes. Refresh and revocation supported.
 
 **Rate limiting** — token-bucket per caller (per IP for unauthed paths, per token key for `/mcp`). A compromised token can't DoS Bridge.
 
@@ -429,7 +428,7 @@ This server gives AI agents *controlled* access to sensitive email data. The sec
 | Destructive confirmation | MCP elicitation prompt (or required `{ confirmed: true }`) on delete / trash / spam / `alias_delete` / `pass_get` |
 | Escalation gate | Privilege increases require explicit human approval via a separate channel |
 | Audit log | Append-only log of all escalation events at `~/.mailpouch.audit.jsonl` |
-| OAuth 2.1 + PKCE-S256 | Spec-compliant DCR + consent flow gated on admin password (HTTP transport) |
+| OAuth 2.1 + PKCE-S256 | Spec-compliant DCR + automatic consent; per-agent Approve/Deny is the human gate (HTTP transport) |
 | CSRF protection | All mutating settings API calls require a session token (timing-safe comparison) |
 | Origin validation | Settings server validates `Origin`/`Referer` headers; rejects unknown origins |
 | Input validation | Email addresses, folder names, attachment sizes, hostnames, label names |
@@ -471,7 +470,7 @@ Grant lifecycle: `pending` → `active` → `revoked` | `expired`. Each grant ca
 
 Approve, deny, revoke, and "approve-with-conditions" all live in the **Agents** tab of the settings UI. The tab streams live updates over SSE from `GET /api/notifications` — new pending grants surface without a reload. When a new agent registers, mailpouch also **auto-opens this tab in your browser** (and fires a desktop notification + tray badge) so you can approve or deny the connection right away; the pending card shows the agent's name, registering IP, and time. The agent's tool calls stay blocked until you approve. Auto-open is on by default (`autoOpenApprovalWindow`, Setup-tab toggle), skipped on headless hosts. Once connected, the card also shows the agent's **MCP handshake connection info** — its self-reported client name + version, the transport, and a last-connected timestamp — captured at `initialize` (display-only; the agent's identity is its server-issued OAuth `client_id`, not the self-reported name).
 
-> **Per-agent registration requires OAuth.** A shared **static bearer token has no per-agent identity**, so bearer-authenticated agents are treated as one trusted caller and do **not** register or appear in the Agents tab. To require non-local agents to register/approve and be remembered individually, enable OAuth (`connection.remoteMode: true` + `remoteOauthEnabled: true` + an admin password) rather than a bearer token.
+> **Per-agent registration requires OAuth.** A shared **static bearer token has no per-agent identity**, so bearer-authenticated agents are treated as one trusted caller and do **not** register or appear in the Agents tab. To require non-local agents to register/approve and be remembered individually, enable OAuth (`connection.remoteMode: true` + `remoteOauthEnabled: true`) rather than a bearer token. OAuth uses **automatic consent** — agents authenticate with no human password; your only action is **Approve/Deny** in the Agents tab (a pending request expires after 5 minutes). `remoteOauthAdminPassword` is deprecated and ignored.
 
 Every gated tool call writes one row to an append-only JSONL audit log at `~/.mailpouch-agent-audit.jsonl` (mode `0600`). Rows carry a truncated sha256 `argHash` — **never argument values, never response bodies** — so "same call repeated" patterns are observable without creating a parallel on-disk copy of your email. The log rotates at 10 MB and keeps 3 gzipped generations.
 

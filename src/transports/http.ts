@@ -65,8 +65,6 @@ export interface HttpTransportOptions {
   tlsKeyPath?: string;
   /** Enable OAuth 2.1 authorization-server endpoints alongside the static bearer. */
   oauthEnabled?: boolean;
-  /** Admin password required to complete the consent step. Required when oauthEnabled=true. */
-  oauthAdminPassword?: string;
   /** Externally-visible issuer URL. When omitted we derive it from the bind host/port. */
   oauthIssuer?: string;
   /** Requests per second per client for rate limiting (default 20). */
@@ -235,8 +233,13 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
   // subscribe to the notifications bus. The earlier ordering registered the
   // grant-change listener and then threw, orphaning the subscription handle
   // (the caller never received `unsubGrantChanges` to clean it up).
-  if (opts.oauthEnabled && !opts.oauthAdminPassword) {
-    throw new Error("OAuth is enabled but no oauthAdminPassword is set. Generate one or disable OAuth.");
+  if (opts.oauthEnabled) {
+    // OAuth is always automatic-consent: agents authenticate fully automatically
+    // (DCR + PKCE) and the per-agent grant Approve/Deny is the only human gate.
+    logger.info(
+      "OAuth enabled (automatic consent): agents self-register and obtain a token automatically; each is inert until you Approve it in the Agents tab, and a pending request expires after 5 minutes.",
+      "HTTPTransport",
+    );
   }
 
   const oauthStore = new OAuthStore();
@@ -249,10 +252,10 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
       if (n > 0) logger.info(`Revoked ${n} OAuth token(s) for client ${ev.grant.clientId} after ${ev.kind}`, "HTTPTransport");
     }
   });
-  const oauthHandlers = opts.oauthEnabled && opts.oauthAdminPassword
+  const oauthHandlers = opts.oauthEnabled
     ? new OAuthHandlers(
         oauthStore,
-        { issuer, resource: `${issuer}${path}`, adminPassword: opts.oauthAdminPassword },
+        { issuer, resource: `${issuer}${path}` },
         unauthLimiter,
         opts.agentGrants
           ? (c) => opts.agentGrants!.createPending({ clientId: c.client_id, clientName: c.client_name ?? "", registeredFromIp: c.ip })

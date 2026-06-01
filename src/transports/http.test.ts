@@ -265,7 +265,7 @@ describe("HTTP transport", () => {
     expect(initRes.status).toBeLessThan(400);
   });
 
-  describe("OAuth 2.1 mode", () => {
+  describe("OAuth 2.1 mode (automatic consent)", () => {
     async function startOauth(): Promise<{ url: string; port: number }> {
       const port = await freePort();
       handle = await startHttpTransport({
@@ -274,27 +274,44 @@ describe("HTTP transport", () => {
         host: "127.0.0.1",
         bearerToken: "",
         oauthEnabled: true,
-        oauthAdminPassword: "admin-pw",
       });
       return { url: `http://127.0.0.1:${port}`, port };
     }
 
-    it("refuses to start when oauthEnabled is true but no admin password is set", async () => {
-      const port = await freePort();
-      await expect(
-        startHttpTransport({
-          server: buildServer(),
-          port,
-          host: "127.0.0.1",
-          bearerToken: "",
-          oauthEnabled: true,
-        }),
-      ).rejects.toThrow(/oauthAdminPassword|admin password/i);
+    async function dcr(url: string, redirectUris: string[] = ["http://localhost:9999/cb"], clientName?: string): Promise<{ client_id: string }> {
+      const reg = await fetch(`${url}/oauth/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ redirect_uris: redirectUris, ...(clientName ? { client_name: clientName } : {}) }),
+      });
+      return await reg.json() as { client_id: string };
+    }
+
+    async function pkce(): Promise<{ verifier: string; challenge: string }> {
+      const { createHash, randomBytes: rb } = await import("crypto");
+      const verifier = rb(32).toString("base64url");
+      const challenge = createHash("sha256").update(verifier).digest("base64url");
+      return { verifier, challenge };
+    }
+
+    // Automatic consent: GET /oauth/authorize issues a code and 302-redirects,
+    // with NO human password step (the human gate is per-agent Approve/Deny).
+    async function getCode(url: string, clientId: string, challenge: string, redirectUri = "http://localhost:9999/cb", extra: Record<string, string> = {}): Promise<{ status: number; location: string; code: string }> {
+      const q = new URLSearchParams({ client_id: clientId, redirect_uri: redirectUri, code_challenge: challenge, code_challenge_method: "S256", ...extra });
+      const res = await fetch(`${url}/oauth/authorize?${q.toString()}`, { redirect: "manual" });
+      const location = res.headers.get("location") ?? "";
+      let code = "";
+      try { if (location) code = new URL(location).searchParams.get("code") ?? ""; } catch { /* non-redirect error response */ }
+      return { status: res.status, location, code };
+    }
+
+    it("starts in automatic-consent mode when OAuth is enabled without an admin password", async () => {
+      const { url } = await startOauth();
+      const res = await fetch(`${url}/.well-known/oauth-authorization-server`);
+      expect(res.status).toBe(200);
     });
 
-    // PERM-008: when OAuth is enabled the static bearer must NOT be accepted —
-    // it authenticates as a single shared identity that bypasses the per-agent
-    // grant store and audit log. OAuth deployments must use per-client tokens.
+    // PERM-008: when OAuth is enabled the static bearer must NOT be accepted.
     it("rejects the static bearer when OAuth is enabled", async () => {
       const port = await freePort();
       handle = await startHttpTransport({
@@ -303,7 +320,6 @@ describe("HTTP transport", () => {
         host: "127.0.0.1",
         bearerToken: "static-secret",
         oauthEnabled: true,
-        oauthAdminPassword: "admin-pw",
       });
       const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
         method: "POST",
@@ -342,62 +358,23 @@ describe("HTTP transport", () => {
       expect(res.status).toBe(400);
     });
 
-    // XPORT-008: the consent POST now requires a CSRF token issued by the GET
-    // consent page (bound to the client_id). Harvest it for an existing client.
-    async function csrfFor(url: string, clientId: string, redirectUri = "http://localhost:9999/cb"): Promise<string> {
-      const q = new URLSearchParams({
-        client_id: clientId,
-        redirect_uri: redirectUri,
-        code_challenge: "x".repeat(43),
-        code_challenge_method: "S256",
-      });
-      const res = await fetch(`${url}/oauth/authorize?${q.toString()}`);
-      const html = await res.text();
-      return /name="csrf_token" value="([^"]+)"/.exec(html)?.[1] ?? "";
-    }
-
-    it("completes an end-to-end PKCE flow: register → authorize → token → /mcp", async () => {
+    it("auto-consents on GET /oauth/authorize → 302 with a code (no password)", async () => {
       const { url } = await startOauth();
-      // 1. DCR
-      const reg = await fetch(`${url}/oauth/register`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          client_name: "E2E",
-          redirect_uris: ["http://localhost:9999/cb"],
-        }),
-      });
-      expect(reg.status).toBe(201);
-      const client = await reg.json() as { client_id: string };
-
-      // 2. PKCE challenge
-      const { createHash, randomBytes: rb } = await import("crypto");
-      const verifier = rb(32).toString("base64url");
-      const challenge = createHash("sha256").update(verifier).digest("base64url");
-
-      // 3. Consent submit (harvest the CSRF token from the GET page first).
-      const csrf = await csrfFor(url, client.client_id);
-      const consent = await fetch(`${url}/oauth/authorize`, {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded", Origin: url },
-        body: new URLSearchParams({
-          client_id: client.client_id,
-          redirect_uri: "http://localhost:9999/cb",
-          code_challenge: challenge,
-          state: "xyz",
-          scope: "mcp:full",
-          admin_password: "admin-pw",
-          csrf_token: csrf,
-        }).toString(),
-        redirect: "manual",
-      });
-      expect(consent.status).toBe(302);
-      const location = consent.headers.get("location") ?? "";
+      const client = await dcr(url, ["http://localhost:9999/cb"], "Inky");
+      const { challenge } = await pkce();
+      const { status, location, code } = await getCode(url, client.client_id, challenge);
+      expect(status).toBe(302);
       expect(location).toContain("http://localhost:9999/cb");
-      const code = new URL(location).searchParams.get("code") ?? "";
+      expect(code).toBeTruthy();
+    });
+
+    it("completes an end-to-end PKCE flow: register → authorize (auto) → token → /mcp", async () => {
+      const { url } = await startOauth();
+      const client = await dcr(url, ["http://localhost:9999/cb"], "E2E");
+      const { verifier, challenge } = await pkce();
+      const { code } = await getCode(url, client.client_id, challenge, "http://localhost:9999/cb", { state: "xyz", scope: "mcp:full" });
       expect(code).toBeTruthy();
 
-      // 4. Token exchange.
       const tokenRes = await fetch(`${url}/oauth/token`, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -413,7 +390,6 @@ describe("HTTP transport", () => {
       const tok = await tokenRes.json() as { access_token: string; token_type: string };
       expect(tok.token_type).toBe("Bearer");
 
-      // 5. Authenticated /mcp call with the issued token.
       const mcp = await fetch(`${url}/mcp`, {
         method: "POST",
         headers: {
@@ -425,66 +401,17 @@ describe("HTTP transport", () => {
           jsonrpc: "2.0",
           id: 1,
           method: "initialize",
-          params: {
-            protocolVersion: "2025-11-25",
-            capabilities: {},
-            clientInfo: { name: "e2e-test", version: "0" },
-          },
+          params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "e2e-test", version: "0" } },
         }),
       });
       expect(mcp.status).toBeLessThan(400);
     });
 
-    it("rejects an authorize POST with the wrong admin password", async () => {
-      const { url } = await startOauth();
-      const reg = await fetch(`${url}/oauth/register`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ redirect_uris: ["http://localhost:9999/cb"] }),
-      });
-      const client = await reg.json() as { client_id: string };
-
-      const csrf = await csrfFor(url, client.client_id);
-      const res = await fetch(`${url}/oauth/authorize`, {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded", Origin: url },
-        body: new URLSearchParams({
-          client_id: client.client_id,
-          redirect_uri: "http://localhost:9999/cb",
-          code_challenge: "x".repeat(43),
-          admin_password: "wrong",
-          csrf_token: csrf,
-        }).toString(),
-        redirect: "manual",
-      });
-      expect(res.status).toBe(403);
-    });
-
     it("rejects a token request with a tampered code_verifier (PKCE fails)", async () => {
       const { url } = await startOauth();
-      const reg = await fetch(`${url}/oauth/register`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ redirect_uris: ["http://localhost:9999/cb"] }),
-      });
-      const client = await reg.json() as { client_id: string };
-      const { createHash: h, randomBytes: rb2 } = await import("crypto");
-      const verifier = rb2(32).toString("base64url");
-      const challenge = h("sha256").update(verifier).digest("base64url");
-      const csrf = await csrfFor(url, client.client_id);
-      const consent = await fetch(`${url}/oauth/authorize`, {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded", Origin: url },
-        body: new URLSearchParams({
-          client_id: client.client_id,
-          redirect_uri: "http://localhost:9999/cb",
-          code_challenge: challenge,
-          admin_password: "admin-pw",
-          csrf_token: csrf,
-        }).toString(),
-        redirect: "manual",
-      });
-      const code = new URL(consent.headers.get("location") ?? "").searchParams.get("code") ?? "";
+      const client = await dcr(url);
+      const { challenge } = await pkce();
+      const { code } = await getCode(url, client.client_id, challenge);
       const tokenRes = await fetch(`${url}/oauth/token`, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -497,149 +424,7 @@ describe("HTTP transport", () => {
         }).toString(),
       });
       expect(tokenRes.status).toBe(400);
-      const body = await tokenRes.json() as { error: string };
-      expect(body.error).toBe("invalid_grant");
-    });
-
-    it("serves the consent HTML on GET /oauth/authorize", async () => {
-      const { url } = await startOauth();
-      const reg = await fetch(`${url}/oauth/register`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ redirect_uris: ["http://localhost:9999/cb"], client_name: "Inky" }),
-      });
-      const client = await reg.json() as { client_id: string };
-      const q = new URLSearchParams({
-        client_id: client.client_id,
-        redirect_uri: "http://localhost:9999/cb",
-        code_challenge: "x".repeat(43),
-        code_challenge_method: "S256",
-      });
-      const res = await fetch(`${url}/oauth/authorize?${q.toString()}`);
-      expect(res.status).toBe(200);
-      const html = await res.text();
-      expect(html).toContain("Authorize mailpouch");
-      expect(html).toContain("Inky");
-    });
-
-    // Helper: register a client and GET the consent page; return the form's
-    // hidden CSRF token (XPORT-008) parsed out of the HTML.
-    async function getConsent(url: string, redirectUri = "http://localhost:9999/cb"): Promise<{ clientId: string; csrf: string; challenge: string; verifier: string }> {
-      const reg = await fetch(`${url}/oauth/register`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ redirect_uris: [redirectUri] }),
-      });
-      const client = await reg.json() as { client_id: string };
-      const { createHash, randomBytes: rb } = await import("crypto");
-      const verifier = rb(32).toString("base64url");
-      const challenge = createHash("sha256").update(verifier).digest("base64url");
-      const q = new URLSearchParams({
-        client_id: client.client_id,
-        redirect_uri: redirectUri,
-        code_challenge: challenge,
-        code_challenge_method: "S256",
-      });
-      const res = await fetch(`${url}/oauth/authorize?${q.toString()}`);
-      const html = await res.text();
-      const m = /name="csrf_token" value="([^"]+)"/.exec(html);
-      return { clientId: client.client_id, csrf: m?.[1] ?? "", challenge, verifier };
-    }
-
-    it("XPORT-003 — GET consent page sets clickjacking headers + frame-ancestors CSP", async () => {
-      const { url } = await startOauth();
-      const reg = await fetch(`${url}/oauth/register`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ redirect_uris: ["http://localhost:9999/cb"] }),
-      });
-      const client = await reg.json() as { client_id: string };
-      const q = new URLSearchParams({
-        client_id: client.client_id,
-        redirect_uri: "http://localhost:9999/cb",
-        code_challenge: "x".repeat(43),
-        code_challenge_method: "S256",
-      });
-      const res = await fetch(`${url}/oauth/authorize?${q.toString()}`);
-      expect(res.headers.get("x-frame-options")).toBe("DENY");
-      expect(res.headers.get("x-content-type-options")).toBe("nosniff");
-      // frame-ancestors is only honoured as an HTTP header, not in a <meta> tag.
-      expect(res.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
-      const html = await res.text();
-      expect(html).toContain("frame-ancestors 'none'");
-    });
-
-    it("XPORT-008 — consent POST is rejected without a valid CSRF token", async () => {
-      const { url } = await startOauth();
-      const { clientId, challenge } = await getConsent(url);
-      const res = await fetch(`${url}/oauth/authorize`, {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({
-          client_id: clientId,
-          redirect_uri: "http://localhost:9999/cb",
-          code_challenge: challenge,
-          admin_password: "admin-pw",
-          // no csrf_token
-        }).toString(),
-        redirect: "manual",
-      });
-      expect(res.status).toBe(403);
-    });
-
-    it("XPORT-008 — consent POST with the GET-issued CSRF token succeeds", async () => {
-      const { url } = await startOauth();
-      const { clientId, csrf, challenge } = await getConsent(url);
-      expect(csrf).toBeTruthy();
-      const res = await fetch(`${url}/oauth/authorize`, {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded", Origin: url },
-        body: new URLSearchParams({
-          client_id: clientId,
-          redirect_uri: "http://localhost:9999/cb",
-          code_challenge: challenge,
-          admin_password: "admin-pw",
-          csrf_token: csrf,
-        }).toString(),
-        redirect: "manual",
-      });
-      expect(res.status).toBe(302);
-    });
-
-    it("XPORT-008 — consent POST is rejected when Origin is cross-site", async () => {
-      const { url } = await startOauth();
-      const { clientId, csrf, challenge } = await getConsent(url);
-      const res = await fetch(`${url}/oauth/authorize`, {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded", Origin: "http://attacker.local" },
-        body: new URLSearchParams({
-          client_id: clientId,
-          redirect_uri: "http://localhost:9999/cb",
-          code_challenge: challenge,
-          admin_password: "admin-pw",
-          csrf_token: csrf,
-        }).toString(),
-        redirect: "manual",
-      });
-      expect(res.status).toBe(403);
-    });
-
-    it("XPORT-007 — consent POST re-validates the code_challenge format", async () => {
-      const { url } = await startOauth();
-      const { clientId, csrf } = await getConsent(url);
-      const res = await fetch(`${url}/oauth/authorize`, {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded", Origin: url },
-        body: new URLSearchParams({
-          client_id: clientId,
-          redirect_uri: "http://localhost:9999/cb",
-          code_challenge: "", // malformed / empty — GET would have rejected this
-          admin_password: "admin-pw",
-          csrf_token: csrf,
-        }).toString(),
-        redirect: "manual",
-      });
-      expect(res.status).toBe(400);
+      expect((await tokenRes.json() as { error: string }).error).toBe("invalid_grant");
     });
 
     it("XPORT-009 — DCR rejects javascript:/data:/file: redirect_uri schemes", async () => {
@@ -688,7 +473,6 @@ describe("HTTP transport", () => {
         host: "127.0.0.1",
         bearerToken: "",
         oauthEnabled: true,
-        oauthAdminPassword: "admin-pw",
         rateLimitPerSecond: 5,
         rateLimitBurst: 3,
       });
@@ -697,8 +481,7 @@ describe("HTTP transport", () => {
           fetch(`http://127.0.0.1:${port}/.well-known/oauth-authorization-server`),
         ),
       );
-      const statuses = responses.map(r => r.status);
-      expect(statuses).toContain(429);
+      expect(responses.map(r => r.status)).toContain(429);
     });
 
     it("token endpoint rejects unsupported grant types", async () => {
@@ -714,19 +497,13 @@ describe("HTTP transport", () => {
 
     it("token endpoint rejects missing Content-Type with 415 (RFC 6749 strict)", async () => {
       const { url } = await startOauth();
-      const res = await fetch(`${url}/oauth/token`, {
-        method: "POST",
-        // Note: NO Content-Type header. fetch() will add text/plain by default,
-        // which readBody also rejects — same 415 path.
-        body: "grant_type=authorization_code",
-      });
+      const res = await fetch(`${url}/oauth/token`, { method: "POST", body: "grant_type=authorization_code" });
       expect(res.status).toBe(415);
       expect((await res.json() as { error: string }).error).toBe("invalid_request");
     });
 
     it("token endpoint rejects mismatched redirect_uri / client_id / unknown codes", async () => {
       const { url } = await startOauth();
-      // Unknown code
       const unknown = await fetch(`${url}/oauth/token`, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -741,32 +518,9 @@ describe("HTTP transport", () => {
       expect(unknown.status).toBe(400);
       expect((await unknown.json() as { error: string }).error).toBe("invalid_grant");
 
-      // Wrong client_id / redirect_uri on a valid code.
-      const reg = await fetch(`${url}/oauth/register`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ redirect_uris: ["http://localhost:9998/cb"] }),
-      });
-      const client = await reg.json() as { client_id: string };
-      const { createHash, randomBytes: rb } = await import("crypto");
-      const verifier = rb(32).toString("base64url");
-      const challenge = createHash("sha256").update(verifier).digest("base64url");
-      const csrf = await csrfFor(url, client.client_id, "http://localhost:9998/cb");
-      const consent = await fetch(`${url}/oauth/authorize`, {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded", Origin: url },
-        body: new URLSearchParams({
-          client_id: client.client_id,
-          redirect_uri: "http://localhost:9998/cb",
-          code_challenge: challenge,
-          admin_password: "admin-pw",
-          csrf_token: csrf,
-        }).toString(),
-        redirect: "manual",
-      });
-      const code = new URL(consent.headers.get("location") ?? "").searchParams.get("code") ?? "";
-
-      // Wrong client_id
+      const client = await dcr(url, ["http://localhost:9998/cb"]);
+      const { verifier, challenge } = await pkce();
+      const { code } = await getCode(url, client.client_id, challenge, "http://localhost:9998/cb");
       const wrongClient = await fetch(`${url}/oauth/token`, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -793,32 +547,28 @@ describe("HTTP transport", () => {
 
     it("GET /oauth/authorize rejects unknown client_id with 400", async () => {
       const { url } = await startOauth();
-      const q = new URLSearchParams({
-        client_id: "pmc_unknown",
-        redirect_uri: "http://x/cb",
-        code_challenge: "x".repeat(43),
-        code_challenge_method: "S256",
-      });
-      const res = await fetch(`${url}/oauth/authorize?${q.toString()}`);
-      expect(res.status).toBe(400);
+      const { status } = await getCode(url, "pmc_unknown", "x".repeat(43), "http://x/cb");
+      expect(status).toBe(400);
     });
 
     it("GET /oauth/authorize rejects non-S256 PKCE method", async () => {
       const { url } = await startOauth();
-      const reg = await fetch(`${url}/oauth/register`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ redirect_uris: ["http://localhost:9999/cb"] }),
-      });
-      const client = await reg.json() as { client_id: string };
+      const client = await dcr(url);
       const q = new URLSearchParams({
         client_id: client.client_id,
         redirect_uri: "http://localhost:9999/cb",
         code_challenge: "x".repeat(43),
         code_challenge_method: "plain",
       });
-      const res = await fetch(`${url}/oauth/authorize?${q.toString()}`);
+      const res = await fetch(`${url}/oauth/authorize?${q.toString()}`, { redirect: "manual" });
       expect(res.status).toBe(400);
+    });
+
+    it("GET /oauth/authorize rejects a malformed code_challenge (auto-consent still validates PKCE)", async () => {
+      const { url } = await startOauth();
+      const client = await dcr(url);
+      const { status } = await getCode(url, client.client_id, ""); // empty challenge
+      expect(status).toBe(400);
     });
 
     it("DCR rejects malformed redirect_uri entries", async () => {
@@ -833,61 +583,26 @@ describe("HTTP transport", () => {
 
     it("token/revoke endpoints surface a 400 for malformed bodies", async () => {
       const { url } = await startOauth();
-      // Token: application/json content-type but non-JSON body
-      const token = await fetch(`${url}/oauth/token`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: "{not json",
-      });
+      const token = await fetch(`${url}/oauth/token`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{not json" });
       expect(token.status).toBe(400);
-      // Revoke: same trick
-      const revoke = await fetch(`${url}/oauth/revoke`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: "{not json",
-      });
+      const revoke = await fetch(`${url}/oauth/revoke`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{not json" });
       expect(revoke.status).toBe(400);
     });
 
     it("rejects an OAuth token bound to a different resource (RFC 8707)", async () => {
       const port = await freePort();
-      // Start with an explicit issuer + resource that DIFFERS from the request URL.
       handle = await startHttpTransport({
         server: buildServer(),
         port,
         host: "127.0.0.1",
         bearerToken: "",
         oauthEnabled: true,
-        oauthAdminPassword: "admin-pw",
         oauthIssuer: `http://127.0.0.1:${port}`,
       });
       const baseUrl = `http://127.0.0.1:${port}`;
-
-      const reg = await fetch(`${baseUrl}/oauth/register`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ redirect_uris: ["http://localhost:9998/cb"] }),
-      });
-      const client = await reg.json() as { client_id: string };
-      const { createHash, randomBytes: rb } = await import("crypto");
-      const verifier = rb(32).toString("base64url");
-      const challenge = createHash("sha256").update(verifier).digest("base64url");
-      // Authorize with a foreign resource URI.
-      const csrf = await csrfFor(baseUrl, client.client_id, "http://localhost:9998/cb");
-      const consent = await fetch(`${baseUrl}/oauth/authorize`, {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded", Origin: baseUrl },
-        body: new URLSearchParams({
-          client_id: client.client_id,
-          redirect_uri: "http://localhost:9998/cb",
-          code_challenge: challenge,
-          resource: "https://other.example.com/mcp",
-          admin_password: "admin-pw",
-          csrf_token: csrf,
-        }).toString(),
-        redirect: "manual",
-      });
-      const code = new URL(consent.headers.get("location") ?? "").searchParams.get("code") ?? "";
+      const client = await dcr(baseUrl, ["http://localhost:9998/cb"]);
+      const { verifier, challenge } = await pkce();
+      const { code } = await getCode(baseUrl, client.client_id, challenge, "http://localhost:9998/cb", { resource: "https://other.example.com/mcp" });
 
       const tokRes = await fetch(`${baseUrl}/oauth/token`, {
         method: "POST",
@@ -903,7 +618,6 @@ describe("HTTP transport", () => {
       expect(tokRes.status).toBe(200);
       const token = (await tokRes.json() as { access_token: string }).access_token;
 
-      // The token is bound to other.example.com, but we're hitting 127.0.0.1.
       const mcp = await fetch(`${baseUrl}/mcp`, {
         method: "POST",
         headers: {

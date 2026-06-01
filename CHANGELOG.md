@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.0.72] — 2026-05-31
 
+### Changed — OAuth is now fully automatic; Approve/Deny is the only human gate (BREAKING for OAuth deployments)
+
+- The OAuth `/authorize` **admin-password consent has been removed entirely.** Agents now authenticate **fully automatically** (DCR → PKCE-S256 → token, no human-typed password): a valid `GET /oauth/authorize` immediately issues a code and 302-redirects. The **only** human interaction is the per-agent **Approve `<agent>`? / Deny** in the Agents tab (auto-surfaced approval window). The issued token is **inert until the grant is approved**, so this moves the human gate rather than removing it. The security envelope is unchanged otherwise: PKCE binds the code to the agent's verifier, `redirect_uri` is allowlisted, and endpoints are rate-limited.
+- **`remoteOauthAdminPassword` is deprecated and ignored** (a startup warning is logged if set). `remoteOauthEnabled: true` alone now enables OAuth in automatic-consent mode — no admin password to configure. The consent HTML page, the password `POST /oauth/authorize`, and the consent CSRF machinery were removed.
+- **Pending approvals expire after 5 minutes.** If you don't Approve/Deny within 5 minutes, the request is deleted (any issued token revoked) and the agent must connect/auth again. Swept every 30s (`AgentGrantStore.expireStalePending`).
+- `http.test.ts` OAuth suite rewritten to the auto-consent flow (GET → 302 with code → PKCE token exchange); password/CSRF/consent-page tests removed.
+
 ### Added — agents' MCP handshake connection info captured + shown in the Agents tab
 
 - On the MCP `initialize` handshake, mailpouch now records the connecting agent's **self-reported MCP client name + version**, the **transport**, and a **last-connected** timestamp onto its grant, and shows them on the Agents-tab card (distinct from the DCR-supplied client name). Captured in the per-session `createSessionServer().oninitialized` hook via `server.getClientVersion()` + `currentCaller()`, persisted by a new no-mutation `AgentGrantStore.recordConnection()`. Display-only — **identity remains the stable server-issued OAuth `client_id`**, never the spoofable client name.

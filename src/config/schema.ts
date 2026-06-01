@@ -231,8 +231,11 @@ export interface ConnectionSettings {
    */
   remoteOauthEnabled?: boolean;
   /**
-   * Admin password required to approve OAuth consent. Required when
-   * remoteOauthEnabled=true. High-value secret — keychain storage is preferred.
+   * @deprecated No longer supported and ignored if set. OAuth now uses
+   * automatic consent (the agent authenticates automatically via DCR + PKCE)
+   * and the sole human gate is the per-agent Approve/Deny in the Agents tab,
+   * where a pending request expires after 5 minutes. A startup warning is
+   * logged if this is present.
    */
   remoteOauthAdminPassword?: string;
   /**

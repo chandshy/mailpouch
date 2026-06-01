@@ -253,6 +253,28 @@ export class AgentGrantStore {
     });
   }
 
+  /**
+   * Delete pending grants whose approval window (`maxAgeMs` since createdAt) has
+   * elapsed — the auth request expires if the user doesn't approve in time, so
+   * the agent must connect/auth again. Emits `grant-expired` for each (which
+   * revokes any issued token) and removes the record. Returns the count expired.
+   */
+  expireStalePending(maxAgeMs: number): number {
+    return this.mutate(() => {
+      const now = Date.now();
+      const stale = [...this.grants.values()].filter(
+        (g) => g.status === "pending" && now - Date.parse(g.createdAt) > maxAgeMs,
+      );
+      if (stale.length === 0) return 0;
+      for (const g of stale) this.grants.delete(g.clientId);
+      this.persist();
+      // Emit after the delete + persist so token revocation (the grant-expired
+      // subscriber) acts on the now-removed grant's clientId.
+      for (const g of stale) notifications.emitGrantChanged("grant-expired", g);
+      return stale.length;
+    });
+  }
+
   /** Record a successful tool call against the grant's counters. */
   recordCall(clientId: string): void {
     const g = this.grants.get(clientId);
