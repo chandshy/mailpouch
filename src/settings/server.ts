@@ -907,7 +907,16 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
         try {
           const mgr = getAccountManager();
           if (mgr && (postedPassword || postedSmtpToken)) {
+            // SMTP is refreshed synchronously here (transporter rebuilt).
             mgr.applyKeychainCredentials(postedPassword, postedSmtpToken);
+            // IMAP: flush the stale clients and reconnect with the new password
+            // so it takes effect WITHOUT a restart. Fire-and-forget — the
+            // reconnect can take seconds (or back off if Bridge is throttling),
+            // and we don't want to stall the save response on it; the UI's
+            // "Check Now" surfaces the result.
+            if (postedPassword) {
+              void mgr.reloadImapCredentials(postedPassword);
+            }
           }
         } catch (e: unknown) {
           // Non-fatal — save already succeeded; a restart will pick creds up.

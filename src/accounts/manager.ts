@@ -251,6 +251,26 @@ export class AccountManager extends EventEmitter {
     }
   }
 
+  /**
+   * Flush stale IMAP credentials and reconnect with the new password for every
+   * account that now holds it, so a Settings → Connection save takes effect
+   * without a server restart. SMTP is already refreshed synchronously by
+   * applyKeychainCredentials (reinitialize); IMAP needs an async reconnect.
+   * Best-effort per account; never throws.
+   */
+  async reloadImapCredentials(password: string): Promise<void> {
+    if (!password) return;
+    await Promise.all(
+      [...this.perAccount.values()]
+        .filter((svcs) => svcs.spec.password === password)
+        .map((svcs) =>
+          svcs.imap.reloadCredentials(password).catch((err: unknown) =>
+            logger.warn(`IMAP credential reload failed for account "${svcs.spec.id}"`, "AccountManager", err),
+          ),
+        ),
+    );
+  }
+
   /** Cleanly tear down every account's services. Called on shutdown. */
   async closeAll(): Promise<void> {
     for (const svcs of this.perAccount.values()) {

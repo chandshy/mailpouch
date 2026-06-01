@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Also fixed:** the Bridge watchdog `setInterval` callback (`startBridgeWatchdog`, `src/index.ts`) ran `await Promise.all([isBridgeReachable…])` and `await launchProtonBridge()` with **no outer try/catch** — a rejection there became an `unhandledRejection` → the same `gracefulShutdown` → exit, firing every 30s precisely while Bridge was flapping. Wrapped the whole tick body in try/catch.
 - **Test:** `src/services/idle-error-listener.test.ts` asserts the IDLE client registers an `'error'` listener; verified to fail before the fix and pass after.
 
+### Changed — updating credentials now flushes the old ones and reconnects (no restart)
+
+- Saving a new Bridge password in Settings → Connection now takes effect **without a server restart**. Previously `applyKeychainCredentials` only refreshed SMTP and staged the IMAP password in the account spec — the live IMAP client kept using the old password until the process was restarted. Now the settings save also calls `AccountManager.reloadImapCredentials`, which for each affected account: tears down the main + IDLE clients (both still authed with the **old** password), loads the **new** password into the live connection config, clears the auth-failure stop (so tools stop fast-failing and the tray blink ends), and reconnects + restarts IDLE.
+- Added an IDLE-loop **generation guard** (`_idleGen`) so a stop-then-restart during the reload can never leave two loops racing on the IDLE socket.
+- The reconnect is fire-and-forget from the save handler (so the HTTP save response isn't blocked on a reconnect that may back off if Bridge is still throttling); the UI's "Check Now" surfaces the result. `idle-reconnect-policy.test.ts` covers the reload (new password loaded, auth-stop cleared, reconnected) and the generation bump.
+
 ### Added — tools return an actionable error when the connection is broken
 
 - When an agent calls a mailbox tool while mailpouch can't connect, it now gets a clear, operator-actionable error instead of an opaque "IMAP operation failed" / hang — so the user knows exactly what to go fix. A new `ConnectionStateError` (`error-classify.ts`) is surfaced **verbatim** by `safeErrorMessage`.

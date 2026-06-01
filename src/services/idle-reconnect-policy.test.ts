@@ -11,7 +11,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // connect() behaviour is toggled per test.
-const state: { mode: "auth" | "throttle" | "conn" } = { mode: "auth" };
+const state: { mode: "auth" | "throttle" | "conn" | "ok" } = { mode: "auth" };
 
 vi.mock("imapflow", () => {
   const ImapFlow = vi.fn(function () {
@@ -22,6 +22,7 @@ vi.mock("imapflow", () => {
       getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
       idle: vi.fn().mockResolvedValue(undefined),
       connect: vi.fn().mockImplementation(() => {
+        if (state.mode === "ok") return Promise.resolve();
         if (state.mode === "auth") return Promise.reject(Object.assign(new Error("login"), { authenticationFailed: true }));
         if (state.mode === "throttle") return Promise.reject(Object.assign(new Error("NO too many login attempts"), { responseText: "too many login attempts" }));
         return Promise.reject(Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }));
@@ -149,5 +150,39 @@ describe("tool calls get an actionable error when the connection is bad", () => 
     primeConfig(svc);
     await expect(ensureConnection(svc)).rejects.toThrow(/reach Proton Bridge/i);
     expect((svc as unknown as { idleAuthFailure: unknown }).idleAuthFailure ?? null).toBeNull();
+  });
+});
+
+describe("reloadCredentials (flush old, load new on a Settings save)", () => {
+  let prev: string | undefined;
+  beforeEach(() => { prev = process.env.MAILPOUCH_INSECURE_BRIDGE; process.env.MAILPOUCH_INSECURE_BRIDGE = "1"; });
+  afterEach(() => {
+    if (prev !== undefined) process.env.MAILPOUCH_INSECURE_BRIDGE = prev; else delete process.env.MAILPOUCH_INSECURE_BRIDGE;
+  });
+
+  it("loads the new password into the live config, clears the auth-stop, and reconnects", async () => {
+    state.mode = "ok";
+    const svc = new SimpleIMAPService();
+    primeConfig(svc); // starts with password "p"
+    // Simulate a prior login failure that had halted the loop.
+    (svc as unknown as { idleAuthFailure: unknown }).idleAuthFailure = { message: "old failure", at: new Date() };
+
+    await svc.reloadCredentials("NEW-PASS");
+
+    expect((svc as unknown as { connectionConfig: { password: string } }).connectionConfig.password).toBe("NEW-PASS");
+    expect((svc as unknown as { idleAuthFailure: unknown }).idleAuthFailure).toBeNull();
+    expect(svc.isActive()).toBe(true); // reconnected with the new credentials
+  });
+
+  it("restarting the IDLE loop bumps the generation guard (no duplicate loops)", async () => {
+    state.mode = "ok";
+    const svc = new SimpleIMAPService();
+    primeConfig(svc);
+    await svc.startIdle();
+    const gen1 = (svc as unknown as { _idleGen: number })._idleGen;
+    await svc.reloadCredentials("NEW-PASS"); // stops + restarts IDLE
+    const gen2 = (svc as unknown as { _idleGen: number })._idleGen;
+    expect(gen2).toBeGreaterThan(gen1); // a fresh generation claimed; old loop self-exits
+    svc.stopIdle();
   });
 });

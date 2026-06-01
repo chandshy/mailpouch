@@ -3221,6 +3221,10 @@ export class SimpleIMAPService {
 
   private idleClient: ImapFlow | null = null;
   private idleActive: boolean = false;
+  // Bumped each time an IDLE loop starts. A running loop exits when it sees a
+  // newer generation, so a stop-then-start (e.g. on credential reload) can
+  // never leave two loops racing on idleClient.
+  private _idleGen: number = 0;
   /** Set when the IDLE loop STOPS itself due to a login/credential failure, so
    *  the UI and logs can surface it. It is deliberately NOT retried (retrying a
    *  bad password just locks the account out). Cleared on a successful connect
@@ -3246,6 +3250,7 @@ export class SimpleIMAPService {
   }
 
   private async runIdleLoop(): Promise<void> {
+    const myGen = ++this._idleGen; // claim this generation; older loops self-exit
     const cfg = this.connectionConfig;
     if (!cfg) return;
 
@@ -3336,7 +3341,7 @@ export class SimpleIMAPService {
       }
     };
 
-    while (this.idleActive) {
+    while (this.idleActive && this._idleGen === myGen) {
       try {
         await reapIdleClient(); // never leak a prior socket
         this.idleClient = new ImapFlow({
@@ -3441,6 +3446,48 @@ export class SimpleIMAPService {
     this.idleActive = false;
     this.idleClient?.logout().catch(() => {});
     this.idleClient = null;
+  }
+
+  /**
+   * Flush the OLD credentials from every live IMAP client and reconnect with
+   * the NEW password — so a Settings → Connection save takes effect WITHOUT a
+   * restart. Tears down the main + IDLE clients (both authed with the stale
+   * password), updates the stored connection config, clears the auth-failure
+   * stop so tools no longer fast-fail, then reconnects and restarts IDLE.
+   *
+   * Never throws: a failed reconnect (e.g. Bridge still throttling) is logged;
+   * the next IDLE cycle / tool call retries with the new password.
+   */
+  async reloadCredentials(password: string): Promise<void> {
+    if (!this.connectionConfig) {
+      // Never connected (boot connect hasn't run) — nothing live to flush; the
+      // first connect will use whatever the account spec now holds.
+      return;
+    }
+    logger.info('Reloading IMAP credentials and reconnecting with the updated password', 'IMAPService');
+    const wasIdle = this.idleActive;
+    // 1. Flush the stale credential from both live clients.
+    this.stopIdle();                 // reaps the IDLE client (old password)
+    await this.disconnect();         // reaps the main client (old password)
+    // 2. Load the new credential into the live config and clear failure state.
+    this.connectionConfig.password = password;
+    this.idleAuthFailure = null;
+    this.idleLastIssue = null;
+    // 3. Reconnect now so the new password is in effect immediately.
+    const c = this.connectionConfig;
+    try {
+      await this.connect(c.host, c.port, c.username, password, c.bridgeCertPath, c.secure, c.allowInsecureBridge ?? false);
+      logger.info('IMAP reconnected with the updated credentials', 'IMAPService');
+    } catch (err) {
+      logger.warn(
+        `IMAP reconnect after credential update did not succeed — ${classifyError(err).message} ` +
+        `It will retry on the next use or IDLE cycle.`,
+        'IMAPService',
+      );
+    }
+    // 4. Restart IDLE if it had been running (the generation guard ensures the
+    //    previously-stopped loop can't linger alongside the new one).
+    if (wasIdle) await this.startIdle();
   }
 
   /** Clear all in-memory email and folder caches, forcing fresh IMAP fetches on next access. */
