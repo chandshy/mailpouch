@@ -110,10 +110,15 @@ export function classifyError(
   if (
     shape.authenticationFailed === true ||
     code === "AUTHENTICATIONFAILED" ||
+    code === "EAUTH" ||
     hay.includes("authenticationfailed") ||
     hay.includes("authentication failed") ||
     hay.includes("invalid credentials") ||
-    hay.includes("login failed")
+    hay.includes("login failed") ||
+    // Proton Bridge's exact local-login rejections.
+    hay.includes("incorrect login credentials") ||
+    hay.includes("no such user") ||
+    hay.includes("invalid username or password")
   ) {
     return {
       category: "auth",

@@ -46,6 +46,19 @@ describe("classifyError", () => {
     it("classifies \"Invalid credentials\" text", () => {
       expect(classifyError(new Error("Invalid credentials")).category).toBe("auth");
     });
+
+    it("classifies Proton Bridge's exact local-login rejections as auth", () => {
+      for (const m of ["4 NO no such user", "454 4.7.0 invalid username or password", "Incorrect login credentials"]) {
+        expect(classifyError(new Error(m)).category).toBe("auth");
+      }
+      // imapflow surfaces responseText on a shaped error too.
+      const shaped = Object.assign(new Error("NO"), { responseText: "no such user" });
+      expect(classifyError(shaped).category).toBe("auth");
+    });
+
+    it("classifies EAUTH code as auth", () => {
+      expect(classifyError(Object.assign(new Error("Invalid login"), { code: "EAUTH" })).category).toBe("auth");
+    });
   });
 
   describe("timeout", () => {
