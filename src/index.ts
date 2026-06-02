@@ -47,7 +47,7 @@ import { FtsIndexService, FtsUnavailableError, openFtsIndex, type FtsRecord } fr
 import { AgentGrantStore } from "./agents/grant-store.js";
 import { GrantManager } from "./agents/grant-manager.js";
 import { AgentAuditLog, hashArgs } from "./agents/audit.js";
-import { currentCaller } from "./agents/caller-context.js";
+import { currentCaller, localAgentId, type CallerContext } from "./agents/caller-context.js";
 import { registerAgentServices } from "./agents/registry.js";
 import { notifications as agentNotifications } from "./agents/notifications.js";
 import { shouldAutoOpenApproval } from "./agents/auto-open-approval.js";
@@ -530,7 +530,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // record so the approval card can surface it. Stdio (no OAuth client)
     // becomes the literal string "stdio" — distinguishable from a real
     // client id so the UI can flag which approval flow this is.
-    const earlyCaller = currentCaller();
+    const earlyCaller = currentCaller() ?? _stdioCaller ?? undefined;
     const escalationCaller = earlyCaller && !earlyCaller.staticBearer
       ? { clientId: earlyCaller.clientId, clientName: earlyCaller.clientName }
       : { clientId: "stdio", clientName: undefined };
@@ -596,12 +596,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 
   // ── Agent-grant gate ──────────────────────────────────────────────────────
-  // Runs BEFORE the global permission gate. Only takes effect when the call
-  // carries caller context (i.e. came in through the HTTP transport with an
-  // OAuth client_id). Stdio callers — the Claude Desktop default — fall
-  // through and are gated only by the global preset, preserving single-user
-  // behavior for anyone who hasn't opted into multi-agent mode.
-  const caller = currentCaller();
+  // Runs BEFORE the global permission gate. The caller is the HTTP request's
+  // OAuth identity (AsyncLocalStorage) when present, else the LOCAL stdio
+  // client's identity resolved at the handshake (_stdioCaller) when local
+  // gating is on. So every agent — local or remote — is routed through the
+  // per-agent grant: an unapproved one is blocked "pending user approval".
+  // When local gating is disabled, _stdioCaller is null and stdio bypasses
+  // (legacy auto-trust).
+  const caller = currentCaller() ?? _stdioCaller ?? undefined;
   const callStartedAt = Date.now();
   // Flipped true in the catch so the finally success path is skipped.
   let auditFailureRecorded = false;
@@ -1417,6 +1419,45 @@ export function createSessionServer(): Server {
 
 // Register handlers on the module-level server (used by the stdio transport).
 registerHandlers(server);
+
+// ── Local (stdio) agent gating ───────────────────────────────────────────────
+// Stdio has no per-request caller context (AsyncLocalStorage doesn't cross from
+// the initialize handshake to the tool handler), and a stdio process serves
+// exactly ONE local client, so we resolve that client's identity once at the
+// handshake and stash it module-side. The tool gate falls back to this when
+// there's no HTTP caller — routing the local agent through the same
+// register → approve → access flow as remote agents.
+let _stdioCaller: CallerContext | null = null;
+
+/** True when local (stdio) agents must register + be approved (default true). */
+function localAgentsGated(): boolean {
+  if (process.env.MAILPOUCH_TRUST_LOCAL === "1") return false;
+  return (loadConfig()?.gateLocalAgents ?? true) !== false;
+}
+
+// Capture the local client's identity at the MCP handshake, register a pending
+// grant (which surfaces the approval notice), and arm the gate. No-op when
+// local gating is disabled (legacy auto-trust) — _stdioCaller stays null, so
+// the gate keeps bypassing stdio.
+server.oninitialized = () => {
+  try {
+    if (!localAgentsGated()) return;
+    const info = server.getClientVersion(); // { name, version? } | undefined
+    const name = info?.name || "(unnamed local client)";
+    const clientId = localAgentId(name);
+    if (!agentGrants.get(clientId)) {
+      agentGrants.createPending({ clientId, clientName: name });
+    }
+    agentGrants.recordConnection(clientId, {
+      mcpClientName: info?.name,
+      mcpClientVersion: info?.version,
+      transport: "stdio",
+    });
+    _stdioCaller = { clientId, clientName: name };
+  } catch (err: unknown) {
+    logger.debug("Failed to register local stdio agent", "MCPServer", err);
+  }
+};
 
 // ═════════════════════════════════════════════════════════════════════════════
 // STARTUP & LIFECYCLE

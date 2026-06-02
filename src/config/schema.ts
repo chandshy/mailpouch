@@ -397,6 +397,13 @@ export interface ServerConfig {
    * remote/headless deployment to suppress the auto-popup.
    */
   autoOpenApprovalWindow?: boolean;
+  /**
+   * Require LOCAL (stdio) agents to register and be approved too, like remote
+   * agents — every connecting client is gated behind the per-agent Approve/Deny
+   * (default true). Set false (or `MAILPOUCH_TRUST_LOCAL=1`) to restore the
+   * legacy behavior where the local stdio client is auto-trusted.
+   */
+  gateLocalAgents?: boolean;
   /** Outbound webhook endpoints that receive grant-change events. */
   webhooks?: WebhookEndpointShape[];
   /**

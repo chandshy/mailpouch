@@ -602,6 +602,9 @@ ${buildStyles(cspNonce)}
                   : g.status === 'active'  ? '🟢 active'
                   : g.status === 'revoked' ? '⚪ revoked'
                   : g.status === 'expired' ? '🟡 expired' : g.status;
+      // Distinguish a local (stdio) agent from a remote one when acknowledging.
+      const origin = (g.transport === 'stdio' || String(g.clientId).startsWith('stdio:'))
+        ? ' <span style="color:#888;font-size:11px">· 🖥 local</span>' : '';
       const lastCall = g.lastCallAt ? new Date(g.lastCallAt).toLocaleString() : 'never';
       const expiry = g.conditions && g.conditions.expiresAt
         ? 'expires ' + new Date(g.conditions.expiresAt).toLocaleString() : 'no expiry';
@@ -630,7 +633,7 @@ ${buildStyles(cspNonce)}
         '<div class="card" style="padding:12px;border:1px solid #333;border-radius:8px">' +
           '<div style="display:flex;justify-content:space-between;align-items:start;gap:12px">' +
             '<div>' +
-              '<div style="font-weight:600">' + esc(g.clientName) + ' <span style="color:#888;font-size:12px">(' + esc(g.clientId) + ')</span></div>' +
+              '<div style="font-weight:600">' + esc(g.clientName) + ' <span style="color:#888;font-size:12px">(' + esc(g.clientId) + ')</span>' + origin + '</div>' +
               '<div style="font-size:12px;color:#888;margin-top:4px">' +
                 badge + ' · preset ' + esc(g.preset) + ' · ' + esc(expiry) + ' · ' + g.totalCalls + ' calls · last ' + esc(lastCall) +
               '</div>' +

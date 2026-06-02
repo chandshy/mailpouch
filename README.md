@@ -454,7 +454,7 @@ This server gives AI agents *controlled* access to sensitive email data. The sec
 
 ## Agent Grants
 
-The global permission preset gates *what tools exist*; an **agent grant** gates *which MCP client gets to use them*. When an MCP host completes OAuth Dynamic Client Registration, mailpouch creates a `pending` grant keyed by the new `client_id`. Nothing that client calls will succeed until you approve it.
+The global permission preset gates *what tools exist*; an **agent grant** gates *which MCP client gets to use them*. **Every agent — local and remote — registers and must be approved.** A remote MCP host completes OAuth Dynamic Client Registration and mailpouch creates a `pending` grant keyed by its `client_id`; a **local stdio client** (e.g. Claude Desktop) is registered at the MCP handshake, keyed by its self-reported client name (`stdio:<hash>`) and shown with a 🖥 local marker. Nothing that client calls will succeed until you approve it; approve once and a local client is remembered across relaunches. To restore the legacy "local client is auto-trusted" behavior, set `gateLocalAgents: false` (or `MAILPOUCH_TRUST_LOCAL=1`).
 
 Grant lifecycle: `pending` → `active` → `revoked` | `expired`. Each grant carries:
 

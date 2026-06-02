@@ -352,6 +352,9 @@ export function loadConfig(): ServerConfig | null {
       autoOpenApprovalWindow: typeof parsed.autoOpenApprovalWindow === "boolean"
         ? parsed.autoOpenApprovalWindow
         : undefined,
+      gateLocalAgents: typeof parsed.gateLocalAgents === "boolean"
+        ? parsed.gateLocalAgents
+        : undefined,
       webhooks: Array.isArray(parsed.webhooks) ? parsed.webhooks : undefined,
     };
     tags.found = true;

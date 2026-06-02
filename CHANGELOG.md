@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.0.72] — 2026-05-31
 
+### Changed — local (stdio) agents must now register + be approved too (BREAKING)
+
+- **Every agent — local and remote — now goes through the same approval gate.** Previously a local stdio client (e.g. Claude Desktop) bypassed the per-agent grant entirely. Now mailpouch captures the local client's identity at the MCP handshake (`server.oninitialized` on the stdio server), registers a **pending** agent (which fires the existing approval notice — auto-open window + desktop notification + tray badge), and **blocks its tool calls until you Approve** it in the Agents tab — exactly like remote OAuth agents.
+- Local agents are identified by their **self-reported MCP client name** (`localAgentId` → `stdio:<sha256(name)>`); approve once and the same client is **remembered across relaunches**. This is a local-trust convenience, not a cryptographic identity (the name is self-reported). Local agents show a **🖥 local** marker on their Agents-tab card (transport `stdio`, no IP).
+- **Escape hatch:** set `gateLocalAgents: false` in `~/.mailpouch.json` (or `MAILPOUCH_TRUST_LOCAL=1`) to restore the legacy behavior where the local stdio client is auto-trusted. Default is **on** (gate local agents).
+- Escalation meta-tools now attribute local callers correctly. New `caller-context.test.ts` coverage for `localAgentId`. Unit suite 1996 green.
+
 ### Changed — OAuth is now fully automatic; Approve/Deny is the only human gate (BREAKING for OAuth deployments)
 
 - The OAuth `/authorize` **admin-password consent has been removed entirely.** Agents now authenticate **fully automatically** (DCR → PKCE-S256 → token, no human-typed password): a valid `GET /oauth/authorize` immediately issues a code and 302-redirects. The **only** human interaction is the per-agent **Approve `<agent>`? / Deny** in the Agents tab (auto-surfaced approval window). The issued token is **inert until the grant is approved**, so this moves the human gate rather than removing it. The security envelope is unchanged otherwise: PKCE binds the code to the agent's verifier, `redirect_uri` is allowlisted, and endpoints are rate-limited.
