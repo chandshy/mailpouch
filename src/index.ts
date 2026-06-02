@@ -23,6 +23,7 @@ import { startSettingsServer } from "./settings/server.js";
 import { openBrowser } from "./settings/tui.js";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { chooseTransport, forceStdioFromEnv } from "./transports/select.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -46,6 +47,7 @@ import { PassService } from "./services/pass-service.js";
 import { FtsIndexService, FtsUnavailableError, openFtsIndex, type FtsRecord } from "./services/fts-service.js";
 import { AgentGrantStore } from "./agents/grant-store.js";
 import { GrantManager } from "./agents/grant-manager.js";
+import { ServiceAccountStore } from "./agents/service-account-store.js";
 import { AgentAuditLog, hashArgs } from "./agents/audit.js";
 import { currentCaller, localAgentId, type CallerContext } from "./agents/caller-context.js";
 import { registerAgentServices } from "./agents/registry.js";
@@ -215,10 +217,24 @@ function recordFromEmail(m: EmailMessage): FtsRecord {
 // preserves the single-user Claude Desktop default.
 const AGENT_GRANTS_PATH = _homeFile("MAILPOUCH_AGENTS", ".mailpouch-agents.json");
 const AGENT_AUDIT_PATH = _homeFile("MAILPOUCH_AGENT_AUDIT", ".mailpouch-agent-audit.jsonl");
+const SERVICE_ACCOUNTS_PATH = _homeFile("MAILPOUCH_SERVICE_ACCOUNTS", ".mailpouch-service-accounts.json");
 const agentGrants = new AgentGrantStore(AGENT_GRANTS_PATH);
 const grantManager = new GrantManager(agentGrants);
 const agentAudit = new AgentAuditLog({ path: AGENT_AUDIT_PATH });
-registerAgentServices(agentGrants, agentAudit);
+const serviceAccounts = new ServiceAccountStore(SERVICE_ACCOUNTS_PATH);
+// Each persisted service account is born with an active grant (pre-approved at
+// issuance) so its client_credentials login flows through GrantManager like any
+// approved agent. Converge on startup so an account edited/re-issued while the
+// server was down takes effect.
+for (const acct of serviceAccounts.list()) {
+  agentGrants.ensureActiveServiceGrant({
+    clientId: acct.clientId,
+    clientName: acct.clientName,
+    preset: acct.preset,
+    conditions: acct.conditions,
+  });
+}
+registerAgentServices(agentGrants, agentAudit, serviceAccounts);
 
 // ─── Notification channels (B2) ──────────────────────────────────────────────
 // Subscribe an OS desktop notifier and an outbound webhook dispatcher to the
@@ -565,7 +581,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // becomes the literal string "stdio" — distinguishable from a real
     // client id so the UI can flag which approval flow this is.
     const earlyCaller = currentCaller() ?? _stdioCaller ?? undefined;
-    const escalationCaller = earlyCaller && !earlyCaller.staticBearer
+    const escalationCaller = earlyCaller
       ? { clientId: earlyCaller.clientId, clientName: earlyCaller.clientName }
       : { clientId: "stdio", clientName: undefined };
     // PERM-001: escalation meta-tools bypass the grant/permission/destructive
@@ -576,7 +592,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const escStartedAt = Date.now();
     try {
       const res = await _escalationHandlers[name]({ args, config, caller: escalationCaller });
-      if (earlyCaller && !earlyCaller.staticBearer) {
+      if (earlyCaller) {
         agentAudit.write({
           ts: new Date(escStartedAt).toISOString(),
           clientId: earlyCaller.clientId,
@@ -591,7 +607,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
       return res;
     } catch (err: unknown) {
-      if (earlyCaller && !earlyCaller.staticBearer) {
+      if (earlyCaller) {
         agentAudit.write({
           ts: new Date(escStartedAt).toISOString(),
           clientId: earlyCaller.clientId,
@@ -648,7 +664,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   // between them produced a TOCTOU window where the two gates judged the
   // same call against different snapshots. One snapshot closes that gap.
   const configSnapshot = loadConfig() ?? defaultConfig();
-  if (caller && !caller.staticBearer) {
+  if (caller) {
     const callerGrant = agentGrants.get(caller.clientId);
     const boundAccountId = callerGrant?.conditions?.accountId;
     if (boundAccountId && boundAccountId !== requestedAccountId) {
@@ -707,7 +723,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const permResult = permissions.check(name as ToolName);
   if (!permResult.allowed) {
     logger.warn(`Tool blocked by permission policy: ${name}`, "MCPServer", { reason: permResult.reason });
-    if (caller && !caller.staticBearer) {
+    if (caller) {
       agentAudit.write({
         ts: new Date(callStartedAt).toISOString(),
         clientId: caller.clientId,
@@ -872,7 +888,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // restriction), preserving existing behavior. OAuth callers with a
       // folder-restricted grant return their allowlist for content-scoping.
       getCallerAllowedFolders: () => {
-        if (!caller || caller.staticBearer) return undefined;
+        if (!caller) return undefined;
         return grantManager.resolveAllowedFolders(caller.clientId);
       },
       config,
@@ -900,7 +916,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     logger.error(`Tool failed: ${name}`, "MCPServer", error);
     const msg = safeErrorMessage(error);
     auditFailureRecorded = true;
-    if (caller && !caller.staticBearer) {
+    if (caller) {
       agentAudit.write({
         ts: new Date(callStartedAt).toISOString(),
         clientId: caller.clientId,
@@ -923,7 +939,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // response contents from here (each case returns directly), but the
     // agent-audit channel intentionally avoids logging response bodies —
     // we just need the fact of the call and its duration.
-    if (!auditFailureRecorded && caller && !caller.staticBearer) {
+    if (!auditFailureRecorded && caller) {
       agentAudit.write({
         ts: new Date(callStartedAt).toISOString(),
         clientId: caller.clientId,
@@ -1435,7 +1451,7 @@ export function createSessionServer(): Server {
   s.oninitialized = () => {
     try {
       const caller = currentCaller();
-      if (!caller || caller.staticBearer || !caller.clientId) return;
+      if (!caller || !caller.clientId) return;
       const info = s.getClientVersion(); // { name, version? } | undefined
       agentGrants.recordConnection(caller.clientId, {
         mcpClientName: info?.name,
@@ -2102,6 +2118,29 @@ async function main() {
     process.exit(0);
   }
 
+  // `mailpouch agent <issue|list|revoke>` — provision/manage service accounts,
+  // then exit. Runs before any server side effects (no Bridge connect, no
+  // transport) so it's a quick offline admin command. Uses the module-scope
+  // grant + service-account stores already constructed above.
+  if (process.argv[2] === "agent") {
+    const { runAgentCli } = await import("./cli/agent-cli.js");
+    const code = await runAgentCli(process.argv.slice(3), { serviceAccounts, agentGrants });
+    process.exit(code);
+  }
+
+  // `mailpouch daemon [--host H] [--port P]` runs the shared HTTP daemon
+  // explicitly — forces the HTTP transport regardless of `remoteMode` so many
+  // clients (Claude Code over HTTP, cowork, headless service accounts) share
+  // one IMAP connection. It is a deliberate, user-started process (run it in a
+  // tmux / login session) — NOT an autostart.
+  const argVal = (flag: string): string | undefined => {
+    const i = process.argv.indexOf(flag);
+    return i >= 0 ? process.argv[i + 1] : undefined;
+  };
+  const daemonMode = process.argv[2] === "daemon";
+  const daemonHostOverride = daemonMode ? argVal("--host") : undefined;
+  const daemonPortOverride = daemonMode ? argVal("--port") : undefined;
+
   const noTray       = process.argv.includes("--no-tray");
   const noSettingsUi = process.argv.includes("--no-settings-ui");
   // `--settings-only` runs JUST the settings UI + tray: no MCP transport, no
@@ -2503,12 +2542,20 @@ async function main() {
     // the loadCredentialsFromKeychain priority chain for password/smtpToken.
     const { loadRemoteSecrets } = await import("./security/keychain.js");
     const remoteSecrets = await loadRemoteSecrets();
-    const effectiveBearer = remoteSecrets?.remoteBearerToken || remoteCn?.remoteBearerToken || "";
-    const hasBearer = !!effectiveBearer;
-    // OAuth is always automatic-consent: each agent authenticates automatically
-    // (DCR + PKCE) and the per-agent grant Approve/Deny (pending → 5-min expiry)
-    // is the only human gate. An admin password is no longer supported.
+    // OAuth is now the ONLY remote-auth mechanism: every agent authenticates as
+    // its own client (authorization_code for interactive, client_credentials for
+    // service accounts) so each is independently gated, audited, and revocable.
+    // The legacy shared static bearer was removed — a present remoteBearerToken
+    // is ignored with a migration warning. An admin password was already gone.
     const hasOAuth  = !!remoteCn?.remoteOauthEnabled;
+    if (remoteSecrets?.remoteBearerToken || remoteCn?.remoteBearerToken) {
+      logger.warn(
+        "remoteBearerToken is configured but the static shared bearer was removed and will be ignored — " +
+        "it bypassed per-agent gating and audit. For programmatic/headless access, issue a service account: " +
+        "`mailpouch agent issue --name <name> --preset <preset>`. Remove remoteBearerToken from your config.",
+        "MCPServer",
+      );
+    }
     if (remoteSecrets?.remoteOauthAdminPassword || remoteCn?.remoteOauthAdminPassword) {
       logger.warn(
         "remoteOauthAdminPassword is configured but is no longer supported and will be ignored — " +
@@ -2516,31 +2563,48 @@ async function main() {
         "MCPServer",
       );
     }
-    if (remoteCn?.remoteMode) {
-      if (!hasBearer && !hasOAuth) {
+    // MAILPOUCH_FORCE_STDIO=1 forces stdio for this spawn even when the config
+    // has remoteMode:true — lets a stdio MCP-client entry (e.g. Claude Code)
+    // coexist with the shared HTTP daemon config without a duplicate file.
+    // `mailpouch daemon` forces HTTP regardless of remoteMode (and ignores
+    // FORCE_STDIO — running the daemon is an explicit HTTP intent).
+    const forceStdio = !daemonMode && forceStdioFromEnv(process.env.MAILPOUCH_FORCE_STDIO);
+    if (forceStdio && remoteCn?.remoteMode) {
+      logger.info("MAILPOUCH_FORCE_STDIO is set — using stdio transport despite remoteMode=true in config.", "MCPServer");
+    }
+    if (chooseTransport({ remoteMode: remoteCn?.remoteMode, forceStdio, forceHttp: daemonMode }) === "http") {
+      if (!hasOAuth) {
         logger.error(
-          "remoteMode is set but no authentication is configured. " +
-          "Set remoteBearerToken OR remoteOauthEnabled in ~/.mailpouch.json (or via keychain). " +
-          "Refusing to start without auth — edit the config or remove remoteMode to use stdio.",
+          (daemonMode
+            ? "`mailpouch daemon` runs the shared HTTP daemon, which requires OAuth. "
+            : "remoteMode is set but remoteOauthEnabled is not. ") +
+          "The static shared bearer was removed — OAuth is required so every agent authenticates as its own gated client. " +
+          "Set remoteOauthEnabled=true in ~/.mailpouch.json and issue a service account for headless clients " +
+          "(`mailpouch agent issue ...`). Refusing to start without OAuth.",
           "MCPServer"
         );
+        process.exit(1);
+      }
+      const daemonPort = daemonPortOverride ? Number(daemonPortOverride) : undefined;
+      if (daemonPortOverride && (!Number.isInteger(daemonPort) || daemonPort! < 1 || daemonPort! > 65535)) {
+        logger.error(`Invalid --port '${daemonPortOverride}'.`, "MCPServer");
         process.exit(1);
       }
       const { startHttpTransport } = await import("./transports/http.js");
       const handle = await startHttpTransport({
         server,
         createServer: createSessionServer,
-        host: remoteCn.remoteHost || "127.0.0.1",
-        port: remoteCn.remotePort ?? 8788,
-        path: remoteCn.remotePath || "/mcp",
-        bearerToken: effectiveBearer,
-        tlsCertPath: remoteCn.remoteTlsCertPath || undefined,
-        tlsKeyPath:  remoteCn.remoteTlsKeyPath  || undefined,
-        oauthEnabled: !!remoteCn.remoteOauthEnabled,
-        oauthIssuer: remoteCn.remoteOauthIssuer || undefined,
-        rateLimitPerSecond: remoteCn.remoteRateLimitPerSecond ?? undefined,
-        rateLimitBurst: remoteCn.remoteRateLimitBurst ?? undefined,
+        host: daemonHostOverride || remoteCn?.remoteHost || "127.0.0.1",
+        port: daemonPort ?? remoteCn?.remotePort ?? 8788,
+        path: remoteCn?.remotePath || "/mcp",
+        tlsCertPath: remoteCn?.remoteTlsCertPath || undefined,
+        tlsKeyPath:  remoteCn?.remoteTlsKeyPath  || undefined,
+        oauthEnabled: !!remoteCn?.remoteOauthEnabled,
+        oauthIssuer: remoteCn?.remoteOauthIssuer || undefined,
+        rateLimitPerSecond: remoteCn?.remoteRateLimitPerSecond ?? undefined,
+        rateLimitBurst: remoteCn?.remoteRateLimitBurst ?? undefined,
         agentGrants,
+        serviceAccounts,
       });
       logger.info(`mailpouch started on HTTP transport at ${handle.url}${handle.issuer ? ` (OAuth issuer ${handle.issuer})` : ""}`, "MCPServer");
       (globalThis as unknown as { __mailpouchHttpHandle?: { close(): Promise<void> } }).__mailpouchHttpHandle = handle;

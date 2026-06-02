@@ -13,8 +13,41 @@ import { describe, it, expect, afterEach } from "vitest";
 import { Server as McpServer } from "@modelcontextprotocol/sdk/server/index.js";
 import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { startHttpTransport, type HttpTransportHandle, clientIp } from "./http.js";
+import { ServiceAccountStore } from "../agents/service-account-store.js";
+import { AgentGrantStore } from "../agents/grant-store.js";
 import { AddressInfo, createServer } from "net";
+import { tmpdir } from "os";
+import { join } from "path";
+import { randomBytes } from "crypto";
+import { rmSync } from "fs";
 import type { IncomingMessage } from "http";
+
+/** Temp service-account store files to clean up after the suite. */
+const saStorePaths: string[] = [];
+function newServiceAccountStore(): ServiceAccountStore {
+  const p = join(tmpdir(), `mp-sa-test-${randomBytes(6).toString("hex")}.json`);
+  saStorePaths.push(p);
+  return new ServiceAccountStore(p);
+}
+function newGrantStore(): AgentGrantStore {
+  const p = join(tmpdir(), `mp-grants-test-${randomBytes(6).toString("hex")}.json`);
+  saStorePaths.push(p);
+  return new AgentGrantStore(p);
+}
+/** Fetch an access token via the client_credentials grant (HTTP Basic). */
+async function clientCredentialsToken(url: string, clientId: string, secret: string): Promise<{ status: number; token: string }> {
+  const res = await fetch(`${url}/oauth/token`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      Authorization: "Basic " + Buffer.from(`${clientId}:${secret}`).toString("base64"),
+    },
+    body: "grant_type=client_credentials",
+  });
+  let token = "";
+  try { token = ((await res.json()) as { access_token?: string }).access_token ?? ""; } catch { /* error body */ }
+  return { status: res.status, token };
+}
 
 function fakeReq(remote: string, headers: Record<string, string | undefined> = {}): IncomingMessage {
   return {
@@ -77,51 +110,12 @@ describe("clientIp — X-Forwarded-For trust model", () => {
   });
 });
 
-describe("XPORT-001 — static bearer rate bucket is keyed per caller IP", () => {
-  let handle: HttpTransportHandle | null = null;
-  afterEach(async () => { if (handle) { await handle.close(); handle = null; } });
-
-  it("does not let one IP's bursts exhaust another IP's bucket", async () => {
-    // The auth limiter is keyed `bearer:static:<ip>`. We drive two distinct
-    // XFF values through the loopback peer — clientIp() trusts XFF on loopback
-    // — and assert each XFF identity gets its own bucket.
-    const port = await freePort();
-    handle = await startHttpTransport({
-      server: buildServer(),
-      port,
-      host: "127.0.0.1",
-      bearerToken: "secret",
-      rateLimitPerSecond: 1,
-      rateLimitBurst: 2, // authed cap ≈ 6 per key
-    });
-    const hammer = (xff: string) =>
-      Promise.all(Array.from({ length: 15 }, () =>
-        fetch(`http://127.0.0.1:${port}/mcp`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Accept: "application/json, text/event-stream",
-            Authorization: "Bearer secret",
-            "X-Forwarded-For": xff,
-          },
-          body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
-        }),
-      ));
-    const a = await hammer("203.0.113.10");
-    expect(a.map(r => r.status)).toContain(429);
-    // Caller B's first request must NOT be a 429 — its bucket is independent.
-    const b = await fetch(`http://127.0.0.1:${port}/mcp`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json, text/event-stream",
-        Authorization: "Bearer secret",
-        "X-Forwarded-For": "203.0.113.20",
-      },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "b", version: "0" } } }),
-    });
-    expect(b.status).not.toBe(429);
-  });
+afterEach(() => {
+  // Clean up any temp service-account stores created during a test.
+  while (saStorePaths.length) {
+    const p = saStorePaths.pop();
+    if (p) { try { rmSync(p, { force: true }); } catch { /* ignore */ } }
+  }
 });
 
 describe("HTTP transport", () => {
@@ -140,7 +134,7 @@ describe("HTTP transport", () => {
       server: buildServer(),
       port,
       host: "127.0.0.1",
-      bearerToken: "secret",
+      oauthEnabled: true,
     });
     const res = await fetch(`http://127.0.0.1:${port}/health`);
     expect(res.status).toBe(200);
@@ -154,7 +148,7 @@ describe("HTTP transport", () => {
       server: buildServer(),
       port,
       host: "127.0.0.1",
-      bearerToken: "secret",
+      oauthEnabled: true,
     });
     const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
       method: "POST",
@@ -165,33 +159,17 @@ describe("HTTP transport", () => {
     expect(res.headers.get("www-authenticate")).toMatch(/Bearer/i);
   });
 
-  it("rejects MCP requests with the wrong bearer", async () => {
+  it("rejects MCP requests with a bearer that is not an issued OAuth token", async () => {
     const port = await freePort();
     handle = await startHttpTransport({
       server: buildServer(),
       port,
       host: "127.0.0.1",
-      bearerToken: "secret",
+      oauthEnabled: true,
     });
     const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: "Bearer wrong" },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
-    });
-    expect(res.status).toBe(401);
-  });
-
-  it("rejects tokens of different length in constant-ish time", async () => {
-    const port = await freePort();
-    handle = await startHttpTransport({
-      server: buildServer(),
-      port,
-      host: "127.0.0.1",
-      bearerToken: "a-secret-token-with-length",
-    });
-    const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: "Bearer short" },
+      headers: { "Content-Type": "application/json", Authorization: "Bearer not-a-real-token" },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
     });
     expect(res.status).toBe(401);
@@ -203,17 +181,17 @@ describe("HTTP transport", () => {
       server: buildServer(),
       port,
       host: "127.0.0.1",
-      bearerToken: "secret",
+      oauthEnabled: true,
     });
     const res = await fetch(`http://127.0.0.1:${port}/elsewhere`);
     expect(res.status).toBe(404);
   });
 
-  it("throws when started without a bearer token", async () => {
+  it("throws when started without OAuth (static bearer was removed)", async () => {
     const port = await freePort();
     await expect(
-      startHttpTransport({ server: buildServer(), port, bearerToken: "" }),
-    ).rejects.toThrow(/remoteBearerToken/);
+      startHttpTransport({ server: buildServer(), port, oauthEnabled: false }),
+    ).rejects.toThrow(/OAuth|remoteOauthEnabled/);
   });
 
   it("XPORT-015 — never advertises 0.0.0.0 as the OAuth issuer host", async () => {
@@ -222,32 +200,36 @@ describe("HTTP transport", () => {
       server: buildServer(),
       port,
       host: "0.0.0.0",
-      bearerToken: "",
       oauthEnabled: true,
-      oauthAdminPassword: "admin-pw",
     });
     expect(handle.issuer).toBeDefined();
     expect(handle.issuer).not.toContain("0.0.0.0");
     expect(handle.issuer).toContain("127.0.0.1");
   });
 
-  it("dispatches an authed tools/list round-trip through the MCP transport", async () => {
+  it("dispatches an authed tools/list round-trip via a client_credentials token", async () => {
     const port = await freePort();
+    const sa = newServiceAccountStore();
+    const { account, clientSecret } = sa.issue({ name: "round-trip", preset: "full" });
     handle = await startHttpTransport({
       server: buildServer(),
       port,
       host: "127.0.0.1",
-      bearerToken: "secret",
+      oauthEnabled: true,
+      serviceAccounts: sa,
     });
-    // StreamableHTTP requires the client to first perform a POST to
-    // /mcp with an MCP `initialize` message. We follow that with a
-    // tools/list. Both requests must carry the bearer.
-    const initRes = await fetch(`http://127.0.0.1:${port}/mcp`, {
+    const url = `http://127.0.0.1:${port}`;
+    const { status, token } = await clientCredentialsToken(url, account.clientId, clientSecret);
+    expect(status).toBe(200);
+    expect(token).toBeTruthy();
+    // StreamableHTTP requires the client to first POST an `initialize` message,
+    // carrying the issued bearer.
+    const initRes = await fetch(`${url}/mcp`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Accept: "application/json, text/event-stream",
-        Authorization: "Bearer secret",
+        Authorization: `Bearer ${token}`,
       },
       body: JSON.stringify({
         jsonrpc: "2.0",
@@ -260,8 +242,6 @@ describe("HTTP transport", () => {
         },
       }),
     });
-    // Accept either 200 (JSON mode) or 200 with SSE — both mean the transport
-    // accepted the request. Status >= 400 means auth / transport failure.
     expect(initRes.status).toBeLessThan(400);
   });
 
@@ -311,14 +291,14 @@ describe("HTTP transport", () => {
       expect(res.status).toBe(200);
     });
 
-    // PERM-008: when OAuth is enabled the static bearer must NOT be accepted.
-    it("rejects the static bearer when OAuth is enabled", async () => {
+    // The shared static bearer was removed — an arbitrary pre-shared token is
+    // never accepted; only OAuth-issued tokens authenticate.
+    it("rejects an arbitrary (non-OAuth) bearer token", async () => {
       const port = await freePort();
       handle = await startHttpTransport({
         server: buildServer(),
         port,
         host: "127.0.0.1",
-        bearerToken: "static-secret",
         oauthEnabled: true,
       });
       const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
@@ -333,10 +313,80 @@ describe("HTTP transport", () => {
       const { url } = await startOauth();
       const res = await fetch(`${url}/.well-known/oauth-authorization-server`);
       expect(res.status).toBe(200);
-      const body = await res.json() as { issuer: string; token_endpoint: string; code_challenge_methods_supported: string[] };
+      const body = await res.json() as { issuer: string; token_endpoint: string; code_challenge_methods_supported: string[]; grant_types_supported: string[]; token_endpoint_auth_methods_supported: string[] };
       expect(body.issuer).toMatch(/^http:\/\/127\.0\.0\.1:/);
       expect(body.token_endpoint).toContain("/oauth/token");
       expect(body.code_challenge_methods_supported).toContain("S256");
+      // Both grant types are advertised, plus the client_secret auth methods
+      // the client_credentials flow needs.
+      expect(body.grant_types_supported).toContain("authorization_code");
+      expect(body.grant_types_supported).toContain("client_credentials");
+      expect(body.token_endpoint_auth_methods_supported).toContain("client_secret_basic");
+    });
+
+    describe("client_credentials grant (service accounts)", () => {
+      it("issues a token for a valid service account via HTTP Basic", async () => {
+        const port = await freePort();
+        const sa = newServiceAccountStore();
+        const { account, clientSecret } = sa.issue({ name: "cc-ok", preset: "read_only" });
+        handle = await startHttpTransport({ server: buildServer(), port, host: "127.0.0.1", oauthEnabled: true, serviceAccounts: sa });
+        const { status, token } = await clientCredentialsToken(`http://127.0.0.1:${port}`, account.clientId, clientSecret);
+        expect(status).toBe(200);
+        expect(token).toBeTruthy();
+      });
+
+      it("issues a token when client_id/client_secret are in the form body", async () => {
+        const port = await freePort();
+        const sa = newServiceAccountStore();
+        const { account, clientSecret } = sa.issue({ name: "cc-body", preset: "read_only" });
+        handle = await startHttpTransport({ server: buildServer(), port, host: "127.0.0.1", oauthEnabled: true, serviceAccounts: sa });
+        const res = await fetch(`http://127.0.0.1:${port}/oauth/token`, {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({ grant_type: "client_credentials", client_id: account.clientId, client_secret: clientSecret }).toString(),
+        });
+        expect(res.status).toBe(200);
+        expect(((await res.json()) as { access_token?: string }).access_token).toBeTruthy();
+      });
+
+      it("rejects a wrong secret with 401 invalid_client", async () => {
+        const port = await freePort();
+        const sa = newServiceAccountStore();
+        const { account } = sa.issue({ name: "cc-bad", preset: "read_only" });
+        handle = await startHttpTransport({ server: buildServer(), port, host: "127.0.0.1", oauthEnabled: true, serviceAccounts: sa });
+        const { status } = await clientCredentialsToken(`http://127.0.0.1:${port}`, account.clientId, "wrong-secret");
+        expect(status).toBe(401);
+      });
+
+      it("rejects an unknown client_id with 401 invalid_client", async () => {
+        const port = await freePort();
+        const sa = newServiceAccountStore();
+        handle = await startHttpTransport({ server: buildServer(), port, host: "127.0.0.1", oauthEnabled: true, serviceAccounts: sa });
+        const { status } = await clientCredentialsToken(`http://127.0.0.1:${port}`, "pmc_does_not_exist", "whatever");
+        expect(status).toBe(401);
+      });
+
+      it("rejects client_credentials when no service accounts are wired", async () => {
+        const { url } = await startOauth();
+        const { status } = await clientCredentialsToken(url, "pmc_x", "y");
+        expect(status).toBe(401);
+      });
+
+      it("re-activates a revoked service-account grant on login (live re-auth, no restart)", async () => {
+        const port = await freePort();
+        const sa = newServiceAccountStore();
+        const grants = newGrantStore();
+        const { account, clientSecret } = sa.issue({ name: "reauth", preset: "supervised" });
+        // Simulate the account having been revoked while the daemon ran.
+        grants.ensureActiveServiceGrant({ clientId: account.clientId, clientName: account.clientName, preset: account.preset });
+        grants.revoke(account.clientId);
+        expect(grants.get(account.clientId)?.status).toBe("revoked");
+        handle = await startHttpTransport({ server: buildServer(), port, host: "127.0.0.1", oauthEnabled: true, serviceAccounts: sa, agentGrants: grants });
+        const { status } = await clientCredentialsToken(`http://127.0.0.1:${port}`, account.clientId, clientSecret);
+        expect(status).toBe(200);
+        // A successful login re-activated the grant in the running store.
+        expect(grants.get(account.clientId)?.status).toBe("active");
+      });
     });
 
     it("serves RFC 9728 oauth-protected-resource metadata", async () => {
@@ -634,23 +684,28 @@ describe("HTTP transport", () => {
 
   it("rate-limits authed /mcp callers per token", async () => {
     const port = await freePort();
+    const sa = newServiceAccountStore();
+    const { account, clientSecret } = sa.issue({ name: "rl", preset: "full" });
     handle = await startHttpTransport({
       server: buildServer(),
       port,
       host: "127.0.0.1",
-      bearerToken: "secret",
+      oauthEnabled: true,
+      serviceAccounts: sa,
       rateLimitPerSecond: 1,
       rateLimitBurst: 2,
     });
+    const url = `http://127.0.0.1:${port}`;
+    const { token } = await clientCredentialsToken(url, account.clientId, clientSecret);
     // auth bucket is 3x the burst (see http.ts), so burst=2 ⇒ authed cap ≈ 6.
     const responses = await Promise.all(
       Array.from({ length: 15 }, () =>
-        fetch(`http://127.0.0.1:${port}/mcp`, {
+        fetch(`${url}/mcp`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
             Accept: "application/json, text/event-stream",
-            Authorization: "Bearer secret",
+            Authorization: `Bearer ${token}`,
           },
           body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
         }),
@@ -660,19 +715,23 @@ describe("HTTP transport", () => {
   });
 
   it("returns 500 when the transport handler throws", async () => {
-    // Stand up a real listener, then monkey-patch the transport to throw.
     const port = await freePort();
+    const sa = newServiceAccountStore();
+    const { account, clientSecret } = sa.issue({ name: "err", preset: "full" });
     handle = await startHttpTransport({
       server: buildServer(),
       port,
       host: "127.0.0.1",
-      bearerToken: "secret",
+      oauthEnabled: true,
+      serviceAccounts: sa,
     });
-    // Reach into the internals via a deliberately malformed JSON body —
-    // readJsonBody throws, the listener catches, writes 500.
-    const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+    const url = `http://127.0.0.1:${port}`;
+    const { token } = await clientCredentialsToken(url, account.clientId, clientSecret);
+    // A deliberately malformed JSON body — readJsonBody throws after auth, the
+    // listener catches, writes 500.
+    const res = await fetch(`${url}/mcp`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: "Bearer secret" },
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
       body: "{malformed json",
     });
     expect(res.status).toBe(500);
@@ -680,17 +739,22 @@ describe("HTTP transport", () => {
 
   it("rejects bodies that exceed the size cap", async () => {
     const port = await freePort();
+    const sa = newServiceAccountStore();
+    const { account, clientSecret } = sa.issue({ name: "big", preset: "full" });
     handle = await startHttpTransport({
       server: buildServer(),
       port,
       host: "127.0.0.1",
-      bearerToken: "secret",
+      oauthEnabled: true,
+      serviceAccounts: sa,
     });
+    const url = `http://127.0.0.1:${port}`;
+    const { token } = await clientCredentialsToken(url, account.clientId, clientSecret);
     // Build a 2 MB JSON payload (default cap is 1 MB).
     const big = "x".repeat(2_100_000);
-    const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+    const res = await fetch(`${url}/mcp`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: "Bearer secret" },
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "test", payload: big }),
     }).catch((e) => ({ status: 500, error: e } as unknown as Response));
     // Either the server returns 500 (handled error) or the socket aborts

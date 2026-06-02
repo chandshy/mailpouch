@@ -240,6 +240,11 @@ ${buildStyles(cspNonce)}
       case 'openGrantModal':            return openGrantModal(el.dataset.id, el.dataset.name, el.dataset.conds ? JSON.parse(el.dataset.conds) : null);
       case 'closeGrantModal':           return closeGrantModal();
       case 'submitGrantModal':          return submitGrantModal();
+      case 'openServiceAccountModal':   return openServiceAccountModal();
+      case 'closeServiceAccountModal':  return closeServiceAccountModal();
+      case 'submitServiceAccountModal': return submitServiceAccountModal();
+      case 'revokeServiceAccount':      return revokeServiceAccount(el.dataset.id);
+      case 'copySecret':                return copySecret();
       // Escalations
       case 'approveEscalation':         return approveEscalation(el.dataset.id);
       case 'denyEscalation':            return denyEscalation(el.dataset.id);
@@ -269,9 +274,16 @@ ${buildStyles(cspNonce)}
       case 'wizSavePreset':             return wizSavePreset();
       case 'wizFinalSave':              return wizFinalSave();
       case 'wizCopySnippet':            return wizCopySnippet();
+      case 'wizSetTransport':           return wizSetTransport(el);
+      case 'wizWriteClaudeCode':        return wizWriteClaudeCode();
       case 'wizWriteClaudeDesktop':     return wizWriteClaudeDesktop();
       case 'wizRestartClaude':          return wizRestartClaude();
       case 'wizSkipRestart':            return wizSkipRestart();
+      // Connect-a-client (Setup tab)
+      case 'setClientTransport':        return setClientTransport(el);
+      case 'writeClaudeCode':           return writeClaudeCode();
+      case 'writeClaudeDesktopFromSetup': return writeClaudeDesktopFromSetup();
+      case 'copyClientSnippet':         return copyClientSnippet();
       // File input change events
       case 'uploadCertChange':          return uploadCert(el, el.dataset.target);
       case 'wizUploadCertChange':       return wizUploadCert(el);
@@ -301,6 +313,7 @@ ${buildStyles(cspNonce)}
         targetEl.innerHTML = html;
         _tabLoaded.add(id);
         if (id === 'permissions') { buildCategoryUI(); if (cfg) populatePermissions(cfg); }
+        if (id === 'setup') { ccApplyDaemonMode(); }
       } catch (e) {
         // A fetch that rejects (vs. a non-2xx response, which we throw as
         // "HTTP <code>") means the settings server is gone — the backing
@@ -620,7 +633,14 @@ ${buildStyles(cspNonce)}
       const cidEsc  = esc(g.clientId);
       const nameEsc = esc(g.clientName);
       const condsJson = esc(JSON.stringify(g.conditions || null));
-      const buttons = g.status === 'pending'
+      // Service accounts (client_credentials) are credential-backed and
+      // pre-approved; their revoke must also delete the credential, so it routes
+      // to the service-account endpoint rather than the grant-only revoke.
+      const buttons = g.isServiceAccount
+        ? (g.status === 'active'
+            ? '<button class="btn btn-ghost" data-action="revokeServiceAccount" data-id="' + cidEsc + '">Revoke</button>'
+            : '')
+        : g.status === 'pending'
         ? '<button class="btn btn-primary" data-action="approveGrant" data-id="' + cidEsc + '" data-preset="read_only">Approve read-only</button>' +
           '<button class="btn btn-primary" data-action="approveGrant" data-id="' + cidEsc + '" data-preset="supervised">Approve supervised</button>' +
           '<button class="btn btn-ghost"   data-action="openGrantModal" data-id="' + cidEsc + '" data-name="' + nameEsc + '" data-conds="null">Customize…</button>' +
@@ -629,11 +649,12 @@ ${buildStyles(cspNonce)}
         ? '<button class="btn btn-ghost"   data-action="openGrantModal" data-id="' + cidEsc + '" data-name="' + nameEsc + '" data-conds="' + condsJson + '">Extend / modify…</button>' +
           '<button class="btn btn-ghost"   data-action="revokeGrant" data-id="' + cidEsc + '">Revoke</button>'
         : '';
+      const saTag = g.isServiceAccount ? ' <span style="color:#888;font-size:11px">· 🔑 service account</span>' : '';
       return (
         '<div class="card" style="padding:12px;border:1px solid #333;border-radius:8px">' +
           '<div style="display:flex;justify-content:space-between;align-items:start;gap:12px">' +
             '<div>' +
-              '<div style="font-weight:600">' + esc(g.clientName) + ' <span style="color:#888;font-size:12px">(' + esc(g.clientId) + ')</span>' + origin + '</div>' +
+              '<div style="font-weight:600">' + esc(g.clientName) + ' <span style="color:#888;font-size:12px">(' + esc(g.clientId) + ')</span>' + origin + saTag + '</div>' +
               '<div style="font-size:12px;color:#888;margin-top:4px">' +
                 badge + ' · preset ' + esc(g.preset) + ' · ' + esc(expiry) + ' · ' + g.totalCalls + ' calls · last ' + esc(lastCall) +
               '</div>' +
@@ -708,6 +729,76 @@ ${buildStyles(cspNonce)}
       label: 'Revoke',
       onConfirm: async () => {
         const r = await fetch('/api/agents/' + encodeURIComponent(clientId) + '/revoke', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF }
+        });
+        if (!r.ok) { toast('Revoke failed: ' + (await r.text()), 'err'); return; }
+        refreshAgents();
+      },
+    });
+  }
+
+  function openServiceAccountModal() {
+    const m = document.getElementById('sa-modal');
+    if (!m) return;
+    // Reset to the form view (hide any previously-revealed secret).
+    document.getElementById('sa-form').style.display = '';
+    document.getElementById('sa-secret').style.display = 'none';
+    document.getElementById('sa-name').value = '';
+    document.getElementById('sa-preset').value = 'read_only';
+    document.getElementById('sa-expires').value = '';
+    document.getElementById('sa-folders').value = '';
+    m.style.display = 'flex';
+  }
+
+  function closeServiceAccountModal() {
+    const m = document.getElementById('sa-modal');
+    if (m) m.style.display = 'none';
+    refreshAgents();
+  }
+
+  async function submitServiceAccountModal() {
+    const name = document.getElementById('sa-name').value.trim();
+    if (!name) { toast('Name is required.', 'err'); return; }
+    const preset = document.getElementById('sa-preset').value;
+    const expires = document.getElementById('sa-expires').value.trim();
+    const folders = document.getElementById('sa-folders').value.trim();
+    const conditions = {};
+    if (expires) {
+      const t = Date.parse(expires);
+      if (isNaN(t)) { toast('Expires must be an ISO-8601 timestamp.', 'err'); return; }
+      conditions.expiresAt = new Date(t).toISOString();
+    }
+    if (folders) conditions.folderAllowlist = folders.split(',').map(s => s.trim()).filter(Boolean);
+    const r = await fetch('/api/agents/service-account', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
+      body: JSON.stringify({ name, preset, conditions })
+    });
+    if (!r.ok) { toast('Create failed: ' + (await r.text()), 'err'); return; }
+    const body = await r.json();
+    // Reveal the secret ONCE — the server never returns it again.
+    document.getElementById('sa-form').style.display = 'none';
+    document.getElementById('sa-secret').style.display = '';
+    document.getElementById('sa-out-id').textContent = body.clientId;
+    document.getElementById('sa-out-secret').textContent = body.clientSecret;
+  }
+
+  function copySecret() {
+    const id = document.getElementById('sa-out-id').textContent || '';
+    const secret = document.getElementById('sa-out-secret').textContent || '';
+    navigator.clipboard.writeText('client_id=' + id + '\\nclient_secret=' + secret)
+      .then(() => toast('Copied client_id + client_secret to clipboard.', 'ok'))
+      .catch(() => toast('Copy failed — select the text manually.', 'err'));
+  }
+
+  function revokeServiceAccount(clientId) {
+    showConfirm({
+      title: 'Revoke service account?',
+      body:  'Deletes the credential and revokes its grant. The client_secret stops working immediately and cannot be recovered — you would have to issue a new account.',
+      label: 'Revoke',
+      onConfirm: async () => {
+        const r = await fetch('/api/agents/service-account/' + encodeURIComponent(clientId) + '/revoke', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF }
         });
@@ -997,14 +1088,7 @@ ${buildStyles(cspNonce)}
     const writeBtn = document.getElementById('btn-write-claude');
     if (writeBtn) { writeBtn.disabled = false; writeBtn.textContent = 'Write to Claude Desktop →'; }
 
-    // Build snippet from wizard state
-    const snippet = {
-      'mailpouch': {
-        command: 'node',
-        args: [__distIndexPath || '/path/to/mailpouch/dist/index.js'],
-      },
-    };
-    document.getElementById('done-snippet').textContent = JSON.stringify(snippet, null, 2);
+    wizRenderSnippet();
 
     // Detect Claude Desktop
     try {
@@ -1015,6 +1099,57 @@ ${buildStyles(cspNonce)}
         document.getElementById('restart-row').style.display = '';
       }
     } catch { /* ignore — Claude Desktop section stays hidden */ }
+  }
+
+  let wizTransport = 'stdio';
+
+  function wizRenderSnippet() {
+    const pre = document.getElementById('done-snippet');
+    if (!pre) return;
+    const snippet = wizTransport === 'http'
+      ? { mcpServers: { mailpouch: { type: 'http', url: 'http://127.0.0.1:8788/mcp' } } }
+      : { mcpServers: { mailpouch: {
+          type: 'stdio',
+          command: 'node',
+          args: [__distIndexPath || '/path/to/mailpouch/dist/index.js'],
+          env: { MAILPOUCH_FORCE_STDIO: '1' },
+        } } };
+    pre.textContent = JSON.stringify(snippet, null, 2);
+  }
+
+  function wizSetTransport(el) {
+    // A stdio entry can't work while a shared daemon is configured — force HTTP.
+    if (el && el.value === 'stdio' && ccDaemonMode()) {
+      wizTransport = 'http';
+      const httpRadio = document.querySelector('input[name="wiz-cc-transport"][value="http"]');
+      if (httpRadio) httpRadio.checked = true;
+      wizRenderSnippet();
+      return;
+    }
+    if (el && el.value) { wizTransport = el.value; el.checked = true; }
+    wizRenderSnippet();
+  }
+
+  async function wizWriteClaudeCode() {
+    const resultEl = document.getElementById('wiz-cc-result');
+    if (resultEl) { resultEl.style.display = 'block'; resultEl.innerHTML = '<div class="hint" style="margin-top:6px">Writing…</div>'; }
+    try {
+      const r = await fetch('/api/write-claude-code', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
+        body: JSON.stringify({ transport: wizTransport })
+      });
+      const data = await r.json();
+      if (!resultEl) return;
+      if (data.ok) {
+        resultEl.innerHTML = '<div class="hint" style="color:var(--success);margin-top:6px">✓ Wrote ' + escHtml(wizTransport) + ' entry to <code>' + escHtml(data.configPath) + '</code>'
+          + (data.warning ? '<br><span style="color:var(--warn,#f59e0b)">' + escHtml(data.warning) + '</span>' : '') + '</div>';
+      } else {
+        resultEl.innerHTML = '<div class="hint" style="color:var(--danger);margin-top:6px">✗ ' + escHtml(data.error || 'Failed') + '</div>';
+      }
+    } catch (e) {
+      if (resultEl) resultEl.innerHTML = '<div class="hint" style="color:var(--danger);margin-top:6px">✗ Network error</div>';
+    }
   }
 
   function wizCopySnippet() {
@@ -1087,6 +1222,101 @@ ${buildStyles(cspNonce)}
     document.getElementById('done-complete').querySelector('strong').nextSibling.textContent = ' Restart Claude Desktop when you\\'re ready — Proton Mail tools will be available after it loads.';
   }
 
+  // ── Connect-a-client (Setup tab) ──────────────────────────────────────────
+  let clientTransport = 'stdio';
+
+  // When a shared daemon is configured (remoteMode), a stdio entry would
+  // collide with it — so force HTTP and disable the stdio option in the UI.
+  function ccDaemonMode() { return !!(cfg && cfg.connection && cfg.connection.remoteMode); }
+
+  function ccApplyDaemonMode() {
+    const note = document.getElementById('cc-daemon-note');
+    const stdioRadio = document.getElementById('cc-radio-stdio');
+    const httpRadio = document.getElementById('cc-radio-http');
+    const stdioLabel = document.getElementById('cc-stdio-label');
+    const daemon = ccDaemonMode();
+    if (note) note.style.display = daemon ? 'block' : 'none';
+    if (stdioRadio) stdioRadio.disabled = daemon;
+    if (stdioLabel) stdioLabel.style.opacity = daemon ? '0.5' : '1';
+    if (daemon) {
+      clientTransport = 'http';
+      if (httpRadio) httpRadio.checked = true;
+      if (stdioRadio) stdioRadio.checked = false;
+    }
+    ccBuildSnippet();
+  }
+
+  function ccBuildSnippet() {
+    const pre = document.getElementById('cc-snippet');
+    if (!pre) return;
+    const snippet = clientTransport === 'http'
+      ? { mcpServers: { mailpouch: { type: 'http', url: 'http://127.0.0.1:8788/mcp' } } }
+      : { mcpServers: { mailpouch: { type: 'stdio', command: 'mailpouch', env: { MAILPOUCH_FORCE_STDIO: '1' } } } };
+    pre.textContent = JSON.stringify(snippet, null, 2);
+  }
+
+  function setClientTransport(el) {
+    // Ignore a stdio pick while the shared daemon is on — it can't work.
+    if (el && el.value === 'stdio' && ccDaemonMode()) { ccApplyDaemonMode(); return; }
+    if (el && el.value) { clientTransport = el.value; el.checked = true; }
+    ccBuildSnippet();
+  }
+
+  async function writeClaudeCode() {
+    const resultEl = document.getElementById('cc-result');
+    if (resultEl) resultEl.textContent = 'Writing…';
+    try {
+      const r = await fetch('/api/write-claude-code', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
+        body: JSON.stringify({ transport: clientTransport })
+      });
+      const data = await r.json();
+      if (data.ok) {
+        if (resultEl) resultEl.innerHTML = '✓ Wrote ' + escHtml(clientTransport) + ' entry to <code>' + escHtml(data.configPath) + '</code>'
+          + (data.warning ? ' — <span style="color:var(--warn,#f59e0b)">' + escHtml(data.warning) + '</span>' : '');
+        toast(data.warning ? data.warning : 'Wrote mailpouch to Claude Code (' + clientTransport + ').', data.warning ? 'err' : 'ok');
+      } else {
+        if (resultEl) resultEl.textContent = '✗ ' + (data.error || 'Failed');
+        toast(data.error || 'Write failed', 'err');
+      }
+    } catch (e) {
+      if (resultEl) resultEl.textContent = '✗ Network error';
+      toast('Network error', 'err');
+    }
+  }
+
+  async function writeClaudeDesktopFromSetup() {
+    const resultEl = document.getElementById('cc-result');
+    if (resultEl) resultEl.textContent = 'Writing…';
+    try {
+      const r = await fetch('/api/write-claude-desktop', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
+        body: '{}'
+      });
+      const data = await r.json();
+      if (data.ok) {
+        if (resultEl) resultEl.innerHTML = '✓ Wrote to <code>' + escHtml(data.configPath) + '</code>';
+        toast('Wrote mailpouch to Claude Desktop.', 'ok');
+      } else {
+        if (resultEl) resultEl.textContent = '✗ ' + (data.error || 'Failed');
+        toast(data.error || 'Write failed', 'err');
+      }
+    } catch (e) {
+      if (resultEl) resultEl.textContent = '✗ Network error';
+      toast('Network error', 'err');
+    }
+  }
+
+  function copyClientSnippet() {
+    const pre = document.getElementById('cc-snippet');
+    if (!pre) return;
+    navigator.clipboard.writeText(pre.textContent || '')
+      .then(() => toast('Snippet copied.', 'ok'))
+      .catch(() => toast('Copy failed — select the text manually.', 'err'));
+  }
+
   // ── Shutdown server ───────────────────────────────────────────────────────
   function shutdownServer() {
     showConfirm({
@@ -1155,6 +1385,9 @@ ${buildStyles(cspNonce)}
     if (credStorageEl) {
       credStorageEl.textContent = c.credentialStorage === 'keychain' ? 'OS keychain' : c.credentialStorage === 'encrypted-file' ? 'Encrypted file' : 'Config file (plaintext)';
     }
+
+    // Connect-an-app: reflect daemon mode now that config (remoteMode) is known.
+    ccApplyDaemonMode();
   }
 
   var EYE_OPEN  = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
@@ -2255,6 +2488,55 @@ ${buildStyles(cspNonce)}
     <div style="display:flex;justify-content:flex-end;gap:8px">
       <button class="btn btn-ghost" data-action="closeGrantModal">Cancel</button>
       <button class="btn btn-primary" data-action="submitGrantModal">Save and approve</button>
+    </div>
+  </div>
+</div>
+
+<div id="sa-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:100;align-items:flex-start;justify-content:center">
+  <div style="max-width:520px;width:92%;margin-top:8vh;background:var(--surface);border-radius:var(--radius);padding:22px;color:var(--text);font-family:system-ui,sans-serif">
+    <div style="font-size:16px;font-weight:700;margin-bottom:6px">Create service account</div>
+    <div style="font-size:12px;color:var(--muted);margin-bottom:16px">
+      For headless agents (cron, CI, scheduled) that can't do interactive approval.
+      Issues a client_id + client_secret and pre-approves its grant. Log in via OAuth
+      <code>client_credentials</code>.
+    </div>
+    <div id="sa-form">
+      <div class="field" style="margin-bottom:12px">
+        <label style="font-size:12px;color:var(--text2)">Name</label>
+        <input type="text" id="sa-name" placeholder="e.g. nightly-triage-cron" maxlength="100" style="width:100%;padding:6px;margin-top:4px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;box-sizing:border-box">
+      </div>
+      <div class="field" style="margin-bottom:12px">
+        <label style="font-size:12px;color:var(--text2)">Preset</label>
+        <select id="sa-preset" style="width:100%;padding:6px;margin-top:4px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px">
+          <option value="read_only" selected>read_only</option>
+          <option value="send_only">send_only</option>
+          <option value="supervised">supervised</option>
+          <option value="full">full</option>
+        </select>
+      </div>
+      <div class="field" style="margin-bottom:12px">
+        <label style="font-size:12px;color:var(--text2)">Expires (optional, ISO-8601)</label>
+        <input type="datetime-local" id="sa-expires" style="width:100%;padding:6px;margin-top:4px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;box-sizing:border-box">
+      </div>
+      <div class="field" style="margin-bottom:16px">
+        <label style="font-size:12px;color:var(--text2)">Folder allowlist (optional, comma-separated)</label>
+        <input type="text" id="sa-folders" placeholder="INBOX, Archive" style="width:100%;padding:6px;margin-top:4px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;box-sizing:border-box">
+      </div>
+      <div style="display:flex;justify-content:flex-end;gap:8px">
+        <button class="btn btn-ghost" data-action="closeServiceAccountModal">Cancel</button>
+        <button class="btn btn-primary" data-action="submitServiceAccountModal">Create</button>
+      </div>
+    </div>
+    <div id="sa-secret" style="display:none">
+      <div style="font-size:13px;color:#f59e0b;margin-bottom:10px">⚠ Copy the secret now — it is shown once and cannot be recovered.</div>
+      <div style="font-size:12px;color:var(--text2)">client_id</div>
+      <div id="sa-out-id" style="font-family:monospace;background:var(--surface2);padding:8px;border-radius:6px;margin:4px 0 12px;word-break:break-all"></div>
+      <div style="font-size:12px;color:var(--text2)">client_secret</div>
+      <div id="sa-out-secret" style="font-family:monospace;background:var(--surface2);padding:8px;border-radius:6px;margin:4px 0 16px;word-break:break-all"></div>
+      <div style="display:flex;justify-content:flex-end;gap:8px">
+        <button class="btn btn-ghost" data-action="copySecret">Copy</button>
+        <button class="btn btn-primary" data-action="closeServiceAccountModal">Done</button>
+      </div>
     </div>
   </div>
 </div>

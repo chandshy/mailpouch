@@ -22,6 +22,7 @@ import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { expect } from "vitest";
 import { buildPermissions } from "../../src/config/loader.js";
+import { localAgentId } from "../../src/agents/caller-context.js";
 import { ImapFixtures } from "./fixtures/imap-fixtures.js";
 import { GREENMAIL_IMAP_PORT, GREENMAIL_SMTP_PORT, TEST_USER } from "./support/docker.js";
 
@@ -61,6 +62,42 @@ export interface StartE2EOptions {
   mode?: HarnessMode;
   /** Override Greenmail user. Ignored in bridge mode. */
   user?: { email: string; username: string; password: string };
+}
+
+/** MCP client name the harness connects under. Local-agent gating derives the
+ *  grant's clientId from this (localAgentId), so the pre-seeded grant below must
+ *  use the same name. */
+const HARNESS_CLIENT_NAME = "e2e-harness";
+
+/**
+ * Local-agent gating (every stdio agent must register + be approved) would
+ * leave the harness's grant "pending" with no human in CI to approve it,
+ * blocking every mutating tool. Mirror the real out-of-band approval path:
+ * pre-seed an *active* grant for the harness's derived clientId, pointed at by
+ * MAILPOUCH_AGENTS. This exercises the gate (grant must be active) rather than
+ * bypassing it.
+ */
+function writeApprovedAgentGrant(): string {
+  const path = join(HOME, `.mailpouch-e2e-agents-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
+  const now = new Date().toISOString();
+  const store = {
+    version: 1,
+    grants: [
+      {
+        clientId: localAgentId(HARNESS_CLIENT_NAME),
+        clientName: HARNESS_CLIENT_NAME,
+        status: "active",
+        preset: "full",
+        createdAt: now,
+        approvedAt: now,
+        totalCalls: 0,
+        transport: "stdio",
+        note: "e2e harness — pre-approved for CI",
+      },
+    ],
+  };
+  writeFileSync(path, JSON.stringify(store, null, 2), { mode: 0o600 });
+  return path;
 }
 
 /** Phase 1 — write a Greenmail-targeted mailpouch config under $HOME. */
@@ -192,12 +229,14 @@ export async function startE2E(opts: StartE2EOptions = {}): Promise<E2EHarness> 
   const smtpFromOverride = mode === "greenmail"
     ? `${imapUser}@test.local`
     : undefined;
+  const agentsPath = writeApprovedAgentGrant();
   const transport = new StdioClientTransport({
     command: "node",
     args: [SERVER],
     env: {
       ...process.env,
       MAILPOUCH_CONFIG: configPath,
+      MAILPOUCH_AGENTS: agentsPath,
       MAILPOUCH_INSECURE_BRIDGE: "1",
       MAILPOUCH_TIER: "complete",
       // Greenmail's embedded SMTP does not advertise STARTTLS. This
@@ -211,7 +250,7 @@ export async function startE2E(opts: StartE2EOptions = {}): Promise<E2EHarness> 
   });
 
   const client = new Client(
-    { name: "e2e-harness", version: "1.0.0" },
+    { name: HARNESS_CLIENT_NAME, version: "1.0.0" },
     { capabilities: { tools: {} } }
   );
   await client.connect(transport);
@@ -301,6 +340,11 @@ export async function startE2E(opts: StartE2EOptions = {}): Promise<E2EHarness> 
       } catch {
         // ignore
       }
+    }
+    try {
+      unlinkSync(agentsPath);
+    } catch {
+      // ignore
     }
   };
 

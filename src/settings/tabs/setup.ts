@@ -225,6 +225,31 @@ export function buildSetupHtml(p: SetupParams): string {
       </fieldset>
     </div>
 
+    <div class="card" style="margin-top:16px">
+      <div class="card-title">Connect an app</div>
+      <div class="card-desc">Add mailpouch to an app like Claude Code or Claude Desktop. Pick how it should connect, then click a button to set it up for you.</div>
+      <div id="cc-daemon-note" style="display:none;margin:0 0 10px;padding:8px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;font-size:13px;color:var(--muted)">A shared mailpouch is running, so apps connect to it. The "just this computer" option is off because it would conflict with the shared one.</div>
+      <fieldset style="border:none;padding:0;margin:0">
+        <label id="cc-stdio-label" style="display:block;margin-bottom:8px">
+          <input type="radio" name="cc-transport" value="stdio" id="cc-radio-stdio" checked data-change="setClientTransport">
+          <strong>Just this computer</strong> <span style="color:var(--muted)">(recommended)</span><br>
+          <span style="color:var(--muted);font-size:13px">The app starts mailpouch on its own when it needs it. Simplest — nothing else to run.</span>
+        </label>
+        <label style="display:block">
+          <input type="radio" name="cc-transport" value="http" id="cc-radio-http" data-change="setClientTransport">
+          <strong>Share one connection</strong><br>
+          <span style="color:var(--muted);font-size:13px">Connect to a mailpouch that's already running, so several apps or devices can share it. You'll approve the app the first time it connects. (Requires remote access turned on.)</span>
+        </label>
+      </fieldset>
+      <pre id="cc-snippet" style="margin-top:12px;padding:10px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;font-size:12px;overflow:auto"></pre>
+      <div class="actions" style="margin-top:8px">
+        <button class="btn btn-primary" data-action="writeClaudeCode">Set up Claude Code</button>
+        <button class="btn btn-ghost"   data-action="writeClaudeDesktopFromSetup">Set up Claude Desktop</button>
+        <button class="btn btn-ghost"   data-action="copyClientSnippet">Copy setup text</button>
+        <span id="cc-result" style="align-self:center;font-size:13px;color:var(--muted)"></span>
+      </div>
+    </div>
+
     <div class="actions">
       <button class="btn btn-primary" data-action="saveSetup" id="save-btn">Save Configuration</button>
       <button class="btn btn-ghost"   data-action="testConnections" id="test-btn">Test Connections</button>

@@ -168,6 +168,37 @@ function verifyPkceS256(verifier: string, challenge: string): boolean {
 // Constant-time string compare imported from ../utils/crypto.
 const safeEqual = constantTimeEqual;
 
+/**
+ * Extract client_id + client_secret for the client_credentials grant. Supports
+ * both RFC 6749 §2.3.1 transports: HTTP Basic (`Authorization: Basic
+ * base64(client_id:client_secret)`, each component form-urlencoded) and form
+ * body params. Basic takes precedence. Returns null when neither yields a
+ * complete pair.
+ */
+function extractClientCredentials(
+  req: IncomingMessage,
+  body: Record<string, string>,
+): { clientId: string; clientSecret: string } | null {
+  const auth = req.headers["authorization"];
+  if (typeof auth === "string" && /^basic\s/i.test(auth)) {
+    try {
+      const decoded = Buffer.from(auth.replace(/^basic\s+/i, ""), "base64").toString("utf-8");
+      const idx = decoded.indexOf(":");
+      if (idx >= 0) {
+        const clientId = decodeURIComponent(decoded.slice(0, idx));
+        const clientSecret = decodeURIComponent(decoded.slice(idx + 1));
+        if (clientId && clientSecret) return { clientId, clientSecret };
+      }
+    } catch {
+      // malformed Basic header → fall through to body params
+    }
+  }
+  const clientId = body.client_id ?? "";
+  const clientSecret = body.client_secret ?? "";
+  if (clientId && clientSecret) return { clientId, clientSecret };
+  return null;
+}
+
 export interface OAuthHandlerResult {
   /** True when the handler has already written a response. */
   handled: boolean;
@@ -181,6 +212,11 @@ export class OAuthHandlers {
   /** Extracts the caller IP from a request (injected to avoid importing http.ts
    *  here, which would create an import cycle). */
   private readonly ipExtractor?: (req: IncomingMessage) => string;
+  /** Verifies a service-account client_id + client_secret for the
+   *  client_credentials grant. Returns true when the pair is valid. Injected so
+   *  this module stays free of the agents-layer import. When absent, the
+   *  client_credentials grant is rejected (deployment issued no service accounts). */
+  private readonly verifyClientCredentials?: (clientId: string, secret: string) => boolean;
 
   constructor(
     store: OAuthStore,
@@ -188,12 +224,14 @@ export class OAuthHandlers {
     limiter: TokenBucketLimiter,
     onClientRegistered?: (c: { client_id: string; client_name?: string; ip?: string }) => void,
     ipExtractor?: (req: IncomingMessage) => string,
+    verifyClientCredentials?: (clientId: string, secret: string) => boolean,
   ) {
     this.store = store;
     this.cfg = cfg;
     this.limiter = limiter;
     this.onClientRegistered = onClientRegistered;
     this.ipExtractor = ipExtractor;
+    this.verifyClientCredentials = verifyClientCredentials;
     // Authorize is always automatic-consent (there is no admin password): the
     // per-agent grant Approve/Deny is the only human gate (see handleAuthorizeGet).
   }
@@ -252,9 +290,11 @@ export class OAuthHandlers {
       registration_endpoint: `${this.cfg.issuer}/oauth/register`,
       revocation_endpoint: `${this.cfg.issuer}/oauth/revoke`,
       response_types_supported: ["code"],
-      grant_types_supported: ["authorization_code"],
+      grant_types_supported: ["authorization_code", "client_credentials"],
       code_challenge_methods_supported: ["S256"],
-      token_endpoint_auth_methods_supported: ["none"],
+      // "none" for the public authorization_code (PKCE) flow; basic/post for
+      // service-account client_credentials login.
+      token_endpoint_auth_methods_supported: ["none", "client_secret_basic", "client_secret_post"],
       scopes_supported: SCOPES,
     });
     return { handled: true };
@@ -406,8 +446,11 @@ export class OAuthHandlers {
     }
 
     const grantType = body.grant_type ?? "";
+    if (grantType === "client_credentials") {
+      return this.handleClientCredentials(req, res, body);
+    }
     if (grantType !== "authorization_code") {
-      error(res, 400, "unsupported_grant_type", `Only authorization_code is supported; got ${grantType}.`);
+      error(res, 400, "unsupported_grant_type", `Supported grant types: authorization_code, client_credentials; got ${grantType}.`);
       return { handled: true };
     }
 
@@ -454,6 +497,41 @@ export class OAuthHandlers {
       issuedFromIp: clientIp(req),
     });
 
+    json(res, 200, {
+      access_token: issued.token,
+      token_type: "Bearer",
+      expires_in: Math.floor((issued.expiresAt - Date.now()) / 1000),
+      scope: issued.scopes.join(" "),
+    });
+    return { handled: true };
+  }
+
+  /**
+   * RFC 6749 §4.4 client_credentials grant — the non-interactive login path for
+   * service accounts (cron/headless agents). The client authenticates with its
+   * own client_id + client_secret (HTTP Basic per §2.3.1, or form body); on a
+   * verified pair we issue an access token bound to that client_id. No PKCE, no
+   * authorization code, no interactive consent — the agent was pre-approved at
+   * issuance (an active grant already exists), so GrantManager still gates every
+   * tool call exactly as for an interactively-approved agent.
+   */
+  private async handleClientCredentials(
+    req: IncomingMessage,
+    res: ServerResponse,
+    body: Record<string, string>,
+  ): Promise<OAuthHandlerResult> {
+    const creds = extractClientCredentials(req, body);
+    // Collapse unknown-client and wrong-secret into one opaque error so the
+    // endpoint isn't a client-id enumeration oracle.
+    if (!creds || !this.verifyClientCredentials?.(creds.clientId, creds.clientSecret)) {
+      error(res, 401, "invalid_client", "Invalid client credentials.");
+      return { handled: true };
+    }
+    const issued = this.store.issueToken({
+      clientId: creds.clientId,
+      scopes: [...SCOPES],
+      issuedFromIp: clientIp(req),
+    });
     json(res, 200, {
       access_token: issued.token,
       token_type: "Bearer",

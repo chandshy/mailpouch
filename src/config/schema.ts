@@ -217,17 +217,23 @@ export interface ConnectionSettings {
   remotePort?: number;
   /** HTTP path for the MCP endpoint. Default /mcp. */
   remotePath?: string;
-  /** Required when remoteMode=true. Shared bearer token clients send in Authorization: Bearer ... */
+  /**
+   * @deprecated The shared static bearer was removed — it bypassed per-agent
+   * gating and audit. A present value is ignored with a startup warning. Every
+   * agent now authenticates as its own OAuth client: interactive via
+   * authorization_code, headless via a service account (`mailpouch agent issue`).
+   */
   remoteBearerToken?: string;
   /** Optional HTTPS cert path for the HTTP transport. Required for public exposure. */
   remoteTlsCertPath?: string;
   /** Optional HTTPS key path for the HTTP transport. Must be paired with remoteTlsCertPath. */
   remoteTlsKeyPath?: string;
   /**
-   * Enable OAuth 2.1 endpoints alongside the static bearer. MCP hosts can
-   * register themselves via /oauth/register and obtain tokens via a
-   * PKCE-guarded consent flow. Recommended when exposing beyond a trusted
-   * tunnel; still works with any static-bearer callers.
+   * REQUIRED when remoteMode=true. Enables the OAuth 2.1 endpoints — the only
+   * remote-auth mechanism. MCP hosts self-register via /oauth/register and
+   * obtain tokens via a PKCE-guarded automatic-consent flow (gated by per-agent
+   * Approve/Deny); headless service accounts use the client_credentials grant.
+   * Remote mode refuses to start without it.
    */
   remoteOauthEnabled?: boolean;
   /**

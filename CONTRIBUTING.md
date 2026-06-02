@@ -28,7 +28,7 @@ Thank you for your interest in contributing to mailpouch! This document provides
 4. Configure credentials via the settings UI:
    ```bash
    npm run build
-   npm run settings    # opens http://localhost:8765
+   npm run settings    # opens http://localhost:8766
    ```
    Complete the setup wizard to save credentials to `~/.mailpouch.json`. Alternatively, create that file directly with the required `connection` fields (see `src/config/schema.ts` for the shape).
 
@@ -119,7 +119,7 @@ src/
 │   └── memory.ts               # Credential wipe helpers
 ├── settings/
 │   ├── security.ts             # Rate limiting, CSRF, origin validation, TLS
-│   ├── server.ts               # Browser-based settings UI (localhost:8765)
+│   ├── server.ts               # Browser-based settings UI (localhost:8766)
 │   └── tui.ts                  # Terminal UI for settings
 ├── services/
 │   ├── smtp-service.ts         # SMTP email sending (Nodemailer), deferred-init pattern

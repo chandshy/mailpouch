@@ -11,13 +11,20 @@
 
 import type { AgentGrantStore } from "./grant-store.js";
 import type { AgentAuditLog } from "./audit.js";
+import type { ServiceAccountStore } from "./service-account-store.js";
 
 let _grants: AgentGrantStore | null = null;
 let _audit: AgentAuditLog | null = null;
+let _serviceAccounts: ServiceAccountStore | null = null;
 
-export function registerAgentServices(grants: AgentGrantStore, audit: AgentAuditLog): void {
+export function registerAgentServices(
+  grants: AgentGrantStore,
+  audit: AgentAuditLog,
+  serviceAccounts?: ServiceAccountStore,
+): void {
   _grants = grants;
   _audit = audit;
+  _serviceAccounts = serviceAccounts ?? null;
 }
 
 export function getAgentGrantStore(): AgentGrantStore | null {
@@ -26,4 +33,8 @@ export function getAgentGrantStore(): AgentGrantStore | null {
 
 export function getAgentAuditLog(): AgentAuditLog | null {
   return _audit;
+}
+
+export function getServiceAccountStore(): ServiceAccountStore | null {
+  return _serviceAccounts;
 }

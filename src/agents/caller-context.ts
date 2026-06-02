@@ -28,14 +28,14 @@ export function localAgentId(clientName: string): string {
 }
 
 export interface CallerContext {
-  /** OAuth client_id of the caller, or "bearer:static" for the static-bearer path. */
+  /** OAuth client_id of the caller (DCR `pmc_…` for interactive agents and
+   *  service accounts, `stdio:…` for local stdio agents). Always a real,
+   *  per-agent identity — there is no shared-bearer pseudo-client. */
   clientId: string;
-  /** Human-readable display name (from DCR client_name or synthesized). */
+  /** Human-readable display name (from DCR/service-account client_name or synthesized). */
   clientName: string;
   /** Remote IP when known; undefined for stdio callers. */
   ip?: string;
-  /** True when the caller authenticated with the static bearer token (no OAuth). */
-  staticBearer?: boolean;
 }
 
 const storage = new AsyncLocalStorage<CallerContext>();

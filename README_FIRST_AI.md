@@ -20,6 +20,16 @@ call is blocked, it means the human has not granted that level of access. You
 can ask them to change it in the settings UI, or you can use
 `request_permission_escalation` to request a temporary upgrade (they must approve it).
 
+**You authenticate as your own client.** Over stdio (Claude Desktop and similar)
+the host spawns the server for you. Over HTTP every caller authenticates with
+OAuth — there is no shared bearer token. Interactive hosts self-register and the
+human Approves you in the Agents tab; until then your tool calls are denied even
+though your token is valid. If you are a **headless agent** (cron, CI, scheduled),
+the operator issues you a *service account* out-of-band and you log in with the
+OAuth `client_credentials` grant (your own `client_id` + `client_secret`) — that
+credential is pre-approved, so no interactive consent is needed. Either way you
+carry a distinct identity and your calls are individually gated and audited.
+
 **Never assume you have broad access.** Always start with read-only tools to
 understand context before attempting any action that modifies email state.
 
@@ -36,7 +46,7 @@ understand context before attempting any action that modifies email state.
 
 The current preset is enforced server-side — you cannot bypass it. If a tool
 returns `"Blocked: ..."`, the human needs to change the preset in the settings
-UI (`http://localhost:8765`) or approve an escalation request.
+UI (`http://localhost:8766`) or approve an escalation request.
 
 ---
 
@@ -684,7 +694,7 @@ reason         string   Plain-language explanation of why you need this. (requir
 
 Returns `{ status: "pending", challenge_id, targetPreset, currentPreset, expiresAt }`.
 Use the `challenge_id` to poll `check_escalation_status`. The human will see the
-request in the settings UI (http://localhost:8765) or in the terminal.
+request in the settings UI (http://localhost:8766) or in the terminal.
 
 **Important:**
 - You cannot approve your own escalation. A human must do it.

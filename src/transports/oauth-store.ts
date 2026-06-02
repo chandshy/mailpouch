@@ -132,6 +132,18 @@ export class OAuthStore {
     return this.clients.get(id);
   }
 
+  /**
+   * Register a client with a predetermined client_id. Used to load persisted
+   * service accounts (client_credentials grant) at startup so token-issued
+   * callers resolve to a human-readable client_name in logs and the Agents tab.
+   * Unlike {@link registerClient}, the id is supplied by the caller (it already
+   * lives in the service-account store) rather than freshly minted.
+   */
+  registerServiceClient(record: RegisteredClient): void {
+    if (this.clients.size >= OAUTH_MAX_CLIENTS) this.evictOldest(this.clients);
+    this.clients.set(record.client_id, record);
+  }
+
   /** Allocate a new one-shot authorization code. */
   issueAuthCode(params: Omit<PendingAuth, "code" | "createdAt">): PendingAuth {
     const code = randomBytes(32).toString("base64url");

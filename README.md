@@ -6,7 +6,7 @@ The pitch in one line: if you picked Proton Mail because you didn't want a third
 
 `mailpouch` runs locally and speaks to Proton Bridge over a TLS socket on your own machine; nothing leaves the box unless you asked it to. 70 tools across reading, sending, drafts, folders, search, analytics, aliases, Proton Pass, and system control, tiered into `core` / `extended` / `complete` so an agent that only reads doesn't burn context on Bridge lifecycle tools it will never call. Every connecting client gets its own grant with folder allowlists, IP pins, per-tool rate caps, expiry, and account binding — all hashed-args in the audit log, never the values. Delete, trash, spam, and alias removal round-trip through MCP elicitation for human confirmation before they execute. That last part sounds like theatre until you watch an agent try to empty a folder and get blocked mid-call.
 
-It is real because the primitives are real: OAuth 2.1 with PKCE S256, RFC 7591 dynamic client registration, RFC 8707 resource indicators, RFC 9728 protected-resource metadata, or a static bearer token if you'd rather. Credentials live in the OS keychain. A local FTS5 index with BM25 ranking handles phrase, boolean, prefix, and column-filter queries so your search terms never leave your laptop. Desktop notifications use native `osascript` / `notify-send` / `powershell.exe` with no added dependency; webhook dispatch auto-detects CloudEvents 1.0, Slack, or Discord, signs with HMAC, and retries with eight-attempt exponential backoff. So how do you point it at your Bridge install and wire up a client?
+It is real because the primitives are real: OAuth 2.1 with PKCE S256, RFC 7591 dynamic client registration, RFC 8707 resource indicators, RFC 9728 protected-resource metadata, and an OAuth `client_credentials` grant so headless agents authenticate too — every agent gets its own gated, revocable identity. Credentials live in the OS keychain. A local FTS5 index with BM25 ranking handles phrase, boolean, prefix, and column-filter queries so your search terms never leave your laptop. Desktop notifications use native `osascript` / `notify-send` / `powershell.exe` with no added dependency; webhook dispatch auto-detects CloudEvents 1.0, Slack, or Discord, signs with HMAC, and retries with eight-attempt exponential backoff. So how do you point it at your Bridge install and wire up a client?
 
 [![CI](https://github.com/chandshy/mailpouch/actions/workflows/ci.yml/badge.svg)](https://github.com/chandshy/mailpouch/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/badge/npm-v3.0.72-blue.svg)](https://www.npmjs.com/package/mailpouch)
@@ -48,7 +48,7 @@ Your emails are decrypted on your own machine by Proton Bridge. This server neve
 ## Key Features
 
 - **70 tools** across 11 categories — reading, search, analytics, sending, drafts, scheduling, follow-up reminders, folder management, bulk actions, deletion, Bridge/server lifecycle, plus optional companion services (SimpleLogin aliases, Proton Pass, local FTS5 search). See [`src/config/schema.ts`](src/config/schema.ts) (`ALL_TOOLS`, `TOOL_CATEGORIES`) for the canonical inventory.
-- **Two transports** — stdio (default, Claude Desktop) and HTTP (remote / self-host). HTTP supports a static bearer **and/or** OAuth 2.1 with PKCE-S256, RFC 7591 Dynamic Client Registration, RFC 8414 authorization-server metadata, and RFC 9728 protected-resource metadata. Per-caller token-bucket rate limiting on every endpoint.
+- **Two transports** — stdio (default, Claude Desktop) and HTTP (remote / self-host). HTTP is OAuth-only: `authorization_code` + PKCE-S256 for interactive agents and `client_credentials` for headless service accounts, with RFC 7591 Dynamic Client Registration, RFC 8414 authorization-server metadata, and RFC 9728 protected-resource metadata. Per-caller token-bucket rate limiting on every endpoint.
 - **Progressive tool tiering** — `core` / `extended` / `complete` controls how many tools land in the client's `ListTools` response, so context isn't burned on tools you don't use. Configurable via `toolTier` or `MAILPOUCH_TIER`.
 - **Destructive-tool confirmation** — uses MCP elicitation when the client supports it (Claude Desktop, Cline) so the user sees a prompt before any delete / trash / spam / `alias_delete` / `pass_get` runs. Falls back to a required `{ confirmed: true }` argument for clients without elicitation.
 - **5 permission presets** — read-only by default; write access requires explicit opt-in. Per-tool overrides and rate limits via the **Custom** preset.
@@ -250,7 +250,6 @@ Enable it via the Setup tab → **Remote (HTTP) mode**, or by setting these in `
     "remoteHost": "127.0.0.1",
     "remotePort": 8788,
     "remotePath": "/mcp",
-    "remoteBearerToken": "<long-random-string>",
     "remoteTlsCertPath": "/path/to/cert.pem",
     "remoteTlsKeyPath":  "/path/to/key.pem",
     "remoteOauthEnabled": true,
@@ -261,27 +260,59 @@ Enable it via the Setup tab → **Remote (HTTP) mode**, or by setting these in `
 }
 ```
 
-**Auth modes** (mix freely on the same listener):
+**Auth is OAuth-only — every agent authenticates as its own client.** There is no shared bearer token (it was removed because it bypassed per-agent gating and audit). A verified token always maps to a specific, gated, revocable agent identity. `remoteMode` refuses to start without `remoteOauthEnabled`. Two grant types share the one listener:
 
-- **Static bearer** — programmatic clients send `Authorization: Bearer <token>`. Constant-time comparison.
-- **OAuth 2.1 + PKCE-S256** — MCP hosts self-register via `POST /oauth/register` (RFC 7591), discover endpoints via `GET /.well-known/oauth-authorization-server` (RFC 8414) and `GET /.well-known/oauth-protected-resource` (RFC 9728), then complete a PKCE flow with **automatic consent** (no admin password — `GET /oauth/authorize` issues a code immediately). The human gate is the per-agent **Approve/Deny** in the Agents tab: the issued token is inert until you approve the agent, and a pending request expires after 5 minutes. Refresh and revocation supported.
+- **`authorization_code` + PKCE-S256 (interactive agents)** — MCP hosts self-register via `POST /oauth/register` (RFC 7591), discover endpoints via `GET /.well-known/oauth-authorization-server` (RFC 8414) and `GET /.well-known/oauth-protected-resource` (RFC 9728), then complete a PKCE flow with **automatic consent** (no admin password — `GET /oauth/authorize` issues a code immediately). The human gate is the per-agent **Approve/Deny** in the Agents tab: the issued token is inert until you approve the agent, and a pending request expires after 5 minutes.
+- **`client_credentials` (headless / service accounts)** — cron, CI, and scheduled agents that can't do interactive consent. Issue a **service account** out-of-band, then log in with its `client_id` + `client_secret`:
+
+  ```bash
+  mailpouch agent issue --name nightly-triage --preset read_only
+  # → prints client_id + client_secret ONCE; the matching grant is pre-approved (active).
+  # also: mailpouch agent list   /   mailpouch agent revoke <client_id>
+  # (or use the "+ Service account" button in the Agents tab)
+
+  curl -s -u "$CLIENT_ID:$CLIENT_SECRET" \
+       -d grant_type=client_credentials https://mcp.example.com/oauth/token
+  # → { "access_token": "…", "token_type": "Bearer", "expires_in": 86400 }
+  ```
 
 **Rate limiting** — token-bucket per caller (per IP for unauthed paths, per token key for `/mcp`). A compromised token can't DoS Bridge.
 
 **TLS** — provide `remoteTlsCertPath` + `remoteTlsKeyPath` for HTTPS. Required for any non-loopback exposure.
 
-A static-bearer client config looks like:
+A remote client config (after obtaining an access token via either grant) looks like:
 
 ```json
 {
   "mcpServers": {
     "mailpouch-remote": {
       "url": "https://mcp.example.com/mcp",
-      "headers": { "Authorization": "Bearer <token>" }
+      "headers": { "Authorization": "Bearer <access_token>" }
     }
   }
 }
 ```
+
+**Connecting a client (stdio or HTTP).** The Settings UI (Setup tab → *Connect a client*) and the first-run wizard both let you choose how an MCP client connects and write the entry for you:
+
+- **Write to Claude Code** merges a `mailpouch` entry into `~/.claude.json` under `mcpServers` (and **Write to Claude Desktop** does the same for `claude_desktop_config.json`).
+- **stdio** — the client spawns its own mailpouch. The written entry sets `MAILPOUCH_FORCE_STDIO=1` so it speaks stdio even when your config has `remoteMode: true`. Don't run a stdio client alongside the shared HTTP daemon against the same Proton account — they'd contend for the one IMAP connection.
+- **HTTP** — the client connects to the shared daemon at `/mcp` (needs `remoteMode` + `remoteOauthEnabled` and the daemon running). The client performs an OAuth login and you Approve it once in the Agents tab.
+
+**Running mailpouch as a shared daemon (multiple apps at once).** mailpouch holds **one IMAP connection per account** (a singleton lock), so two stdio instances for the same account can't run at the same time — the second exits. To use several clients together (e.g. Claude Code **and** Claude cowork, or headless agents), run **one** HTTP daemon and point every client at it:
+
+```bash
+mailpouch daemon              # starts the shared HTTP daemon (forces HTTP; requires remoteOauthEnabled)
+# optional: mailpouch daemon --host 0.0.0.0 --port 8788
+```
+
+`mailpouch daemon` is **user-started** (run it in a tmux / login session or your own supervisor) — it is not an autostart. Then:
+- **Interactive apps** (Claude Code, Claude Desktop) connect over HTTP and you Approve each once in the Agents tab.
+- **Headless / cowork hosts** authenticate with a per-host **service account** (`mailpouch agent issue --name <host> --preset <preset>`) over the `client_credentials` grant.
+
+All clients share the daemon's single IMAP connection — no singleton conflict, and each is independently gated, audited, and revocable.
+
+While the daemon is running, the Settings "Connect an app" chooser **only offers HTTP** — the per-computer (stdio) option is disabled, because a stdio entry would spawn a second instance that collides with the daemon and fail to start. Issuing or re-issuing a service account (`mailpouch agent issue`) takes effect **immediately** — the running daemon picks it up on the next login, no restart. Revoking a service account (in the Agents tab) deletes its credential, so it stays revoked across restarts; to re-enable, re-issue it.
 
 ### Environment variables
 
@@ -298,8 +329,10 @@ Configuration is stored in `~/.mailpouch.json` and managed via the settings UI �
 | `MAILPOUCH_PASS_AUDIT` | `~/.mailpouch-pass-audit.jsonl` | Override Proton Pass access audit log path |
 | `MAILPOUCH_FTS_DB` | `~/.mailpouch-fts.db` | Override full-text-search index database path |
 | `MAILPOUCH_AGENTS` | `~/.mailpouch-agents.json` | Override per-agent grant store path |
+| `MAILPOUCH_SERVICE_ACCOUNTS` | `~/.mailpouch-service-accounts.json` | Override service-account (client_credentials) store path |
 | `MAILPOUCH_AGENT_AUDIT` | `~/.mailpouch-agent-audit.jsonl` | Override per-agent tool-call audit log path |
 | `MAILPOUCH_MACHINE_SECRET` | derived from host | Override the machine-binding secret used to encrypt at-rest credentials |
+| `MAILPOUCH_FORCE_STDIO` | unset | Force stdio for this spawn even if the config has `remoteMode: true`. Set on a stdio MCP-client entry (e.g. Claude Code) so it speaks stdio instead of starting the HTTP server. |
 | `MAILPOUCH_INSECURE_BRIDGE` | unset | Per-launch opt-in to localhost Bridge without a pinned cert |
 | `MAILPOUCH_TIER` | `complete` | Tool-tier override: `core` / `extended` / `complete` |
 | `PORT` | `8766` | Override settings UI HTTP server port |
@@ -470,11 +503,11 @@ Grant lifecycle: `pending` → `active` → `revoked` | `expired`. Each grant ca
 
 Approve, deny, revoke, and "approve-with-conditions" all live in the **Agents** tab of the settings UI. The tab streams live updates over SSE from `GET /api/notifications` — new pending grants surface without a reload. When a new agent registers, mailpouch also **auto-opens this tab in your browser** (and fires a desktop notification + tray badge) so you can approve or deny the connection right away; the pending card shows the agent's name, registering IP, and time. The agent's tool calls stay blocked until you approve. When a new agent connects, mailpouch pops a **native Approve/Deny dialog right on the screen where it runs** (zenity/osascript/PowerShell) so you can decide without opening the tab — Approve grants your global preset, Deny revokes it (`nativeApprovalDialog`, default on). If no dialog tool is available (headless), it falls back to **auto-opening this Agents tab** in your browser (`autoOpenApprovalWindow`, default on) plus a desktop notification + tray badge. Once connected, the card also shows the agent's **MCP handshake connection info** — its self-reported client name + version, the transport, and a last-connected timestamp — captured at `initialize` (display-only; the agent's identity is its server-issued OAuth `client_id`, not the self-reported name).
 
-> **Per-agent registration requires OAuth.** A shared **static bearer token has no per-agent identity**, so bearer-authenticated agents are treated as one trusted caller and do **not** register or appear in the Agents tab. To require non-local agents to register/approve and be remembered individually, enable OAuth (`connection.remoteMode: true` + `remoteOauthEnabled: true`) rather than a bearer token. OAuth uses **automatic consent** — agents authenticate with no human password; your only action is **Approve/Deny** in the Agents tab (a pending request expires after 5 minutes). `remoteOauthAdminPassword` is deprecated and ignored.
+> **Every agent authenticates as its own client — there is no shared bearer.** The static bearer was removed because it had no per-agent identity (one secret, no gating, no audit). Remote mode requires OAuth (`connection.remoteMode: true` + `remoteOauthEnabled: true`). Interactive agents register and you **Approve/Deny** them here (automatic consent — no human password; a pending request expires after 5 minutes). Headless agents (cron, CI) use a pre-approved **service account** (`mailpouch agent issue …` or the "+ Service account" button) and the `client_credentials` grant. `remoteBearerToken` and `remoteOauthAdminPassword` are deprecated and ignored.
 
 Every gated tool call writes one row to an append-only JSONL audit log at `~/.mailpouch-agent-audit.jsonl` (mode `0600`). Rows carry a truncated sha256 `argHash` — **never argument values, never response bodies** — so "same call repeated" patterns are observable without creating a parallel on-disk copy of your email. The log rotates at 10 MB and keeps 3 gzipped generations.
 
-Caller identity propagates through the dispatcher via `AsyncLocalStorage` (see [`src/agents/caller-context.ts`](src/agents/caller-context.ts)); stdio callers (default Claude Desktop) have no context and bypass the grant gate as the local trusted caller.
+Caller identity propagates through the dispatcher via `AsyncLocalStorage` (see [`src/agents/caller-context.ts`](src/agents/caller-context.ts)); the caller's `clientId` is always a real per-agent identity (`pmc_…` for OAuth clients and service accounts, `stdio:…` for local stdio agents). Local stdio agents are gated too (`gateLocalAgents`, default on) — they register and must be approved like any other agent.
 
 Canonical code: [`src/agents/grant-store.ts`](src/agents/grant-store.ts), [`grant-manager.ts`](src/agents/grant-manager.ts), [`audit.ts`](src/agents/audit.ts), [`caller-context.ts`](src/agents/caller-context.ts), [`notifications.ts`](src/agents/notifications.ts), [`registry.ts`](src/agents/registry.ts).
 
@@ -530,8 +563,8 @@ Canonical code: [`src/notifications/desktop.ts`](src/notifications/desktop.ts), 
 
 ### Remote / HTTP client returns 401
 
-- Verify the `Authorization: Bearer <token>` header matches `remoteBearerToken`.
-- For OAuth clients, check that `/oauth/register` succeeded and the access token has not been revoked or expired.
+- The `Authorization: Bearer <token>` header must carry an **OAuth access token**, not a pre-shared secret — the static bearer was removed. For interactive clients, check that `/oauth/register` succeeded, the agent is **approved** in the Agents tab, and the token has not been revoked or expired.
+- For headless clients, confirm the service account exists (`mailpouch agent list`) and that `POST /oauth/token` with `grant_type=client_credentials` returned an `access_token`. A 401 `invalid_client` means the `client_id`/`client_secret` pair is wrong.
 - The `WWW-Authenticate` header on the 401 response carries the failure reason per RFC 6750.
 
 ### Claude Desktop doesn't show mailpouch tools

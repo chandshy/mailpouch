@@ -178,6 +178,42 @@ export class AgentGrantStore {
   }
 
   /**
+   * Ensure an *active* grant exists for a service account (client_credentials).
+   * Unlike the interactive flow (createPending → approve), a service account is
+   * pre-approved out-of-band at issuance, so its grant is born active. Called at
+   * startup for each persisted service account; idempotent — refreshes the
+   * preset/conditions/name on an existing grant and (re-)activates it, so an
+   * operator re-issuing or editing an account converges the grant.
+   */
+  ensureActiveServiceGrant(args: {
+    clientId: string;
+    clientName: string;
+    preset: PermissionPreset;
+    conditions?: GrantConditions;
+  }): AgentGrant {
+    return this.mutate(() => {
+      const now = new Date().toISOString();
+      const existing = this.grants.get(args.clientId);
+      const grant: AgentGrant = {
+        clientId: args.clientId,
+        clientName: args.clientName || "(service account)",
+        status: "active",
+        preset: args.preset,
+        conditions: args.conditions,
+        createdAt: existing?.createdAt ?? now,
+        approvedAt: existing?.approvedAt ?? now,
+        totalCalls: existing?.totalCalls ?? 0,
+        transport: "http",
+        note: "service account (client_credentials)",
+      };
+      this.grants.set(args.clientId, grant);
+      this.persist();
+      notifications.emitGrantChanged(existing ? "grant-approved" : "grant-created", grant);
+      return grant;
+    });
+  }
+
+  /**
    * Record live connection info captured at the MCP `initialize` handshake onto
    * an existing grant (display-only; does NOT change status or identity). No-op
    * if the clientId has no grant — an unregistered caller is handled by the

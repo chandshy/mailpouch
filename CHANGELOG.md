@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.0.72] — 2026-05-31
 
+### Changed — global agent auth: every agent authenticates (BREAKING)
+
+- **The shared static bearer token was removed.** It authenticated as a single shared identity (`bearer:static`) that **bypassed the per-agent grant store and the audit log entirely** — if it leaked, every tool ran with zero per-agent attribution. Remote mode is now **OAuth-only**: every caller authenticates as its own client and is independently gated, audited, and revocable. A configured `remoteBearerToken` is ignored with a startup warning; `remoteMode` now **refuses to start** unless `remoteOauthEnabled` is set.
+- **New: OAuth 2.0 `client_credentials` grant for headless agents.** Interactive agents keep `authorization_code` + PKCE (gated by per-agent Approve/Deny). Non-interactive agents (cron, CI, scheduled) — which can't do interactive consent — now log in with their own `client_id` + `client_secret` (HTTP Basic or form body) and are pre-approved at issuance. The RFC 8414 metadata advertises both grant types and the `client_secret_basic`/`client_secret_post` auth methods.
+- **New: service accounts** — the credential behind `client_credentials`. Provisioned out-of-band, persisted to `~/.mailpouch-service-accounts.json` (mode 0600) with only a salted SHA-256 of the secret (plaintext shown once, never stored). Each is mirrored by an *active* grant so it flows through `GrantManager` exactly like an approved agent.
+  - **CLI:** `mailpouch agent issue --name <n> --preset <preset> [--expires <iso>] [--folder a,b]`, `mailpouch agent list`, `mailpouch agent revoke <client_id>`.
+  - **Settings UI:** a "+ Service account" control in the Agents tab issues a credential with a one-time secret reveal; service-account rows revoke via the credential-deleting endpoint.
+- **Migration:** any client that used `remoteBearerToken` must be re-provisioned as a service account (`mailpouch agent issue …`) and switched to the `client_credentials` login. Remove `remoteBearerToken` from your config and set `remoteOauthEnabled: true`.
+
 ### Fixed — cross-platform (macOS / Windows / Linux) correctness audit
 
 - **Windows browser launch was broken:** `openBrowser` spawned `cmd /c start … ` with `shell:false`, so Windows looked for a non-existent `start.exe` and silently failed (the ENOENT was swallowed). `start` is a `cmd.exe` built-in — now spawned with `shell:true`. This is the path used by the agent-approval auto-open window and the tray "Open Settings", so it was a real Windows regression.

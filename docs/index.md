@@ -5,7 +5,7 @@
 | [README.md](../README.md) | Users & operators | Installation, full feature overview, configuration reference, environment variables |
 | [HELP.md](../HELP.md) | Users | Task-oriented how-tos: setup, presets, optional integrations, FTS, scheduling, troubleshooting |
 | [README_FIRST_AI.md](../README_FIRST_AI.md) | AI agents | Complete MCP tool API reference, permission presets, operating guidelines |
-| [SECURITY.md](../SECURITY.md) | Security reviewers | Threat model, rate limiting, escalation design, audit trail, credential storage |
+| [SECURITY.md](../SECURITY.md) | Security reviewers | Threat model, rate limiting, escalation design, remote agent authentication (OAuth / service accounts), audit trail, credential storage |
 | [CONTRIBUTING.md](../CONTRIBUTING.md) | Contributors | Build setup, test suite, PR guidelines |
 | [CHANGELOG.md](../CHANGELOG.md) | All | Version history |
 
@@ -37,6 +37,7 @@
 | System / Bridge | `get_connection_status`, `sync_emails`, `clear_cache`, `get_logs`, `get_server_version`, `start_bridge`, `shutdown_server`, `restart_server` | Setup tab | README_FIRST_AI |
 | Permissions | presets, per-tool rate limits, custom | Permissions tab | HELP §3, README |
 | Per-agent grants | — | Agents tab | HELP §10, README |
+| Service accounts (headless OAuth `client_credentials`) | `mailpouch agent issue` / `list` / `revoke` (CLI) | Agents tab "+ Service account" | HELP §13, README, SECURITY §11 |
 | Escalation | `request_permission_escalation`, `check_escalation_status` | Agents tab | HELP §11, README_FIRST_AI |
 | Multi-account | — | Accounts tab | HELP §12, README |
 | Remote HTTP mode | — | `~/.mailpouch.json` (direct edit) | HELP §13, README |

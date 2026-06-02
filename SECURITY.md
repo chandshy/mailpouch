@@ -28,11 +28,11 @@ If you discover a security vulnerability, please send an email to **chandshy@gma
 
 ## Security Architecture (v2.1+)
 
-The server implements a 10-layer defense-in-depth security model:
+The server implements an 11-layer defense-in-depth security model:
 
 ### 1. Permission Gate
 - Every tool call checked against `~/.mailpouch.json` (refreshed every 15s)
-- 4 presets: read_only (default), supervised, send_only, full
+- 5 presets: read_only (default), send_only, supervised, full, custom
 - Per-tool enable/disable and rate limiting
 
 ### 2. Rate Limiting
@@ -49,6 +49,7 @@ The server implements a 10-layer defense-in-depth security model:
 ### 4. Audit Trail
 - Append-only log at `~/.mailpouch.audit.jsonl`
 - Records all escalation requests, approvals, and denials
+- A separate per-agent log at `~/.mailpouch-agent-audit.jsonl` (mode 0600) records one row per gated tool call with the agent's `clientId`, the tool, a truncated `argHash` (never argument values or response bodies), outcome, and duration; rotates at 10 MB keeping 3 gzipped generations
 
 ### 5. CSRF Protection
 - All mutating settings API calls require X-CSRF-Token header
@@ -73,9 +74,17 @@ The server implements a 10-layer defense-in-depth security model:
 - Safe request body reader (64 KiB limit, 15 s timeout)
 
 ### 10. Network Security
-- Settings UI binds to localhost only (127.0.0.1:8765)
+- Settings UI binds to localhost only (127.0.0.1:8766)
 - Proton Bridge connections default to localhost
 - Self-signed certificate handling for Bridge TLS (configurable via the settings UI: Setup → Bridge TLS Certificate)
+
+### 11. Remote Agent Authentication (HTTP transport)
+- **OAuth 2.1 only — every agent authenticates as its own client. There is no shared bearer token.** The legacy static bearer was removed because it authenticated as one shared identity that bypassed the per-agent grant store and the audit log; remote mode now refuses to start without `remoteOauthEnabled`.
+- **Interactive agents**: RFC 7591 Dynamic Client Registration + `authorization_code` + PKCE S256 + RFC 8707 resource indicators + RFC 9728 protected-resource metadata. Consent is automatic; the only human gate is per-agent **Approve/Deny** in the Agents tab. An issued token is inert until the operator approves the grant; a pending request expires after 5 minutes.
+- **Headless agents** (cron, CI, scheduled): the OAuth `client_credentials` grant with a per-agent `client_id` + `client_secret`. The credential ("service account") is provisioned out-of-band — `mailpouch agent issue` or the Agents-tab "+ Service account" button — and pre-approved at issuance. Secrets are persisted to `~/.mailpouch-service-accounts.json` (mode 0600) as a **salted SHA-256 only**; the plaintext is shown once and never stored. Verification is constant-time.
+- **Local stdio agents are gated too** (`gateLocalAgents`, default on): they register and must be approved like any remote agent.
+- A verified token always resolves to a real, per-agent `client_id`, so every call is independently gated by `GrantManager` (preset, expiry, folder allowlist, IP pins, per-tool caps), attributed in the audit log, and revocable — revoking a grant invalidates the agent's outstanding access tokens immediately.
+- Access tokens are stored only as `sha256(token)` (never plaintext), bound to their issuing IP, and per-token rate-limited; `/oauth/*` and `/.well-known/*` are rate-limited per IP.
 
 ## Security Best Practices
 
@@ -99,6 +108,8 @@ When using this MCP server:
 - Start with **read_only** preset and escalate only as needed
 - Use **supervised** preset for day-to-day agent use (rate-limited writes)
 - Reserve **full** preset for trusted, supervised workflows
+- **Issue one service account per headless agent, not one shared credential.** A single shared `client_id`/`client_secret` recreates the "one secret unlocks everything" problem the per-agent model exists to prevent. Scope each to the minimum preset (and folder allowlist / expiry where useful) with `mailpouch agent issue`, and revoke unused ones (`mailpouch agent revoke <client_id>`).
+- Treat a `client_secret` like a password: it is shown once at issuance, stored only as a salted hash, and cannot be recovered — re-issue if lost.
 
 ### Data Protection
 - Email data is **cached in memory** only (cleared on restart, capped at 500 entries per fetch)
@@ -127,6 +138,7 @@ Security patches will be released as:
 | 2026-03-17 | 2.0.0   | Security hardening (25 findings from 3 audit loops) | Various  | Resolved |
 | 2026-03-18 | 2.1.0+  | 48-cycle autonomous audit: input validation, type safety, injection prevention, CSRF, path traversal, rate limiting across all 48 tool handlers | Various  | Resolved |
 | 2026-04-20 | 3.0.0   | Per-account Bridge passwords wrote plaintext to `~/.mailpouch.json` via Accounts-tab CRUD paths (create / update / setActive / delete all funnelled through `writeRegistry` → `saveConfig` with no keychain routing). Legacy Setup-tab path was correctly encrypted. | High | Resolved via [PR #93](https://github.com/chandshy/mailpouch/pull/93) — writeRegistry now saves secrets to keychain under per-account keys, scrubs on-disk JSON, and refreshes the running AccountManager on every save |
+| 2026-06-02 | 3.0.72  | The shared static bearer authenticated as one identity (`bearer:static`) that bypassed the per-agent grant store and the audit log — a leaked token meant unattributed, ungated, unrevocable full access. | High | Resolved — static bearer removed; remote mode is OAuth-only. Interactive agents use authorization_code + per-agent Approve/Deny; headless agents use the `client_credentials` grant with pre-approved per-agent service accounts. Every call now resolves to a gated, audited, revocable identity. |
 
 ---
 
