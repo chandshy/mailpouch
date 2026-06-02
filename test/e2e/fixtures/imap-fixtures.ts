@@ -20,6 +20,17 @@ export interface ImapFixturesOptions {
   pass: string;
   /** Folders that should never be deleted by wipe(). */
   protectedFolders?: string[];
+  /** TLS options for the imapflow STARTTLS upgrade. Bridge serves a self-signed
+   *  cert with CN=127.0.0.1 but is reached via host `localhost`, so a bare
+   *  client fails (self-signed, then ALTNAME). Pass the production
+   *  buildBridgeTlsOptions(cert) here in Bridge mode. Undefined = Greenmail
+   *  (no special TLS needed). */
+  tls?: Record<string, unknown>;
+  /** Gate on the DESTRUCTIVE wipe(). wipe() empties INBOX/Sent/Archive/Trash/
+   *  Spam/Drafts and deletes every other folder — safe only against a
+   *  disposable mailbox (Greenmail, or an explicitly-confirmed test account).
+   *  Must be true for wipe() to run. */
+  allowWipe?: boolean;
 }
 
 /**
@@ -51,6 +62,10 @@ export class ImapFixtures {
       secure: false,
       auth: { user: this.opts.user, pass: this.opts.pass },
       logger: false,
+      // Bridge's self-signed CN=127.0.0.1 cert (reached via localhost) needs
+      // the production TLS handling (pin cert as CA + skip hostname); Greenmail
+      // leaves this undefined.
+      ...(this.opts.tls ? { tls: this.opts.tls } : {}),
     });
   }
 
@@ -237,6 +252,18 @@ export class ImapFixtures {
    * last. We never delete protected names.
    */
   async wipe(): Promise<void> {
+    // SAFETY: wipe() is destructive — it empties INBOX/Sent/Archive/Trash/Spam/
+    // Drafts and deletes every other folder. It must NEVER run against a real
+    // mailbox. Refuse unless the caller explicitly confirmed a disposable target
+    // (Greenmail, or MAILPOUCH_E2E_ALLOW_WIPE=1 for a throwaway Proton account).
+    if (this.opts.allowWipe !== true) {
+      throw new Error(
+        `ImapFixtures.wipe() refused: this empties INBOX/Sent/Archive/Trash/Spam/Drafts and ` +
+        `deletes all other folders on ${this.opts.user}@${this.opts.host}. It only runs against a ` +
+        `DISPOSABLE mailbox. Greenmail sets allowWipe automatically; for Bridge set ` +
+        `MAILPOUCH_E2E_ALLOW_WIPE=1 ONLY when pointed at a throwaway test account — never your real one.`,
+      );
+    }
     // Ensure each protected mailbox exists, then empty it. Greenmail starts
     // with only INBOX — the rest are created lazily by tests, so we create
     // them here so subsequent assertions can lock/list them safely.

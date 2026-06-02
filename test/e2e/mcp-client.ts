@@ -23,6 +23,7 @@ import { fileURLToPath } from "url";
 import { expect } from "vitest";
 import { buildPermissions } from "../../src/config/loader.js";
 import { localAgentId } from "../../src/agents/caller-context.js";
+import { buildBridgeTlsOptions, readPinnedBridgeCert } from "../../src/services/bridge-tls.js";
 import { ImapFixtures } from "./fixtures/imap-fixtures.js";
 import { GREENMAIL_IMAP_PORT, GREENMAIL_SMTP_PORT, TEST_USER } from "./support/docker.js";
 
@@ -154,6 +155,8 @@ interface BridgeConnectionConfig {
   imapPort: number;
   username: string;
   password: string;
+  bridgeCertPath?: string;
+  allowInsecureBridge?: boolean;
 }
 
 /** Read the Bridge config file and extract just the IMAP connection fields
@@ -175,7 +178,26 @@ function readBridgeConnection(configPath: string): BridgeConnectionConfig {
     imapPort: conn.imapPort,
     username: conn.username,
     password: conn.password,
+    bridgeCertPath: conn.bridgeCertPath,
+    allowInsecureBridge: conn.allowInsecureBridge,
   };
+}
+
+/** TLS options ImapFixtures needs to reach Bridge's self-signed CN=127.0.0.1
+ *  cert over host `localhost` — the same handling production uses. With a pinned
+ *  cert: trust it as the CA + skip the hostname check (buildBridgeTlsOptions).
+ *  Otherwise, if the operator opted into insecure Bridge, disable verification.
+ *  Greenmail needs none. */
+function bridgeImapTls(bridge: BridgeConnectionConfig): Record<string, unknown> | undefined {
+  if (bridge.bridgeCertPath) {
+    try {
+      return buildBridgeTlsOptions(readPinnedBridgeCert(bridge.bridgeCertPath));
+    } catch { /* fall through to insecure / none */ }
+  }
+  if (bridge.allowInsecureBridge || process.env.MAILPOUCH_INSECURE_BRIDGE === "1") {
+    return { rejectUnauthorized: false, minVersion: "TLSv1.2" };
+  }
+  return undefined;
 }
 
 export async function startE2E(opts: StartE2EOptions = {}): Promise<E2EHarness> {
@@ -193,6 +215,12 @@ export async function startE2E(opts: StartE2EOptions = {}): Promise<E2EHarness> 
   let imapPort: number;
   let imapUser: string;
   let imapPass: string;
+  let imapTls: Record<string, unknown> | undefined;
+  // SAFETY: wipe() empties INBOX/Sent/Archive/Trash/Spam/Drafts and deletes all
+  // other folders. Greenmail is disposable → always allowed. Bridge points at a
+  // REAL Proton account, so wipe is OPT-IN: only when MAILPOUCH_E2E_ALLOW_WIPE=1
+  // explicitly confirms a throwaway test account. Never the operator's real mail.
+  let allowWipe: boolean;
   if (mode === "greenmail") {
     configPath = writeGreenmailConfig(greenmailUser);
     isTempConfig = true;
@@ -200,6 +228,8 @@ export async function startE2E(opts: StartE2EOptions = {}): Promise<E2EHarness> 
     imapPort = GREENMAIL_IMAP_PORT;
     imapUser = greenmailUser.username;
     imapPass = greenmailUser.password;
+    imapTls = undefined;
+    allowWipe = true;
   } else {
     // Clone the operator-supplied Bridge config to a unique temp path with
     // `credentialStorage: "config"` baked in. Without this, mailpouch's
@@ -219,6 +249,8 @@ export async function startE2E(opts: StartE2EOptions = {}): Promise<E2EHarness> 
     imapPort = bridge.imapPort;
     imapUser = bridge.username;
     imapPass = bridge.password;
+    imapTls = bridgeImapTls(bridge);
+    allowWipe = process.env.MAILPOUCH_E2E_ALLOW_WIPE === "1";
   }
 
   // Greenmail provisions users with bare logins ("alice") but rejects
@@ -262,6 +294,8 @@ export async function startE2E(opts: StartE2EOptions = {}): Promise<E2EHarness> 
     port: imapPort,
     user: imapUser,
     pass: imapPass,
+    tls: imapTls,
+    allowWipe,
   });
   await imap.connect();
 
