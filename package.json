@@ -36,7 +36,7 @@
     "prepublishOnly": "npm run preship:release",
     "lint": "tsc --noEmit",
     "lint:fix": "tsc --noEmit",
-    "clean": "rm -rf dist coverage",
+    "clean": "node -e \"for(const d of ['dist','coverage'])require('fs').rmSync(d,{recursive:true,force:true})\"",
     "typecheck": "tsc --noEmit"
   },
   "keywords": [

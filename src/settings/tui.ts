@@ -113,8 +113,11 @@ export function openBrowser(url: string): boolean {
       spawnSync("open", [url], { stdio: "ignore" });
       return true;
     } else if (platform === "win32") {
-      // `start` is a shell built-in; need shell: true
-      spawnSync("cmd", ["/c", "start", "", url], { stdio: "ignore", shell: false });
+      // `start` is a cmd.exe built-in, not an executable, so it must run through
+      // a shell — shell:false here made spawn look for a `start.exe` that
+      // doesn't exist and silently fail (ENOENT swallowed by stdio:"ignore").
+      // The empty "" is start's title argument (required when the URL is quoted).
+      spawnSync("cmd", ["/c", "start", "", url], { stdio: "ignore", shell: true });
       return true;
     } else {
       // Linux/BSD: try xdg-open, then fallback candidates

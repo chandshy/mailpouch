@@ -33,7 +33,7 @@ import { spawn, spawnSync } from "child_process";
 import { createHash } from "crypto";
 import { appendFileSync, existsSync, readFileSync, statSync } from "fs";
 import { homedir } from "os";
-import { isAbsolute, sep } from "path";
+import { isAbsolute, sep, join as pathJoin } from "path";
 import { logger } from "../utils/logger.js";
 
 export interface PassItemSummary {
@@ -57,15 +57,27 @@ export interface PassItemDetail extends PassItemSummary {
 const DEFAULT_CLI_PATH = "pass-cli";
 const DEFAULT_TIMEOUT_MS = 15_000;
 
-/** Directory prefixes considered trusted when resolving pass-cli via PATH. */
-const TRUSTED_PREFIXES = [
-  "/usr/bin/",
-  "/usr/local/bin/",
-  "/opt/",
-  "/bin/",
-  // Homebrew on macOS Apple Silicon
-  "/opt/homebrew/bin/",
-];
+/** Directory prefixes considered trusted when resolving pass-cli via PATH.
+ *  Windows uses the standard program install locations (Program Files, the
+ *  per-user Programs dir, and the global npm prefix) instead of the POSIX bins. */
+function trustedPrefixes(): string[] {
+  if (process.platform === "win32") {
+    return [
+      process.env.ProgramFiles,
+      process.env["ProgramFiles(x86)"],
+      process.env.LOCALAPPDATA ? pathJoin(process.env.LOCALAPPDATA, "Programs") : undefined,
+      process.env.APPDATA ? pathJoin(process.env.APPDATA, "npm") : undefined,
+    ].filter((p): p is string => !!p);
+  }
+  return [
+    "/usr/bin/",
+    "/usr/local/bin/",
+    "/opt/",
+    "/bin/",
+    // Homebrew on macOS Apple Silicon
+    "/opt/homebrew/bin/",
+  ];
+}
 
 /**
  * Resolve `cliPath` to an absolute, validated executable path. If the
@@ -78,14 +90,18 @@ const TRUSTED_PREFIXES = [
 function resolveCliPath(configured: string): string {
   if (configured.includes(sep) || isAbsolute(configured)) return configured;
   try {
-    const r = spawnSync("which", [configured], { encoding: "utf-8" });
+    // PATH lookup: `which` on POSIX, `where` on Windows (which doesn't exist there).
+    const lookup = process.platform === "win32" ? "where" : "which";
+    const r = spawnSync(lookup, [configured], { encoding: "utf-8" });
     if (r.status !== 0) return configured;
-    const resolved = (r.stdout ?? "").trim();
+    // `where` can return several lines (one per match) — take the first.
+    const resolved = (r.stdout ?? "").split(/\r?\n/)[0]?.trim() ?? "";
     if (!resolved || !existsSync(resolved)) return configured;
-    const trusted = TRUSTED_PREFIXES.some(p => resolved.startsWith(p));
+    const prefixes = trustedPrefixes();
+    const trusted = prefixes.some(p => resolved.startsWith(p));
     if (!trusted) {
       logger.warn(
-        `Pass: refusing to use '${resolved}' — not in a trusted PATH prefix (${TRUSTED_PREFIXES.join(", ")}). ` +
+        `Pass: refusing to use '${resolved}' — not in a trusted PATH prefix (${prefixes.join(", ")}). ` +
         `Set passCliPath in config to override.`,
         "PassService",
       );
@@ -154,7 +170,10 @@ export class PassService {
           cwd: homedir(),
           env: {
             PATH: process.env.PATH ?? "",
-            HOME: process.env.HOME ?? "",
+            // HOME is unset on Windows (it uses USERPROFILE); pin both to the
+            // home dir so pass-cli finds its config/session regardless of OS.
+            HOME: process.env.HOME ?? homedir(),
+            USERPROFILE: process.env.USERPROFILE ?? homedir(),
             PROTON_PASS_PAT: this.pat,
             // Locale/charset hints — pass-cli emits JSON; without these
             // some libcs default to ASCII and mangle non-ASCII content.

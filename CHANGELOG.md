@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.0.72] — 2026-05-31
 
+### Fixed — cross-platform (macOS / Windows / Linux) correctness audit
+
+- **Windows browser launch was broken:** `openBrowser` spawned `cmd /c start … ` with `shell:false`, so Windows looked for a non-existent `start.exe` and silently failed (the ENOENT was swallowed). `start` is a `cmd.exe` built-in — now spawned with `shell:true`. This is the path used by the agent-approval auto-open window and the tray "Open Settings", so it was a real Windows regression.
+- **Proton Pass CLI resolution on Windows:** `resolveCliPath` used `which` (which doesn't exist on Windows) → now uses `where` on win32 (first match), with **Windows-aware trusted PATH prefixes** (Program Files / per-user Programs / global npm) instead of POSIX `/usr/bin`; and the spawned `pass-cli` env now sets `HOME` **and** `USERPROFILE` to the home dir (`HOME` is unset on Windows) so it finds its config regardless of OS.
+- **`npm run clean` is now cross-platform** — replaced `rm -rf` (fails under Windows `cmd`) with a Node `fs.rmSync` one-liner.
+- Audit confirmed already-correct: per-platform notification + dialog escaping (osascript / notify-send / zenity-kdialog / PowerShell, all argv-passed or properly quoted), tray display detection (Linux `DISPLAY` only; macOS/Windows always have a tray), PNG-vs-ICO icon dispatch, `os.homedir()` + `path.join` paths, graceful `0o600` no-op on Windows, and CI coverage across ubuntu/macOS/windows × Node 20/22 with native tray prebuilts for 5 triples + clean systray2 fallback (incl. Intel-Mac darwin-x64 and musl Linux).
+
 ### Added — native on-screen Approve/Deny dialog when an agent connects
 
 - A new agent now pops a **native dialog on the machine where mailpouch runs** — Approve/Deny right there, no need to open the Agents tab. `DesktopPrompt` (`src/notifications/desktop-prompt.ts`) shells out per-platform: **zenity → kdialog** (Linux), **osascript `display dialog`** (macOS), **PowerShell MessageBox** (Windows); the choice is read from the process exit code. **Approve** grants the operator's global preset (intersected as usual); **Deny** revokes it.
