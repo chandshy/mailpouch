@@ -53,6 +53,7 @@ import { notifications as agentNotifications } from "./agents/notifications.js";
 import { shouldAutoOpenApproval } from "./agents/auto-open-approval.js";
 import { AccountManager, registerAccountManager } from "./accounts/manager.js";
 import { DesktopNotifier } from "./notifications/desktop.js";
+import { DesktopPrompt } from "./notifications/desktop-prompt.js";
 import { WebhookDispatcher } from "./notifications/webhooks.js";
 import { logger, getLogFilePath } from "./utils/logger.js";
 import { acquireSingletonLock, releaseSingletonLock } from "./utils/singleton-lock.js";
@@ -224,35 +225,68 @@ registerAgentServices(agentGrants, agentAudit);
 // agent-notification bus. Both read their settings from the ServerConfig on
 // every event (no restart needed when toggling / adding endpoints).
 const desktopNotifier = new DesktopNotifier();
+const desktopPrompt = new DesktopPrompt();
 const webhookDispatcher = new WebhookDispatcher();
 // Epoch ms the approval window was last auto-opened — throttles a burst of
 // registrations so we open at most one tab (it lists all pending agents).
 let _lastApprovalOpenAtMs = 0;
+
+/** Fallback path: open the Settings UI Agents tab in the browser for a new
+ *  agent (used when the on-screen dialog isn't available / is disabled). */
+function _autoOpenApprovalWindow(): void {
+  const open = shouldAutoOpenApproval({
+    enabled: loadConfig()?.autoOpenApprovalWindow !== false,
+    hasDisplay: trayPreconditionSkip() === null,
+    settingsEnabled: _settingsEnabled,
+    settingsUrl: _settingsUrl,
+    nowMs: Date.now(),
+    lastOpenedAtMs: _lastApprovalOpenAtMs,
+  });
+  if (open) {
+    _lastApprovalOpenAtMs = Date.now();
+    try { openBrowser(`${_settingsUrl}#agents`); }
+    catch (err: unknown) { logger.debug("auto-open approval window failed", "MCPServer", err); }
+  }
+}
+
 agentNotifications.subscribe((ev) => {
   const cfg = loadConfig();
-  // A new remote agent registered → surface an approval window on screen so the
-  // user can approve/deny the connection immediately (the Agents tab lists it
-  // with its name + source IP). Gated to: feature on, a display present, our UI
-  // up, and not within the burst-throttle window. _settingsUrl/_settingsEnabled
-  // are module vars set once the settings server binds (this callback runs at
-  // event time, long after module init, so they're populated).
+  // A new agent registered → surface a NATIVE on-screen Approve/Deny dialog on
+  // the machine where mailpouch runs, so the operator can decide right there
+  // (not in a browser tab). On approve/deny we resolve the grant immediately;
+  // if no dialog tool is available (headless) or it times out, fall back to the
+  // browser approval window (and the pending grant's 5-min TTL still applies).
+  let dialogHandlingCreated = false;
   if (ev.kind === "grant-created") {
-    const open = shouldAutoOpenApproval({
-      enabled: cfg?.autoOpenApprovalWindow !== false,
-      hasDisplay: trayPreconditionSkip() === null,
-      settingsEnabled: _settingsEnabled,
-      settingsUrl: _settingsUrl,
-      nowMs: Date.now(),
-      lastOpenedAtMs: _lastApprovalOpenAtMs,
-    });
-    if (open) {
-      _lastApprovalOpenAtMs = Date.now();
-      try { openBrowser(`${_settingsUrl}#agents`); }
-      catch (err: unknown) { logger.debug("auto-open approval window failed", "MCPServer", err); }
+    const dialogEnabled = cfg?.nativeApprovalDialog !== false && trayPreconditionSkip() === null;
+    if (dialogEnabled) {
+      dialogHandlingCreated = true;
+      const grant = ev.grant;
+      const where = String(grant.clientId).startsWith("stdio:")
+        ? "local"
+        : (grant.registeredFromIp ? `from ${grant.registeredFromIp}` : "remote");
+      void desktopPrompt.prompt({
+        title: "mailpouch — approve agent?",
+        message: `Agent "${grant.clientName}" (${where}) is requesting access to your mailbox.\n\nApprove this connection?`,
+      }).then((choice) => {
+        if (choice === "approve") {
+          const preset = loadConfig()?.permissions?.preset ?? "read_only";
+          agentGrants.approve({ clientId: grant.clientId, preset });
+          logger.info(`Agent "${grant.clientName}" approved at the on-screen prompt (preset ${preset})`, "MCPServer");
+        } else if (choice === "deny") {
+          agentGrants.deny(grant.clientId, "Denied at the on-screen prompt");
+          logger.info(`Agent "${grant.clientName}" denied at the on-screen prompt`, "MCPServer");
+        } else {
+          _autoOpenApprovalWindow(); // no dialog tool / timed out → browser fallback
+        }
+      }).catch(() => { _autoOpenApprovalWindow(); });
+    } else {
+      _autoOpenApprovalWindow();
     }
   }
-  // Desktop: default ON; only skip when explicitly disabled.
-  if (cfg?.desktopNotificationsEnabled !== false) {
+  // Desktop notification heads-up. Skip the new-registration toast when the
+  // on-screen dialog is already handling it (avoid a redundant double-prompt).
+  if (cfg?.desktopNotificationsEnabled !== false && !dialogHandlingCreated) {
     const titleByKind: Record<string, string> = {
       "grant-created":  "mailpouch — agent awaiting approval",
       "grant-approved": "mailpouch — agent approved",

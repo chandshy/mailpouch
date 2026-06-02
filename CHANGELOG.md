@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.0.72] — 2026-05-31
 
+### Added — native on-screen Approve/Deny dialog when an agent connects
+
+- A new agent now pops a **native dialog on the machine where mailpouch runs** — Approve/Deny right there, no need to open the Agents tab. `DesktopPrompt` (`src/notifications/desktop-prompt.ts`) shells out per-platform: **zenity → kdialog** (Linux), **osascript `display dialog`** (macOS), **PowerShell MessageBox** (Windows); the choice is read from the process exit code. **Approve** grants the operator's global preset (intersected as usual); **Deny** revokes it.
+- Falls back to the browser approval window when no dialog tool is present (headless) or the prompt times out (5-minute cap, matching the pending TTL) — and the pending grant still expires on its own. The redundant desktop-notification toast is suppressed when the dialog is handling the registration. Controlled by `nativeApprovalDialog` (default true). `desktop-prompt.test.ts` covers the exit-code mapping + the zenity→kdialog fallback.
+
 ### Changed — local (stdio) agents must now register + be approved too (BREAKING)
 
 - **Every agent — local and remote — now goes through the same approval gate.** Previously a local stdio client (e.g. Claude Desktop) bypassed the per-agent grant entirely. Now mailpouch captures the local client's identity at the MCP handshake (`server.oninitialized` on the stdio server), registers a **pending** agent (which fires the existing approval notice — auto-open window + desktop notification + tray badge), and **blocks its tool calls until you Approve** it in the Agents tab — exactly like remote OAuth agents.

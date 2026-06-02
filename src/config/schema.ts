@@ -398,6 +398,14 @@ export interface ServerConfig {
    */
   autoOpenApprovalWindow?: boolean;
   /**
+   * Show a NATIVE on-screen Approve/Deny dialog on the machine where mailpouch
+   * runs when a new agent registers, so the operator can decide right there
+   * instead of opening the Agents tab (default true). Falls back to the browser
+   * approval window on headless hosts or where no dialog tool (zenity/osascript/
+   * PowerShell) is available. Set false to use only the browser window.
+   */
+  nativeApprovalDialog?: boolean;
+  /**
    * Require LOCAL (stdio) agents to register and be approved too, like remote
    * agents — every connecting client is gated behind the per-agent Approve/Deny
    * (default true). Set false (or `MAILPOUCH_TRUST_LOCAL=1`) to restore the

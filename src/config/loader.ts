@@ -352,6 +352,9 @@ export function loadConfig(): ServerConfig | null {
       autoOpenApprovalWindow: typeof parsed.autoOpenApprovalWindow === "boolean"
         ? parsed.autoOpenApprovalWindow
         : undefined,
+      nativeApprovalDialog: typeof parsed.nativeApprovalDialog === "boolean"
+        ? parsed.nativeApprovalDialog
+        : undefined,
       gateLocalAgents: typeof parsed.gateLocalAgents === "boolean"
         ? parsed.gateLocalAgents
         : undefined,
