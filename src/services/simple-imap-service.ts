@@ -2582,7 +2582,7 @@ export class SimpleIMAPService {
     // because Bridge can answer COPY from the All Mail union with OK while doing
     // nothing. Verification needs to lock the target, so it can't run while the
     // source lock is held — collect jobs and verify after the loop.
-    const verifyJobs: Array<{ accepted: string[]; midMap: Map<string, string>; relocated: Set<string>; uidplus: boolean }> = [];
+    const verifyJobs: Array<{ folder: string; accepted: string[]; midMap: Map<string, string>; relocated: Set<string>; uidplus: boolean }> = [];
     for (const [folder, ids] of grouped.entries()) {
       const lock = await this.client.getMailboxLock(folder);
       try {
@@ -2625,7 +2625,7 @@ export class SimpleIMAPService {
           opName: `Bulk copy →${targetFolder}`,
           folder,
         });
-        verifyJobs.push({ accepted, midMap, relocated, uidplus });
+        verifyJobs.push({ folder, accepted, midMap, relocated, uidplus });
       } finally { lock.release(); }
     }
 
@@ -2638,7 +2638,7 @@ export class SimpleIMAPService {
     const verified = await verifyRelocatedMessages(
       verifyJobs, targetFolder,
       (f, mids) => this.findMessageIdsInFolder(f, mids),
-      (uid) => `Copy of UID ${uid} to ${targetFolder} was accepted but could not be verified present there — likely a no-op from a union mailbox (e.g. All Mail). Pass the message's real source folder, or verify the target label exists.`,
+      (uid, src) => `Copy of UID ${uid} from ${src} to ${targetFolder} was accepted but could not be verified present there — likely a no-op from a union mailbox (e.g. All Mail). Pass the message's real source folder, or verify the target label exists.`,
     );
     results.success += verified.success;
     results.failed += verified.failed;
@@ -2726,6 +2726,51 @@ export class SimpleIMAPService {
     logger.info(`Bulk delete-from-folder completed: ${results.success}/${results.failed}`, 'IMAPService');
     return results;
     }); // end tracer.span('imap.bulkDeleteFromFolder')
+  }
+
+  /**
+   * Permanently empty the Trash mailbox (the ONE sanctioned permanent-delete
+   * path). EXPUNGEs every message in Trash and ONLY Trash — the target is the
+   * server-resolved `\Trash` mailbox (localised names like `Papelera` included),
+   * never a caller-supplied folder, so this can't be pointed at live mail. Gated
+   * by `{ confirmed: true }` at the tool layer. Mail purged here is unrecoverable
+   * by design — everywhere else, delete still means move-to-Trash.
+   */
+  async emptyTrash(): Promise<{ deleted: number }> {
+    if (!this.client || !this.isConnected) throw new Error('IMAP client not connected');
+    return tracer.span('imap.emptyTrash', {}, async () => {
+    const trash = await this.resolveTrashPath();
+    logger.debug(`Emptying Trash (${trash})`, 'IMAPService');
+
+    const lock = await this.client!.getMailboxLock(trash);
+    try {
+      this.checkAndUpdateUidValidity(trash);
+
+      // Short-circuit an already-empty Trash: Bridge errors on a FETCH/SEARCH
+      // against a zero-message mailbox (the empty-mailbox quirk).
+      const mailbox = this.client!.mailbox;
+      const total = (mailbox && typeof mailbox !== 'boolean' ? mailbox.exists : 0) || 0;
+      if (total === 0) {
+        logger.info('Trash already empty — nothing to purge', 'IMAPService');
+        return { deleted: 0 };
+      }
+
+      const uids = await this.client!.search({ all: true }, { uid: true });
+      if (!uids || uids.length === 0) return { deleted: 0 };
+
+      // messageDelete flags \Deleted + EXPUNGEs; chunk the UID set so a large
+      // Trash can't blow the IMAP command-line length.
+      for (const uidSet of chunkUidsForWire(uids.map(String))) {
+        await this.client!.messageDelete(uidSet, { uid: true });
+      }
+      for (const uid of uids) this.evictCacheEntry(`${trash}:${uid}`);
+      this.clearFolderCache(); // Trash count is now 0 → next get_folders refetches
+      logger.info(`Trash emptied: ${uids.length} message(s) permanently deleted`, 'IMAPService');
+      return { deleted: uids.length };
+    } finally {
+      lock.release();
+    }
+    }); // end tracer.span('imap.emptyTrash')
   }
 
   /**

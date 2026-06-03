@@ -26,7 +26,7 @@ export const ALL_TOOLS = [
   "move_to_label", "bulk_move_to_label",
   "remove_label", "bulk_remove_label",
   // Deletion
-  "delete_email", "bulk_delete_emails", "bulk_delete",
+  "delete_email", "bulk_delete_emails", "bulk_delete", "empty_trash",
   // Analytics
   "get_email_stats", "get_email_analytics", "get_contacts", "get_volume_trends",
   // System
@@ -100,8 +100,8 @@ export const TOOL_CATEGORIES: Record<string, ToolCategory> = {
   },
   deletion: {
     label: "Deletion",
-    description: "Delete emails by moving them to Trash — recoverable, never permanently deleted",
-    tools: ["delete_email", "bulk_delete_emails", "bulk_delete"],
+    description: "Delete emails by moving them to Trash (recoverable). Includes empty_trash, which PERMANENTLY purges the Trash mailbox — the one unrecoverable, confirm-gated exception.",
+    tools: ["delete_email", "bulk_delete_emails", "bulk_delete", "empty_trash"],
     risk: "destructive",
   },
   analytics: {
@@ -440,6 +440,7 @@ export const DESTRUCTIVE_TOOLS: ReadonlySet<string> = new Set<string>([
   "delete_email",
   "bulk_delete",
   "bulk_delete_emails",
+  "empty_trash",
   "delete_folder",
   "move_to_trash",
   "move_to_spam",

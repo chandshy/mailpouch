@@ -88,6 +88,24 @@ export const defs: ToolDef[] = [
     },
     outputSchema: BULK_RESULT_SCHEMA,
   },
+  {
+    name: "empty_trash",
+    title: "Empty Trash",
+    description:
+      "PERMANENTLY delete every message in the Trash mailbox. This is the only operation that bypasses the move-to-Trash safety net — purged mail is UNRECOVERABLE. It only ever touches the Trash mailbox, never live mail. Requires { confirmed: true }.",
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        confirmed: { type: "boolean", description: "Must be true to execute. Purged Trash mail is unrecoverable. See requireDestructiveConfirm." },
+      },
+    },
+    outputSchema: {
+      type: "object",
+      properties: { success: { type: "boolean" }, deleted: { type: "number" } },
+      required: ["success", "deleted"],
+    },
+  },
 ];
 
 const bulkDeleteHandler: ToolHandler = async (ctx) => {
@@ -124,6 +142,14 @@ export const handlers: Record<string, ToolHandler> = {
 
   bulk_delete: bulkDeleteHandler,
   bulk_delete_emails: bulkDeleteHandler,
+
+  empty_trash: async (ctx) => {
+    const { imapService, ok, state } = ctx;
+    const { deleted } = await imapService.emptyTrash();
+    state.analyticsCache = null;
+    state.analyticsCacheInflight = null;
+    return ok({ success: true, deleted }, `Permanently deleted ${deleted} message(s) from Trash.`);
+  },
 };
 
 const mod: ToolModule = { defs, handlers };

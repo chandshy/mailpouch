@@ -2745,6 +2745,9 @@ describe("SimpleIMAPService move/copy honest verification (Bug A, All Mail sourc
     expect(results.success).toBe(0);
     expect(results.failed).toBe(4);
     expect(results.errors.join(" ")).toMatch(/not present|All Mail|union/i);
+    // Copy-failure messages now carry the SOURCE folder (parity with bulkMove)
+    // so a multi-source failure is debuggable.
+    expect(results.errors.join(" ")).toMatch(/from All Mail/);
   });
 
   it("bulkCopyToFolder counts success only after verifying the message landed (real copy)", async () => {
@@ -2930,5 +2933,63 @@ describe("SimpleIMAPService folder-count cache invalidation (#2)", () => {
     const n = status.mock.calls.length;
     await svc.syncFolders();
     expect(status.mock.calls.length).toBeGreaterThan(n);
+  });
+});
+
+// ─── empty_trash: gated permanent purge, Trash-only ───────────────────────────
+
+describe("SimpleIMAPService.emptyTrash (Phase 3 — gated permanent delete)", () => {
+  function trashClient(uids: number[], over: Record<string, unknown> = {}) {
+    let locked: string | null = null;
+    return {
+      get mailbox() { return { exists: uids.length }; },
+      getMailboxLock: vi.fn().mockImplementation(async (f: string) => {
+        locked = f;
+        return { release: () => { locked = null; } };
+      }),
+      search: vi.fn().mockResolvedValue(uids),
+      messageDelete: vi.fn().mockResolvedValue(undefined),
+      get _locked() { return locked; },
+      ...over,
+    };
+  }
+
+  it("EXPUNGEs every message in the resolved Trash mailbox and only Trash", async () => {
+    const svc = new SimpleIMAPService();
+    vi.spyOn(svc as any, "resolveTrashPath").mockResolvedValue("Papelera"); // localised Trash
+    vi.spyOn(svc as any, "checkAndUpdateUidValidity").mockImplementation(() => {});
+    const client = trashClient([11, 12, 13]);
+    (svc as any).isConnected = true;
+    (svc as any).client = client;
+
+    const result = await svc.emptyTrash();
+
+    expect(result.deleted).toBe(3);
+    // Locked the resolved (localised) Trash, not a literal "Trash"/INBOX.
+    expect(client.getMailboxLock).toHaveBeenCalledWith("Papelera");
+    expect(client.getMailboxLock).not.toHaveBeenCalledWith("INBOX");
+    expect(client.messageDelete).toHaveBeenCalledWith("11,12,13", { uid: true });
+  });
+
+  it("short-circuits an already-empty Trash without FETCH/SEARCH (empty-mailbox quirk)", async () => {
+    const svc = new SimpleIMAPService();
+    vi.spyOn(svc as any, "resolveTrashPath").mockResolvedValue("Trash");
+    vi.spyOn(svc as any, "checkAndUpdateUidValidity").mockImplementation(() => {});
+    const client = trashClient([]);
+    (svc as any).isConnected = true;
+    (svc as any).client = client;
+
+    const result = await svc.emptyTrash();
+
+    expect(result.deleted).toBe(0);
+    expect(client.search).not.toHaveBeenCalled();
+    expect(client.messageDelete).not.toHaveBeenCalled();
+  });
+
+  it("throws when not connected (never silently no-ops a destructive op)", async () => {
+    const svc = new SimpleIMAPService();
+    (svc as any).isConnected = false;
+    (svc as any).client = null;
+    await expect(svc.emptyTrash()).rejects.toThrow(/not connected/i);
   });
 });

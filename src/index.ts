@@ -89,6 +89,8 @@ function describeDestructivePreview(tool: string, args: Record<string, unknown>)
       const tail = ids.length > 5 ? `, … +${ids.length - 5} more` : "";
       return `Would permanently delete ${ids.length} email(s): [${preview}${tail}].`;
     }
+    case "empty_trash":
+      return `Would PERMANENTLY delete every message in the Trash mailbox. This cannot be undone.`;
     case "move_to_trash":
       return `Would move email with ID ${String(args.emailId ?? "(missing)")} to Trash.`;
     case "move_to_spam":
