@@ -22,7 +22,11 @@ export const defs: ToolDef[] = [
     name: "get_folders",
     title: "Get Folders",
     description:
-      "List all email folders with message counts. Labels appear as folders with the Labels/ prefix (e.g. Labels/Work).",
+      "List all email folders with message counts. Labels appear as folders with the Labels/ prefix (e.g. Labels/Work). " +
+      "Each folder reports `folderType` (system | user-folder | label) and, for system mailboxes, the IMAP `specialUse` " +
+      "attribute (\\Inbox \\Sent \\Drafts \\Trash \\Junk \\Archive \\All \\Flagged) — use these to identify the real " +
+      "Trash/Sent/Archive on a localised account rather than matching English names, and to avoid moving mail into the " +
+      "\\All (All Mail) union view.",
     annotations: { readOnlyHint: true, openWorldHint: true },
     inputSchema: { type: "object", properties: {} },
     outputSchema: {
@@ -37,7 +41,17 @@ export const defs: ToolDef[] = [
               path: { type: "string" },
               totalMessages: { type: "number" },
               unreadMessages: { type: "number" },
+              specialUse: {
+                type: "string",
+                description: "IMAP special-use attribute for system mailboxes (e.g. \\Trash, \\Sent, \\All). Absent for ordinary folders/labels.",
+              },
+              folderType: {
+                type: "string",
+                enum: ["system", "user-folder", "label"],
+                description: "Proton Bridge classification: system mailbox, user-created folder, or label (Labels/ prefix).",
+              },
             },
+            required: ["name", "path", "totalMessages", "unreadMessages"],
           },
         },
       },

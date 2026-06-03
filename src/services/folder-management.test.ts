@@ -12,9 +12,13 @@ vi.mock('imapflow', () => {
       mailboxRename: vi.fn().mockResolvedValue(undefined),
       on: vi.fn(), // enables client.on('close'/'error') event handler registration
       list: vi.fn().mockResolvedValue([
-        { path: 'INBOX', delimiter: '/', flags: new Set() },
-        { path: 'Sent', delimiter: '/', flags: new Set() },
+        { path: 'INBOX', name: 'INBOX', delimiter: '/', flags: new Set() },
+        { path: 'Sent', name: 'Sent', delimiter: '/', flags: new Set() },
       ]),
+      // getFolders fans STATUS out per folder; isProtectedFolder relies on a
+      // working getFolders to resolve specialUse (fail-closed), so the mock must
+      // answer STATUS.
+      status: vi.fn().mockResolvedValue({ messages: 0, unseen: 0 }),
     };
   });
 
@@ -167,7 +171,7 @@ describe('Folder Management', () => {
       });
 
       await expect(service.renameFolder('OldName', 'ExistingName')).rejects.toThrow(
-        "Folder 'ExistingName' already exists"
+        "A folder or label named 'ExistingName' already exists"
       );
     });
 
@@ -184,6 +188,52 @@ describe('Folder Management', () => {
       mockClient.mailboxRename.mockRejectedValueOnce(genericError);
 
       await expect(service.renameFolder('OldName', 'NewName')).rejects.toThrow('Internal server error');
+    });
+  });
+
+  describe('Bridge-semantics protections (Phase 1 ultra-review)', () => {
+    it('protects a LOCALISED system mailbox by specialUse, not just English name', async () => {
+      const mockClient = (service as any).client;
+      // Spanish Trash: name check misses it; specialUse \Trash must still protect it.
+      mockClient.list.mockResolvedValueOnce([
+        { path: 'Papelera', name: 'Papelera', delimiter: '/', flags: new Set(), specialUse: '\\Trash' },
+      ]);
+      await expect(service.deleteFolder('Papelera')).rejects.toThrow(
+        'Cannot delete protected folder: Papelera'
+      );
+      expect(mockClient.mailboxDelete).not.toHaveBeenCalled();
+    });
+
+    it('fails CLOSED: refuses delete when folder discovery fails (no silent destroy)', async () => {
+      const mockClient = (service as any).client;
+      mockClient.list.mockRejectedValueOnce(new Error('discovery down'));
+      // A non-English name can't be ruled out as a localised system mailbox when
+      // discovery fails — the delete must throw, never proceed.
+      await expect(service.deleteFolder('Folders/Maybe')).rejects.toThrow();
+      expect(mockClient.mailboxDelete).not.toHaveBeenCalled();
+    });
+
+    it('refuses renaming a folder INTO a reserved system name', async () => {
+      const mockClient = (service as any).client;
+      await expect(service.renameFolder('Folders/Work', 'Inbox')).rejects.toThrow(
+        'Cannot rename to a protected folder name: Inbox'
+      );
+      expect(mockClient.mailboxRename).not.toHaveBeenCalled();
+    });
+
+    it('detects a cross-namespace rename collision even when the server omits ALREADYEXISTS text', async () => {
+      const mockClient = (service as any).client;
+      // Labels/Tech already exists; renaming Folders/Tech collides on the shared
+      // leaf name. Server returns a generic error with no alreadyexists text →
+      // the listing-based isNameInUse fallback must still catch it.
+      mockClient.list.mockResolvedValue([
+        { path: 'INBOX', name: 'INBOX', delimiter: '/', flags: new Set() },
+        { path: 'Labels/Tech', name: 'Tech', delimiter: '/', flags: new Set() },
+      ]);
+      mockClient.mailboxRename.mockRejectedValueOnce(new Error('generic failure'));
+      await expect(service.renameFolder('Folders/Tech', 'Labels/Tech')).rejects.toThrow(
+        "A folder or label named 'Labels/Tech' already exists"
+      );
     });
   });
 
