@@ -92,7 +92,9 @@ describe("ServiceAccountStore", () => {
     expect(new ServiceAccountStore(path).list()).toHaveLength(0);
   });
 
-  it("writes the store file at mode 0600", () => {
+  // Windows has no POSIX mode bits (fs reports 0o666 regardless), so this
+  // owner-only assertion only applies off-Windows — matching config-lock.test.
+  it.runIf(process.platform !== "win32")("writes the store file at mode 0600", () => {
     const path = newPath();
     const store = new ServiceAccountStore(path);
     store.issue({ name: "perm", preset: "full" });
