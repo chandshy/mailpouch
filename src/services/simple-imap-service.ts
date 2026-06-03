@@ -3,8 +3,6 @@
  */
 
 import { ImapFlow, type SearchObject } from 'imapflow';
-import { readFileSync, statSync } from 'fs';
-import { join as pathJoin } from 'path';
 import type { ParsedMail, Attachment, AddressObject } from 'mailparser';
 import { simpleParser } from 'mailparser';
 import { buildEmailMessage, verifyRelocatedMessages, truncateBody, stripHtml, normalizeAddressList } from './imap-helpers.js';
@@ -21,7 +19,7 @@ import {
   MAX_ATTACHMENT_BYTES,
   MAX_TOTAL_ATTACHMENT_BYTES,
 } from '../utils/helpers.js';
-import { buildBridgeTlsOptions, readPinnedBridgeCert } from './bridge-tls.js';
+import { buildBridgeTlsConfig } from './bridge-tls.js';
 import { classifyError, ConnectionStateError } from '../utils/error-classify.js';
 import { tracer, type SpanTags } from '../utils/tracer.js';
 import { BRIDGE_MIN_VERSION } from '../config/schema.js';
@@ -618,61 +616,12 @@ export class SimpleIMAPService {
       const allowInsecure = allowInsecureBridge
         || process.env.MAILPOUCH_INSECURE_BRIDGE === '1';
 
-      // Build TLS options
-      let tlsOptions: Record<string, unknown> | undefined;
-      if (isLocalhost) {
-        if (bridgeCertPath) {
-          // If a directory was given, look for cert.pem inside it
-          let resolvedCertPath = bridgeCertPath;
-          try {
-            if (statSync(bridgeCertPath).isDirectory()) {
-              resolvedCertPath = pathJoin(bridgeCertPath, 'cert.pem');
-              logger.info(`IMAP: Directory given for cert path — resolved to ${resolvedCertPath}`, 'IMAPService');
-            }
-          } catch { /* stat failed — let readFileSync produce the real error below */ }
-          try {
-            const bridgeCert = readPinnedBridgeCert(resolvedCertPath);
-            tlsOptions = buildBridgeTlsOptions(bridgeCert);
-            logger.info(`IMAP: Using exported Bridge certificate for TLS trust (${resolvedCertPath})`, 'IMAPService');
-          } catch (err) {
-            if (!allowInsecure) {
-              throw new Error(
-                `IMAP: Bridge cert at "${resolvedCertPath}" could not be loaded and allowInsecureBridge is not set. ` +
-                `Fix the cert path in Settings → Connection, or set allowInsecureBridge: true ` +
-                `(or MAILPOUCH_INSECURE_BRIDGE=1) to opt into the legacy insecure behavior. ` +
-                `Underlying error: ${(err as Error).message}`
-              );
-            }
-            logger.warn(
-              `IMAP: Failed to load Bridge cert at "${resolvedCertPath}" — running with TLS validation DISABLED (allowInsecureBridge is set). ` +
-              `Export a fresh cert from Bridge → Help → Export TLS Certificate and update Settings → Connection to re-secure.`,
-              'IMAPService',
-              err
-            );
-            tlsOptions = { rejectUnauthorized: false, minVersion: 'TLSv1.2' };
-            this.insecureTls = true;
-          }
-        } else {
-          if (!allowInsecure) {
-            throw new Error(
-              'IMAP: No Bridge certificate configured. Export the cert from Bridge → Help → Export TLS Certificate ' +
-              "and set 'bridgeCertPath' in Settings → Connection. To opt into the legacy behavior (TLS validation " +
-              'disabled for localhost), set allowInsecureBridge: true or launch with MAILPOUCH_INSECURE_BRIDGE=1.'
-            );
-          }
-          logger.warn(
-            'IMAP: No Bridge certificate configured and allowInsecureBridge is set — ' +
-            'TLS certificate validation DISABLED for localhost. Export the cert from Bridge → Help → ' +
-            'Export TLS Certificate and clear the insecure flag to re-secure.',
-            'IMAPService'
-          );
-          tlsOptions = { rejectUnauthorized: false, minVersion: 'TLSv1.2' };
-          this.insecureTls = true;
-        }
-      } else {
-        // Non-localhost: full certificate validation required
-        tlsOptions = { minVersion: 'TLSv1.2' };
-      }
+      // TLS options (cert pinning + insecure fallback) — the same decision the
+      // settings connection-check uses, shared via bridge-tls.ts.
+      const tls = buildBridgeTlsConfig(host, bridgeCertPath, allowInsecure);
+      for (const l of tls.logs) logger[l.level](`IMAP: ${l.msg}`, 'IMAPService');
+      this.insecureTls = tls.insecure;
+      const tlsOptions: Record<string, unknown> | undefined = tls.tlsOptions;
 
       // Use caller-supplied secure flag if provided; otherwise default to false for
       // localhost (Bridge uses STARTTLS on 1143) and true for non-localhost connections.
@@ -3013,51 +2962,20 @@ export class SimpleIMAPService {
     const isLocalhost = cfg.host === 'localhost' || cfg.host === '127.0.0.1';
     const allowInsecure = cfg.allowInsecureBridge
       || process.env.MAILPOUCH_INSECURE_BRIDGE === '1';
+    // Same TLS decision as connect(), but IDLE ABORTS (rather than throwing)
+    // when a secure config can't be built — it must never silently downgrade.
     let tlsOptions: Record<string, unknown> | undefined;
-
-    if (isLocalhost) {
-      if (cfg.bridgeCertPath) {
-        try {
-          let certPath = cfg.bridgeCertPath;
-          try { if (statSync(certPath).isDirectory()) certPath = pathJoin(certPath, 'cert.pem'); } catch {}
-          const cert = readPinnedBridgeCert(certPath);
-          tlsOptions = buildBridgeTlsOptions(cert);
-        } catch (err) {
-          if (!allowInsecure) {
-            logger.error(
-              `IDLE: Bridge cert at "${cfg.bridgeCertPath}" could not be loaded and allowInsecureBridge is not set. ` +
-              `Refusing to start IDLE with TLS validation disabled. Fix the cert path or set allowInsecureBridge: true.`,
-              'IMAPService',
-              err
-            );
-            this.idleActive = false;
-            return;
-          }
-          logger.warn(
-            `IDLE: Failed to load Bridge cert at "${cfg.bridgeCertPath}" — running with TLS validation DISABLED (allowInsecureBridge is set).`,
-            'IMAPService',
-            err
-          );
-          tlsOptions = { rejectUnauthorized: false, minVersion: 'TLSv1.2' };
-        }
-      } else {
-        if (!allowInsecure) {
-          logger.error(
-            'IDLE: No Bridge certificate configured. Refusing to start IDLE with TLS validation disabled. ' +
-            "Set 'bridgeCertPath' or set allowInsecureBridge: true to opt into the legacy behavior.",
-            'IMAPService'
-          );
-          this.idleActive = false;
-          return;
-        }
-        logger.warn(
-          'IDLE: No Bridge certificate configured and allowInsecureBridge is set — TLS certificate validation DISABLED for localhost.',
-          'IMAPService'
-        );
-        tlsOptions = { rejectUnauthorized: false, minVersion: 'TLSv1.2' };
-      }
-    } else {
-      tlsOptions = { minVersion: 'TLSv1.2' };
+    try {
+      const tls = buildBridgeTlsConfig(cfg.host, cfg.bridgeCertPath, allowInsecure);
+      for (const l of tls.logs) logger[l.level](`IDLE: ${l.msg}`, 'IMAPService');
+      tlsOptions = tls.tlsOptions;
+    } catch (err) {
+      logger.error(
+        `IDLE: ${(err as Error).message} Refusing to start IDLE with TLS validation disabled.`,
+        'IMAPService', err,
+      );
+      this.idleActive = false;
+      return;
     }
 
     // Cluster-2 connection leak: a failed connect()/idle() must NOT leave its

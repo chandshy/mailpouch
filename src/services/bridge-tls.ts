@@ -5,7 +5,8 @@
 // Bridge CA cert is the trust anchor; checkServerIdentity is bypassed because
 // Bridge exports certs with CN=127.0.0.1, which would not match "localhost".
 
-import { readFileSync } from "fs";
+import { readFileSync, statSync } from "fs";
+import { join } from "path";
 import { createHash } from "crypto";
 import { logger } from "../utils/logger.js";
 
@@ -44,6 +45,86 @@ export function readPinnedBridgeCert(certPath: string): Buffer {
     throw new Error(`Bridge cert pin violation: ${certPath} hash changed since startup`);
   }
   return buf;
+}
+
+export interface BridgeTlsConfig {
+  /** TLS options to hand to imapflow / nodemailer. */
+  tlsOptions: Record<string, unknown>;
+  /** True when certificate validation was disabled (insecure fallback). */
+  insecure: boolean;
+  /** Messages for the caller to emit with its own logger + context. */
+  logs: Array<{ level: "info" | "warn"; msg: string }>;
+}
+
+/**
+ * Resolve TLS options for a Proton Bridge connection from (host, cert path,
+ * allow-insecure) — the single decision both the IMAP service `connect()` and
+ * the settings connection-check need:
+ *  - non-localhost          → standard validation (minVersion TLSv1.2);
+ *  - localhost + cert       → pin the cert (buildBridgeTlsOptions);
+ *  - localhost + cert fails  → throw UNLESS allowInsecure (then validation off);
+ *  - localhost + no cert     → throw UNLESS allowInsecure (then validation off).
+ * `insecure` reports whether validation was disabled; `logs` are returned (not
+ * emitted) so the caller controls the logger/context. fs access (statSync for
+ * dir→cert.pem resolution, readFileSync via readPinnedBridgeCert) keeps the
+ * cert-pin TOCTOU protection.
+ */
+export function buildBridgeTlsConfig(
+  host: string,
+  bridgeCertPath: string | undefined,
+  allowInsecure: boolean,
+): BridgeTlsConfig {
+  const isLocalhost = host === "localhost" || host === "127.0.0.1" || host === "::1";
+  const logs: BridgeTlsConfig["logs"] = [];
+  const insecureOpts = { rejectUnauthorized: false, minVersion: "TLSv1.2" };
+
+  if (!isLocalhost) {
+    return { tlsOptions: { minVersion: "TLSv1.2" }, insecure: false, logs };
+  }
+
+  if (bridgeCertPath) {
+    let resolved = bridgeCertPath;
+    try {
+      if (statSync(bridgeCertPath).isDirectory()) {
+        resolved = join(bridgeCertPath, "cert.pem");
+        logs.push({ level: "info", msg: `Directory given for cert path — resolved to ${resolved}` });
+      }
+    } catch { /* stat failed — let readPinnedBridgeCert produce the real error */ }
+    try {
+      const tlsOptions = buildBridgeTlsOptions(readPinnedBridgeCert(resolved));
+      logs.push({ level: "info", msg: `Using exported Bridge certificate for TLS trust (${resolved})` });
+      return { tlsOptions, insecure: false, logs };
+    } catch (err) {
+      if (!allowInsecure) {
+        throw new Error(
+          `Bridge cert at "${resolved}" could not be loaded and allowInsecureBridge is not set. ` +
+          `Fix the cert path in Settings → Connection, or set allowInsecureBridge: true ` +
+          `(or MAILPOUCH_INSECURE_BRIDGE=1) to opt into the legacy insecure behavior. ` +
+          `Underlying error: ${(err as Error).message}`,
+        );
+      }
+      logs.push({
+        level: "warn",
+        msg: `Failed to load Bridge cert at "${resolved}" — running with TLS validation DISABLED (allowInsecureBridge is set). ` +
+          `Export a fresh cert from Bridge → Help → Export TLS Certificate and update Settings → Connection to re-secure.`,
+      });
+      return { tlsOptions: insecureOpts, insecure: true, logs };
+    }
+  }
+
+  if (!allowInsecure) {
+    throw new Error(
+      "No Bridge certificate configured. Export the cert from Bridge → Help → Export TLS Certificate " +
+      "and set 'bridgeCertPath' in Settings → Connection. To opt into the legacy behavior (TLS validation " +
+      "disabled for localhost), set allowInsecureBridge: true or launch with MAILPOUCH_INSECURE_BRIDGE=1.",
+    );
+  }
+  logs.push({
+    level: "warn",
+    msg: "No Bridge certificate configured and allowInsecureBridge is set — TLS certificate validation DISABLED for localhost. " +
+      "Export the cert from Bridge → Help → Export TLS Certificate and clear the insecure flag to re-secure.",
+  });
+  return { tlsOptions: insecureOpts, insecure: true, logs };
 }
 
 /** Reset the pinned-hash table. Test-only. */

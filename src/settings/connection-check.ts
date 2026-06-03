@@ -11,11 +11,9 @@
 // so the UI can never show a working/green state while auth is failing.
 
 import { Socket } from "net";
-import { statSync } from "fs";
-import { join } from "path";
 import { ImapFlow } from "imapflow";
 import nodemailer from "nodemailer";
-import { buildBridgeTlsOptions, readPinnedBridgeCert } from "../services/bridge-tls.js";
+import { buildBridgeTlsConfig } from "../services/bridge-tls.js";
 import { loadConfig, loadCredentialsFromKeychain } from "../config/loader.js";
 
 export interface ProtocolCheck {
@@ -63,22 +61,12 @@ export function tcpReachable(host: string, port: number, timeoutMs = 5000): Prom
   });
 }
 
-/** Build TLS options matching the real services' Bridge handling. Throws when a
- *  cert is required (localhost, not insecure) but can't be loaded — surfaced as
- *  an auth failure rather than a silent insecure downgrade. */
+/** Build TLS options matching the real services' Bridge handling (shared with
+ *  the IMAP service connect()/IDLE via bridge-tls.ts). Throws when a cert is
+ *  required (localhost, not insecure) but can't be loaded — surfaced as an auth
+ *  failure rather than a silent insecure downgrade. */
 function bridgeTls(host: string, certPath: string, allowInsecure: boolean): Record<string, unknown> {
-  if (!isLocalhost(host)) return { minVersion: "TLSv1.2" };
-  if (certPath) {
-    let resolved = certPath;
-    try { if (statSync(certPath).isDirectory()) resolved = join(certPath, "cert.pem"); } catch { /* use as-is */ }
-    try { return buildBridgeTlsOptions(readPinnedBridgeCert(resolved)); }
-    catch (e) {
-      if (allowInsecure) return { rejectUnauthorized: false, minVersion: "TLSv1.2" };
-      throw new Error(`Bridge cert at "${resolved}" could not be loaded and allowInsecureBridge is not set`);
-    }
-  }
-  if (allowInsecure) return { rejectUnauthorized: false, minVersion: "TLSv1.2" };
-  throw new Error("No Bridge certificate configured and allowInsecureBridge is not set");
+  return buildBridgeTlsConfig(host, certPath, allowInsecure).tlsOptions;
 }
 
 /** Condense a thrown SMTP/IMAP error into a short, user-facing reason. */
