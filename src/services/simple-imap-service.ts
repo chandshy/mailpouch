@@ -1161,6 +1161,8 @@ export class SimpleIMAPService {
               isHtml: looksLikeHtml,
               date: env.date ?? new Date(),
               folder,
+              // #9: stable cross-folder identity (the `id` UID is per-folder).
+              messageId: env.messageId || undefined,
               isRead: message.flags?.has('\\Seen') ?? false,
               isStarred: message.flags?.has('\\Flagged') ?? false,
               hasAttachment: attachmentCount > 0,
@@ -1300,6 +1302,8 @@ export class SimpleIMAPService {
               isEncryptedPGP: ctStr.includes('multipart/encrypted') && ctStr.includes('application/pgp-encrypted'),
               // Proton-specific stable ID
               protonId: typeof pmId === 'string' ? pmId.trim() : undefined,
+              // RFC Message-ID — stable identity across folders (#9).
+              messageId: parsed.messageId || undefined,
             };
 
             // GAP 7.5: setCacheEntry strips attachment binary content before storing

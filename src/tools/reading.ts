@@ -42,11 +42,12 @@ import type { ToolDef, ToolHandler, ToolModule } from "./types.js";
 const EMAIL_SUMMARY_SCHEMA = {
   type: "object",
   properties: {
-    id: { type: "string", description: "IMAP UID for use in follow-up tool calls" },
+    id: { type: "string", description: "IMAP UID — per-folder, use for follow-up tool calls in THIS folder" },
+    messageId: { type: "string", description: "RFC Message-ID — stable identity across folders (the per-folder `id` is not)" },
     from: { type: "string" },
     to: { type: "array", items: { type: "string" } },
     subject: { type: "string" },
-    bodyPreview: { type: "string", description: "First ~300 chars of body" },
+    bodyPreview: { type: "string", description: "First ~300 chars of body (omitted when summaryOnly=true)" },
     date: { type: "string", format: "date-time" },
     folder: { type: "string" },
     isRead: { type: "boolean" },
@@ -61,7 +62,7 @@ export const defsEarly: ToolDef[] = [
     name: "get_emails",
     title: "Get Emails",
     description:
-      "Fetch a page of emails from a folder. Returns summary fields (id, from, subject, date, isRead, bodyPreview, isAnswered, isForwarded). Use id with get_email_by_id for full content including body and attachments. Pass nextCursor from a previous response to get the next page.",
+      "Fetch a page of emails from a folder. Returns summary fields (id, messageId, from, subject, date, isRead, bodyPreview). `id` is a per-folder IMAP UID; `messageId` is stable across folders. Use id with get_email_by_id for full content. Set summaryOnly=true to omit bodyPreview for lean listing/triage. Pass nextCursor from a previous response to get the next page.",
     annotations: { readOnlyHint: true, openWorldHint: true },
     inputSchema: {
       type: "object",
@@ -79,6 +80,10 @@ export const defsEarly: ToolDef[] = [
         cursor: {
           type: "string",
           description: "Opaque cursor from previous response nextCursor to get next page. Omit for first page.",
+        },
+        summaryOnly: {
+          type: "boolean",
+          description: "When true, omit bodyPreview (and body) from each item — leaner payload for listing/triage. Default false.",
         },
       },
     },
@@ -532,7 +537,12 @@ export const handlers: Record<string, ToolHandler> = {
       nextCursor = encodeCursor({ folder, offset: offset + limit, limit });
     }
 
-    const structured = { emails, folder, count: emails.length, ...(nextCursor ? { nextCursor } : {}) };
+    // #8: projection — drop the body fields for lean listing/triage payloads.
+    const projected = (args.summaryOnly === true)
+      ? emails.map((e) => { const { body: _b, bodyPreview: _p, ...rest } = e; void _b; void _p; return rest; })
+      : emails;
+
+    const structured = { emails: projected, folder, count: projected.length, ...(nextCursor ? { nextCursor } : {}) };
     return ok(structured);
   },
 
