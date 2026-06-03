@@ -62,6 +62,30 @@ Tests added in `search-input.test.ts`.
 - **Constant drift**: `SYSTEM_PATHS`/`PROTECTED_NAMES` unified into one `SYSTEM_FOLDER_NAMES` source of truth (classification now includes `junk`).
 Tests: allSettled best-effort, junk classification, localised-mailbox protection, fail-closed-on-discovery-failure.
 
+## Phase 2 — Read & fetch (`refactor/phase2-read-fetch`)
+
+| Function | File | Job | Simpl | Eleg | Sec | Focus | Avg | Verdict |
+|---|---|---|---|---|---|---|---|---|
+| `fetchEmailFullSource` | simple-imap-service.ts | 8.5 | — | — | — | — | 8.5 | PASS¹ |
+| `getEmailById` | simple-imap-service.ts | 8 | — | — | — | — | 8.0 | PASS¹ |
+| `getEmails` | simple-imap-service.ts | 7 | 8 | 8 | 9 | 9 | 8.2 | REBUILT → PASS² |
+| `get_emails`/`get_email_by_id`/`download_attachment`/`get_thread` tool | tools/reading.ts | 8 | — | — | — | — | 8.0 | REBUILT → PASS³ |
+| `downloadAttachment` | simple-imap-service.ts | 6 | 8 | 7 | 5 | 9 | 7.0 | REBUILT → PASS⁴ |
+
+¹ First reviewer flagged REBUILD; adversarial verifier did not confirm a genuine defect (the getEmailById per-folder-scan is a documented correctness-over-speed tradeoff mitigated by caching) — PASS.
+
+² **Rebuilt — pagination boundary + flag bug:**
+- **Pagination:** `offset >= total` returned a clamped message #1 (`Math.max(1,…)` collapsed start=end=1) instead of an empty page. Now an explicit `offset >= total` guard returns `[]` before the clamp.
+- **`$Forwarded` flag:** the list view read the non-existent `\Forward` (never matched) while the forward setter writes `$Forwarded` — every message read back as not-forwarded. Now reads `$Forwarded` || `\Forwarded`.
+
+³ Covered by the getEmails/downloadAttachment rebuilds; tool defs reviewed, no separate defect.
+
+⁴ **Rebuilt — security (memory) + correctness:**
+- **Size-guard bypass:** the oversize check read STALE cached `att.size` (which is `?? 0` from bodyStructure) before the re-fetch and never re-checked the fetched bytes — a large attachment with understated/0 cached size could OOM. Now guards on the ACTUAL resolved byte length right before the base64 expansion.
+- **Attachment-order drift:** the index came from a bodyStructure-ordered list view but the re-fetch uses mailparser order; on a mismatch `downloadAttachment` now re-maps by filename so it returns the file the caller selected, not the drifted index.
+- Also fixed the `\Forward` flag in `buildEmailMessage` (shared by getEmailById).
+Tests: pagination empty-page, $Forwarded read (list + buildEmailMessage), oversize-on-refetch guard, filename re-map on order drift.
+
 ### PR #192 reviewer fixes (CodeQL + Copilot)
 - `stripHtml` block-strip now matches `</script\s*>` / `</style\s*>` (trailing
   whitespace close tag could bypass the strip — CodeQL bad-HTML-filtering).

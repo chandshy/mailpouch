@@ -103,7 +103,7 @@ describe("buildEmailMessage", () => {
 
   it("maps attachments + hasAttachment, and reads answered/forwarded flags", () => {
     const e = buildEmailMessage(
-      msg(7, ["\\Answered", "\\Forward"]),
+      msg(7, ["\\Answered", "$Forwarded"]),
       parsed({ attachments: [{ filename: "a.pdf", contentType: "application/pdf", size: 10, content: Buffer.from("x"), cid: "c1" } as never] }),
       "INBOX",
     );
@@ -111,6 +111,11 @@ describe("buildEmailMessage", () => {
     expect(e.attachments?.[0]).toMatchObject({ filename: "a.pdf", contentType: "application/pdf", size: 10, contentId: "c1" });
     expect(e.isAnswered).toBe(true);
     expect(e.isForwarded).toBe(true);
+  });
+
+  it("reads the standard \\Forwarded flag too (not the bogus \\Forward)", () => {
+    expect(buildEmailMessage(msg(8, ["\\Forwarded"]), parsed({}), "INBOX").isForwarded).toBe(true);
+    expect(buildEmailMessage(msg(9, ["\\Forward"]), parsed({}), "INBOX").isForwarded).toBe(false);
   });
 });
 

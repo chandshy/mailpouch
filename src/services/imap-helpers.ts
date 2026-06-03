@@ -217,7 +217,10 @@ export function buildEmailMessage(
     inReplyTo: parsed.inReplyTo,
     references: parsed.references,
     isAnswered: message.flags?.has("\\Answered") ?? false,
-    isForwarded: message.flags?.has("\\Forward") ?? false,
+    // Bridge marks a forward with the `$Forwarded` keyword (what our own
+    // forward setter writes) or the standard `\Forwarded` — NOT `\Forward`,
+    // which never matches and made every message read back as not-forwarded.
+    isForwarded: message.flags?.has("$Forwarded") || message.flags?.has("\\Forwarded") || false,
     isSignedPGP: ctStr.includes("multipart/signed") && ctStr.includes("application/pgp-signature"),
     isEncryptedPGP: ctStr.includes("multipart/encrypted") && ctStr.includes("application/pgp-encrypted"),
     protonId: typeof pmId === "string" ? pmId.trim() : undefined,

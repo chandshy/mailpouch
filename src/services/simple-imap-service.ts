@@ -988,10 +988,19 @@ export class SimpleIMAPService {
 
         const mailbox = this.client.mailbox;
         const total = (mailbox && typeof mailbox !== 'boolean' ? mailbox.exists : 0) || 0;
+
+        // An offset at/beyond the message count is an empty page. This MUST be
+        // checked before the Math.max(1,…) clamps below — otherwise start and
+        // end both collapse to 1 and the function wrongly returns message #1 for
+        // an out-of-range page (e.g. total=100, offset=100 → start=end=1).
+        if (total === 0 || offset >= total) {
+          return [];
+        }
+
         const start = Math.max(1, total - offset - limit + 1);
         const end = Math.max(1, total - offset);
 
-        if (start > end || total === 0) {
+        if (start > end) {
           return [];
         }
 
@@ -1066,7 +1075,8 @@ export class SimpleIMAPService {
               hasAttachment: attachmentCount > 0,
               attachments: attachmentMeta,
               isAnswered: message.flags?.has('\\Answered') ?? false,
-              isForwarded: message.flags?.has('\\Forward') ?? false,
+              // `$Forwarded` (our setter) or standard `\Forwarded` — not `\Forward`.
+              isForwarded: message.flags?.has('$Forwarded') || message.flags?.has('\\Forwarded') || false,
             };
 
             // GAP 2.4: do NOT cache list-view emails — they only have a preview body
@@ -1396,6 +1406,12 @@ export class SimpleIMAPService {
     }
 
     let att = emailMeta.attachments[idx];
+    // The index the caller passed came from a list/metadata view whose
+    // attachment ordering (bodyStructure walk) is not guaranteed identical to
+    // the mailparser ordering used by the re-fetch below. Remember the selected
+    // attachment's filename so we can re-map by name if the orders drift, rather
+    // than silently returning the wrong file.
+    const wantedName = att.filename;
 
     // PARSE-014: downloading re-fetches the full RFC822 source then base64-
     // encodes the whole attachment in memory (~raw + ~1.33x base64 + parser
@@ -1413,12 +1429,34 @@ export class SimpleIMAPService {
     if (!att.content) {
       logger.debug('Attachment content not in cache, re-fetching full email source', 'IMAPService', { emailId, attachmentIndex });
       const fresh = await this.fetchEmailFullSource(emailId, emailMeta.folder);
-      const freshAtt = fresh?.attachments?.[idx];
+      let freshAtt = fresh?.attachments?.[idx];
+      // If the indexed attachment doesn't match the name the caller selected,
+      // the metadata/parse orderings drifted — re-map by filename so we return
+      // the file the caller actually asked for.
+      if (wantedName && freshAtt?.filename !== wantedName) {
+        const byName = fresh?.attachments?.find(a => a.filename === wantedName && !!a.content);
+        if (byName) freshAtt = byName;
+      }
       if (!freshAtt?.content) {
         logger.warn('Attachment content unavailable after re-fetch', 'IMAPService', { emailId, attachmentIndex });
         return null;
       }
       att = freshAtt;
+    }
+
+    // PARSE-014 (hardened): the metadata guard above can be bypassed — cached
+    // bodyStructure size is `?? 0` (extractAttachmentMeta) and a re-fetch could
+    // report a larger attachment than the stale metadata claimed. Guard on the
+    // ACTUAL resolved byte length right before we base64-expand it (~1.33x),
+    // so an oversize attachment can't OOM regardless of what the metadata said.
+    const rawBytes = Buffer.isBuffer(att.content)
+      ? att.content.length
+      : Buffer.byteLength(att.content as string, 'base64');
+    if (rawBytes > SimpleIMAPService.MAX_ATTACHMENT_DOWNLOAD_BYTES) {
+      throw new Error(
+        `Attachment is too large to download (${Math.round(rawBytes / (1024 * 1024))} MB; ` +
+        `limit ${Math.round(SimpleIMAPService.MAX_ATTACHMENT_DOWNLOAD_BYTES / (1024 * 1024))} MB).`,
+      );
     }
 
     let content: string;
