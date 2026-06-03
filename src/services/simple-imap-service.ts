@@ -3,7 +3,7 @@
  */
 
 import { ImapFlow } from 'imapflow';
-import type { ParsedMail, Attachment, AddressObject } from 'mailparser';
+import type { Attachment } from 'mailparser';
 import { simpleParser } from 'mailparser';
 import { buildEmailMessage, verifyRelocatedMessages, buildSearchCriteria, truncateBody, stripHtml, normalizeAddressList } from './imap-helpers.js';
 // Re-export the pure helpers from their original home so existing importers
@@ -608,8 +608,11 @@ export class SimpleIMAPService {
       // Store connection config for reconnection
       this.connectionConfig = { host, port, username, password, bridgeCertPath, secure, allowInsecureBridge };
 
-      // Check if using localhost (Proton Bridge)
-      const isLocalhost = host === 'localhost' || host === '127.0.0.1';
+      // Check if using localhost (Proton Bridge). Must match buildBridgeTlsConfig's
+      // localhost set (incl. IPv6 loopback ::1) — otherwise host="::1" would get a
+      // localhost TLS config but a non-localhost `secure` default (implicit TLS),
+      // breaking the STARTTLS-on-1143 Bridge connection.
+      const isLocalhost = host === 'localhost' || host === '127.0.0.1' || host === '::1';
       const allowInsecure = allowInsecureBridge
         || process.env.MAILPOUCH_INSECURE_BRIDGE === '1';
 

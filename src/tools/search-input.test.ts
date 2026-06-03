@@ -47,6 +47,14 @@ describe("validateSearchInput", () => {
       .toThrow(/must not be later than/);
   });
 
+  it("VALID-002: rejects non-string body/text/bcc filters", () => {
+    expect(() => validateSearchInput({ body: 123 }, MAX)).toThrow(/'body' filter must be a string/);
+    expect(() => validateSearchInput({ text: {} }, MAX)).toThrow(/'text' filter must be a string/);
+    expect(() => validateSearchInput({ bcc: [] }, MAX)).toThrow(/'bcc' filter must be a string/);
+    const o = validateSearchInput({ body: "hello" }, MAX);
+    expect(o.body).toBe("hello");
+  });
+
   it("TOOL-017: rejects unparseable dateFrom/dateTo; accepts valid", () => {
     expect(() => validateSearchInput({ dateFrom: "not-a-date" }, MAX)).toThrow(/parseable date string/);
     expect(() => validateSearchInput({ dateTo: "garbage" }, MAX)).toThrow(/parseable date string/);

@@ -82,12 +82,21 @@ export function validateSearchInput(
       throw new McpError(ErrorCode.InvalidParams, "'dateFrom' must not be later than 'dateTo'.");
     }
   }
-  // VALID-002: length-cap body/text/bcc at MAX_SEARCH_TEXT like from/to/subject.
-  // These were previously read with only a typeof check and forwarded unbounded,
-  // letting a multi-MB filter burn server memory.
-  const body = typeof args.body === "string" ? args.body : undefined;
-  const text = typeof args.text === "string" ? args.text : undefined;
-  const bcc = typeof args.bcc === "string" ? args.bcc : undefined;
+  // VALID-002: body/text/bcc are string filters, length-capped at MAX_SEARCH_TEXT
+  // like from/to/subject. Reject a non-string (rather than silently dropping it)
+  // so the contract — throw on malformed input — holds for every field.
+  if (args.body !== undefined && typeof args.body !== "string") {
+    throw new McpError(ErrorCode.InvalidParams, "'body' filter must be a string when provided.");
+  }
+  if (args.text !== undefined && typeof args.text !== "string") {
+    throw new McpError(ErrorCode.InvalidParams, "'text' filter must be a string when provided.");
+  }
+  if (args.bcc !== undefined && typeof args.bcc !== "string") {
+    throw new McpError(ErrorCode.InvalidParams, "'bcc' filter must be a string when provided.");
+  }
+  const body = args.body as string | undefined;
+  const text = args.text as string | undefined;
+  const bcc = args.bcc as string | undefined;
   if (body !== undefined && body.length > MAX_SEARCH_TEXT) {
     throw new McpError(ErrorCode.InvalidParams, `'body' filter must not exceed ${MAX_SEARCH_TEXT} characters.`);
   }

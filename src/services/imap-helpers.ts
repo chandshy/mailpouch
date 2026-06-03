@@ -123,8 +123,10 @@ export function stripHtml(html: string): string {
       .replace(/&amp;/g, "&");
 
   return decodeEntities(html.replace(/<!--[\s\S]*?-->/g, " "))
-    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, " ")
-    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, " ")
+    // Closing tags may carry trailing whitespace (`</script >`) per the HTML
+    // tokenizer — match `<\/script\s*>` so the block strip can't be bypassed (CodeQL).
+    .replace(/<style[^>]*>[\s\S]*?<\/style\s*>/gi, " ")
+    .replace(/<script[^>]*>[\s\S]*?<\/script\s*>/gi, " ")
     .replace(/<[^>]+>/g, " ")
     .replace(/\s+/g, " ")
     .trim();
