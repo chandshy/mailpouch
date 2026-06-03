@@ -2190,6 +2190,52 @@ export class SimpleIMAPService {
    * determine which UIDs actually exist in the folder. UIDs that don't exist
    * are reported in `results.failed` rather than silently counted as success.
    */
+  /**
+   * Group email UIDs by their source folder for a bulk operation. With
+   * `sourceFolder`, all UIDs are assumed to live there (no discovery). Otherwise
+   * each UID's folder is resolved from the cache, else via getEmailById —
+   * IMAP-003: an unresolved UID is an explicit failure, NEVER a silent fall-back
+   * to INBOX (which recreated the v3.0.41 false-success class). Invalid and
+   * not-found UIDs are recorded in `results`. Was duplicated in all five bulk
+   * methods (move/copy/delete/markRead/star).
+   */
+  private async groupEmailsByFolder(
+    emailIds: string[],
+    sourceFolder: string | undefined,
+    results: { failed: number; errors: string[] },
+  ): Promise<Map<string, string[]>> {
+    const grouped = new Map<string, string[]>();
+    if (sourceFolder) {
+      const validIds: string[] = [];
+      for (const id of emailIds) {
+        try { this.validateEmailId(id); validIds.push(id); }
+        catch (e: unknown) { results.failed++; results.errors.push(`Invalid email ID ${id}: ${e instanceof Error ? e.message : String(e)}`); }
+      }
+      if (validIds.length > 0) grouped.set(sourceFolder, validIds);
+      return grouped;
+    }
+    for (const id of emailIds) {
+      try {
+        this.validateEmailId(id);
+        const cached = this.findCacheEntryByUid(id);
+        let folder: string;
+        if (cached) {
+          folder = cached.folder;
+        } else {
+          const discovered = await this.getEmailById(id);
+          if (!discovered) { results.failed++; results.errors.push(`Email ${id} not found in any folder`); continue; }
+          folder = discovered.folder;
+        }
+        if (!grouped.has(folder)) grouped.set(folder, []);
+        grouped.get(folder)!.push(id);
+      } catch (e: unknown) {
+        results.failed++;
+        results.errors.push(`Invalid email ID ${id}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    return grouped;
+  }
+
   async bulkMoveEmails(emailIds: string[], targetFolder: string, sourceFolder?: string): Promise<{ success: number; failed: number; errors: string[] }> {
     this.validateFolderName(targetFolder);
     if (sourceFolder !== undefined) this.validateFolderName(sourceFolder);
@@ -2208,45 +2254,7 @@ export class SimpleIMAPService {
       errors: [] as string[]
     };
 
-    const emailsByFolder = new Map<string, string[]>();
-
-    if (sourceFolder) {
-      const validIds: string[] = [];
-      for (const emailId of emailIds) {
-        try {
-          this.validateEmailId(emailId);
-          validIds.push(emailId);
-        } catch (error: unknown) {
-          results.failed++;
-          results.errors.push(`Invalid email ID ${emailId}: ${error instanceof Error ? error.message : String(error)}`);
-        }
-      }
-      if (validIds.length > 0) emailsByFolder.set(sourceFolder, validIds);
-    } else {
-      for (const emailId of emailIds) {
-        try {
-          this.validateEmailId(emailId);
-          const cachedEmail = this.findCacheEntryByUid(emailId);
-          let folder: string;
-          if (cachedEmail) {
-            folder = cachedEmail.folder;
-          } else {
-            const discovered = await this.getEmailById(emailId);
-            if (!discovered) {
-              results.failed++;
-              results.errors.push(`Email ${emailId} not found in any folder`);
-              continue;
-            }
-            folder = discovered.folder;
-          }
-          if (!emailsByFolder.has(folder)) emailsByFolder.set(folder, []);
-          emailsByFolder.get(folder)!.push(emailId);
-        } catch (error: unknown) {
-          results.failed++;
-          results.errors.push(`Invalid email ID ${emailId}: ${error instanceof Error ? error.message : String(error)}`);
-        }
-      }
-    }
+    const emailsByFolder = await this.groupEmailsByFolder(emailIds, sourceFolder, results);
 
     // Capture Message-IDs + which UIDs the MOVE verb accepted per source folder,
     // then verify (below) the messages actually landed in the target. A move the
@@ -2446,45 +2454,7 @@ export class SimpleIMAPService {
       errors: [] as string[]
     };
 
-    const emailsByFolder2 = new Map<string, string[]>();
-
-    if (sourceFolder) {
-      const validIds: string[] = [];
-      for (const emailId of emailIds) {
-        try {
-          this.validateEmailId(emailId);
-          validIds.push(emailId);
-        } catch (error: unknown) {
-          results.failed++;
-          results.errors.push(`Invalid email ID ${emailId}: ${error instanceof Error ? error.message : String(error)}`);
-        }
-      }
-      if (validIds.length > 0) emailsByFolder2.set(sourceFolder, validIds);
-    } else {
-      for (const emailId of emailIds) {
-        try {
-          this.validateEmailId(emailId);
-          const cachedEmail = this.findCacheEntryByUid(emailId);
-          let folder: string;
-          if (cachedEmail) {
-            folder = cachedEmail.folder;
-          } else {
-            const discovered = await this.getEmailById(emailId);
-            if (!discovered) {
-              results.failed++;
-              results.errors.push(`Email ${emailId} not found in any folder`);
-              continue;
-            }
-            folder = discovered.folder;
-          }
-          if (!emailsByFolder2.has(folder)) emailsByFolder2.set(folder, []);
-          emailsByFolder2.get(folder)!.push(emailId);
-        } catch (error: unknown) {
-          results.failed++;
-          results.errors.push(`Invalid email ID ${emailId}: ${error instanceof Error ? error.message : String(error)}`);
-        }
-      }
-    }
+    const emailsByFolder2 = await this.groupEmailsByFolder(emailIds, sourceFolder, results);
 
     const trash = await this.resolveTrashPath();
 
@@ -2524,49 +2494,7 @@ export class SimpleIMAPService {
     if (!this.client || !this.isConnected) throw new Error('IMAP client not connected');
 
     const results = { success: 0, failed: 0, errors: [] as string[] };
-    const grouped = new Map<string, string[]>();
-    if (sourceFolder) {
-      const validIds: string[] = [];
-      for (const id of emailIds) {
-        try {
-          this.validateEmailId(id);
-          validIds.push(id);
-        } catch (e: unknown) {
-          results.failed++;
-          results.errors.push(`Invalid email ID ${id}: ${e instanceof Error ? e.message : String(e)}`);
-        }
-      }
-      if (validIds.length > 0) grouped.set(sourceFolder, validIds);
-    } else {
-      // No explicit sourceFolder — discover per UID. IMAP-003 from the
-      // 2026-05-28 audit: this used to fall back to 'INBOX' on cache miss,
-      // recreating the v3.0.41 false-success class. Now mirrors the
-      // bulkMoveEmails pattern: cache lookup, then full discovery via
-      // getEmailById, then explicit failure if still not found.
-      for (const id of emailIds) {
-        try {
-          this.validateEmailId(id);
-          const cached = this.findCacheEntryByUid(id);
-          let folder: string;
-          if (cached) {
-            folder = cached.folder;
-          } else {
-            const discovered = await this.getEmailById(id);
-            if (!discovered) {
-              results.failed++;
-              results.errors.push(`Email ${id} not found in any folder`);
-              continue;
-            }
-            folder = discovered.folder;
-          }
-          if (!grouped.has(folder)) grouped.set(folder, []);
-          grouped.get(folder)!.push(id);
-        } catch (e: unknown) {
-          results.failed++;
-          results.errors.push(`Invalid email ID ${id}: ${e instanceof Error ? e.message : String(e)}`);
-        }
-      }
-    }
+    const grouped = await this.groupEmailsByFolder(emailIds, sourceFolder, results);
 
     for (const [folder, ids] of grouped.entries()) {
       const lock = await this.client.getMailboxLock(folder);
@@ -2631,45 +2559,7 @@ export class SimpleIMAPService {
     if (!this.client || !this.isConnected) throw new Error('IMAP client not connected');
 
     const results = { success: 0, failed: 0, errors: [] as string[] };
-    const grouped = new Map<string, string[]>();
-    if (sourceFolder) {
-      const validIds: string[] = [];
-      for (const id of emailIds) {
-        try {
-          this.validateEmailId(id);
-          validIds.push(id);
-        } catch (e: unknown) {
-          results.failed++;
-          results.errors.push(`Invalid email ID ${id}: ${e instanceof Error ? e.message : String(e)}`);
-        }
-      }
-      if (validIds.length > 0) grouped.set(sourceFolder, validIds);
-    } else {
-      // No sourceFolder — discover per UID (IMAP-003 from 2026-05-28 audit).
-      for (const id of emailIds) {
-        try {
-          this.validateEmailId(id);
-          const cached = this.findCacheEntryByUid(id);
-          let folder: string;
-          if (cached) {
-            folder = cached.folder;
-          } else {
-            const discovered = await this.getEmailById(id);
-            if (!discovered) {
-              results.failed++;
-              results.errors.push(`Email ${id} not found in any folder`);
-              continue;
-            }
-            folder = discovered.folder;
-          }
-          if (!grouped.has(folder)) grouped.set(folder, []);
-          grouped.get(folder)!.push(id);
-        } catch (e: unknown) {
-          results.failed++;
-          results.errors.push(`Invalid email ID ${id}: ${e instanceof Error ? e.message : String(e)}`);
-        }
-      }
-    }
+    const grouped = await this.groupEmailsByFolder(emailIds, sourceFolder, results);
 
     for (const [folder, ids] of grouped.entries()) {
       const lock = await this.client.getMailboxLock(folder);
@@ -2735,45 +2625,7 @@ export class SimpleIMAPService {
     if (!this.client || !this.isConnected) throw new Error('IMAP client not connected');
 
     const results = { success: 0, failed: 0, errors: [] as string[] };
-    const grouped = new Map<string, string[]>();
-    if (sourceFolder) {
-      const validIds: string[] = [];
-      for (const id of emailIds) {
-        try {
-          this.validateEmailId(id);
-          validIds.push(id);
-        } catch (e: unknown) {
-          results.failed++;
-          results.errors.push(`Invalid email ID ${id}: ${e instanceof Error ? e.message : String(e)}`);
-        }
-      }
-      if (validIds.length > 0) grouped.set(sourceFolder, validIds);
-    } else {
-      // No sourceFolder — discover per UID (IMAP-003 from 2026-05-28 audit).
-      for (const id of emailIds) {
-        try {
-          this.validateEmailId(id);
-          const cached = this.findCacheEntryByUid(id);
-          let folder: string;
-          if (cached) {
-            folder = cached.folder;
-          } else {
-            const discovered = await this.getEmailById(id);
-            if (!discovered) {
-              results.failed++;
-              results.errors.push(`Email ${id} not found in any folder`);
-              continue;
-            }
-            folder = discovered.folder;
-          }
-          if (!grouped.has(folder)) grouped.set(folder, []);
-          grouped.get(folder)!.push(id);
-        } catch (e: unknown) {
-          results.failed++;
-          results.errors.push(`Invalid email ID ${id}: ${e instanceof Error ? e.message : String(e)}`);
-        }
-      }
-    }
+    const grouped = await this.groupEmailsByFolder(emailIds, sourceFolder, results);
 
     // Per source folder: pre-flight, capture Message-IDs, issue the copy. We do
     // NOT count success here — only which UIDs the COPY verb accepted. Whether
