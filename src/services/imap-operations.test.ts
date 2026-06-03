@@ -1493,6 +1493,48 @@ describe("SimpleIMAPService.getEmails", () => {
     expect(emails).toHaveLength(0);
   });
 
+  it("returns [] (not a clamped message #1) when offset is at/beyond the message count", async () => {
+    const svc = new SimpleIMAPService();
+    vi.spyOn(svc as any, "validateFolderName").mockImplementation(() => {});
+    vi.spyOn(svc as any, "ensureConnection").mockResolvedValue(undefined);
+    vi.spyOn(svc as any, "checkAndUpdateUidValidity").mockImplementation(() => {});
+
+    const fetch = vi.fn();
+    (svc as any).client = {
+      getMailboxLock: vi.fn().mockResolvedValue(makeLock()),
+      mailbox: { exists: 5 },
+      fetch,
+    };
+
+    // offset (5) == total (5): an empty page, not message #1.
+    expect(await svc.getEmails("INBOX", 50, 5)).toEqual([]);
+    // offset beyond total too.
+    expect(await svc.getEmails("INBOX", 50, 100)).toEqual([]);
+    // The Math.max(1,…) clamp must never reach a FETCH for an out-of-range page.
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("reads $Forwarded in the list view (not the bogus \\Forward)", async () => {
+    const svc = new SimpleIMAPService();
+    vi.spyOn(svc as any, "validateFolderName").mockImplementation(() => {});
+    vi.spyOn(svc as any, "ensureConnection").mockResolvedValue(undefined);
+    vi.spyOn(svc as any, "checkAndUpdateUidValidity").mockImplementation(() => {});
+    vi.spyOn(svc as any, "countAttachments").mockReturnValue(0);
+
+    const mockMsg = {
+      uid: 7, envelope: { subject: "Fwd", from: [{ address: "a@x.com" }], date: new Date() },
+      flags: new Set(["$Forwarded"]), bodyParts: new Map([["1", Buffer.from("hi")]]), bodyStructure: {},
+    };
+    (svc as any).client = {
+      getMailboxLock: vi.fn().mockResolvedValue(makeLock()),
+      mailbox: { exists: 1 },
+      fetch: vi.fn().mockReturnValue(asyncMessages([mockMsg])),
+    };
+
+    const emails = await svc.getEmails("INBOX");
+    expect(emails[0].isForwarded).toBe(true);
+  });
+
   it("throws when fetch() rejects", async () => {
     const svc = new SimpleIMAPService();
     vi.spyOn(svc as any, "validateFolderName").mockImplementation(() => {});

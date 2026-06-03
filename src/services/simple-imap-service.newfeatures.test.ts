@@ -236,6 +236,60 @@ describe("SimpleIMAPService.downloadAttachment", () => {
     const result = await svc.downloadAttachment("777", 0);
     expect(result).toBeNull();
   });
+
+  it("rejects an oversize re-fetched attachment even when cached size was understated (PARSE-014)", async () => {
+    const svc = new SimpleIMAPService();
+    vi.spyOn(svc as any, "validateEmailId").mockImplementation(() => {});
+    // Cached metadata claims a tiny size (or 0) so the metadata guard passes...
+    (svc as any).emailCache.set("INBOX:555", {
+      email: {
+        id: "555", from: "a@b.com", to: [], subject: "T", body: "", isHtml: false,
+        date: new Date(), folder: "INBOX", isRead: false, isStarred: false, hasAttachment: true,
+        attachments: [{ filename: "sneaky.bin", contentType: "application/octet-stream", size: 0 }],
+      },
+      cachedAt: Date.now(),
+    });
+    // ...but the actual re-fetched buffer is 26 MB (> 25 MB cap).
+    const huge = Buffer.alloc(26 * 1024 * 1024);
+    vi.spyOn(svc as any, "fetchEmailFullSource").mockResolvedValue({
+      id: "555", from: "a@b.com", to: [], subject: "T", body: "", isHtml: false,
+      date: new Date(), folder: "INBOX", isRead: false, isStarred: false, hasAttachment: true,
+      attachments: [{ filename: "sneaky.bin", contentType: "application/octet-stream", size: huge.length, content: huge }],
+    });
+
+    await expect(svc.downloadAttachment("555", 0)).rejects.toThrow(/too large/i);
+  });
+
+  it("re-maps by filename when the re-fetch attachment order drifts from cached order", async () => {
+    const svc = new SimpleIMAPService();
+    vi.spyOn(svc as any, "validateEmailId").mockImplementation(() => {});
+    // Cached order: [a.txt, b.txt]; caller asks for index 0 = a.txt.
+    (svc as any).emailCache.set("INBOX:444", {
+      email: {
+        id: "444", from: "a@b.com", to: [], subject: "T", body: "", isHtml: false,
+        date: new Date(), folder: "INBOX", isRead: false, isStarred: false, hasAttachment: true,
+        attachments: [
+          { filename: "a.txt", contentType: "text/plain", size: 1 },
+          { filename: "b.txt", contentType: "text/plain", size: 1 },
+        ],
+      },
+      cachedAt: Date.now(),
+    });
+    // Re-fetch returns the REVERSED order: index 0 is now b.txt.
+    vi.spyOn(svc as any, "fetchEmailFullSource").mockResolvedValue({
+      id: "444", from: "a@b.com", to: [], subject: "T", body: "", isHtml: false,
+      date: new Date(), folder: "INBOX", isRead: false, isStarred: false, hasAttachment: true,
+      attachments: [
+        { filename: "b.txt", contentType: "text/plain", size: 1, content: Buffer.from("BBB") },
+        { filename: "a.txt", contentType: "text/plain", size: 1, content: Buffer.from("AAA") },
+      ],
+    });
+
+    const result = await svc.downloadAttachment("444", 0);
+    // Must return a.txt (by name), not b.txt (the drifted index-0).
+    expect(result!.filename).toBe("a.txt");
+    expect(Buffer.from(result!.content, "base64").toString("utf8")).toBe("AAA");
+  });
 });
 
 // ─── saveDraft tests ──────────────────────────────────────────────────────────
