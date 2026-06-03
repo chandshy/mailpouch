@@ -400,16 +400,23 @@ export class SimpleIMAPService {
    * instead of N serial EXPUNGE round-trips that hold the mailbox lock (and
    * block IDLE) for minutes on Bridge.
    */
-  private async chunkedBatchOp(
-    present: string[],
-    perChunk: (uidSet: string) => Promise<unknown>,
-    perUid: (uid: string) => Promise<unknown>,
-    onSuccess: (uid: string) => void,
-    onFailure: (uid: string, msg: string) => void,
-    opName: string,
-    folder: string,
-    finalize?: () => Promise<unknown>,
-  ): Promise<void> {
+  private async chunkedBatchOp(opts: {
+    /** UIDs known to exist in the locked folder. */
+    present: string[];
+    /** Run the op on a whole comma-joined UID chunk (the fast path). */
+    perChunk: (uidSet: string) => Promise<unknown>;
+    /** Run the op on a single UID (per-UID fallback when a chunk throws). */
+    perUid: (uid: string) => Promise<unknown>;
+    onSuccess: (uid: string) => void;
+    onFailure: (uid: string, msg: string) => void;
+    /** Label for logs (e.g. "Bulk move"). */
+    opName: string;
+    folder: string;
+    /** Optional single trailing step run once, only if a per-UID fallback was
+     *  used (IMAP-016: e.g. one EXPUNGE for all \Deleted-flagged UIDs). */
+    finalize?: () => Promise<unknown>;
+  }): Promise<void> {
+    const { present, perChunk, perUid, onSuccess, onFailure, opName, folder, finalize } = opts;
     const chunks = chunkUidsForWire(present);
     let fallbackUsed = false;
     for (const uidSet of chunks) {
@@ -2312,15 +2319,15 @@ export class SimpleIMAPService {
         const accepted: string[] = [];
         const relocated = new Set<string>(); // source uids the server (UIDPLUS) confirmed moved
         let uidplus = false;
-        await this.chunkedBatchOp(
+        await this.chunkedBatchOp({
           present,
-          async (uidSet) => { uidplus = this.recordRelocatedUids(await this.client!.messageMove(uidSet, targetFolder, { uid: true }), relocated) || uidplus; },
-          async (id) => { uidplus = this.recordRelocatedUids(await this.client!.messageMove(id, targetFolder, { uid: true }), relocated) || uidplus; },
-          (id) => { this.evictCacheEntry(`${folder}:${id}`); accepted.push(id); },
-          (id, msg) => { results.failed++; results.errors.push(`Failed to move email ${id}: ${msg}`); },
-          'Bulk move',
+          perChunk: async (uidSet) => { uidplus = this.recordRelocatedUids(await this.client!.messageMove(uidSet, targetFolder, { uid: true }), relocated) || uidplus; },
+          perUid: async (id) => { uidplus = this.recordRelocatedUids(await this.client!.messageMove(id, targetFolder, { uid: true }), relocated) || uidplus; },
+          onSuccess: (id) => { this.evictCacheEntry(`${folder}:${id}`); accepted.push(id); },
+          onFailure: (id, msg) => { results.failed++; results.errors.push(`Failed to move email ${id}: ${msg}`); },
+          opName: 'Bulk move',
           folder,
-        );
+        });
         verifyJobs.push({ folder, accepted, midMap, relocated, uidplus });
       } finally {
         lock.release();
@@ -2525,22 +2532,22 @@ export class SimpleIMAPService {
         }
         if (present.length === 0) continue;
 
-        await this.chunkedBatchOp(
+        await this.chunkedBatchOp({
           present,
-          (uidSet) => isRead
+          perChunk: (uidSet) => isRead
             ? this.client!.messageFlagsAdd(uidSet, ['\\Seen'], { uid: true })
             : this.client!.messageFlagsRemove(uidSet, ['\\Seen'], { uid: true }),
-          (id) => isRead
+          perUid: (id) => isRead
             ? this.client!.messageFlagsAdd(id, ['\\Seen'], { uid: true })
             : this.client!.messageFlagsRemove(id, ['\\Seen'], { uid: true }),
-          (id) => {
+          onSuccess: (id) => {
             const c = this.getCacheEntry(id, folder); if (c) c.isRead = isRead;
             results.success++;
           },
-          (id, msg) => { results.failed++; results.errors.push(`Failed to mark ${id}: ${msg}`); },
-          'Bulk mark-read',
+          onFailure: (id, msg) => { results.failed++; results.errors.push(`Failed to mark ${id}: ${msg}`); },
+          opName: 'Bulk mark-read',
           folder,
-        );
+        });
       } finally { lock.release(); }
     }
     tags.successCount = results.success; tags.failCount = results.failed;
@@ -2590,22 +2597,22 @@ export class SimpleIMAPService {
         }
         if (present.length === 0) continue;
 
-        await this.chunkedBatchOp(
+        await this.chunkedBatchOp({
           present,
-          (uidSet) => isStarred
+          perChunk: (uidSet) => isStarred
             ? this.client!.messageFlagsAdd(uidSet, ['\\Flagged'], { uid: true })
             : this.client!.messageFlagsRemove(uidSet, ['\\Flagged'], { uid: true }),
-          (id) => isStarred
+          perUid: (id) => isStarred
             ? this.client!.messageFlagsAdd(id, ['\\Flagged'], { uid: true })
             : this.client!.messageFlagsRemove(id, ['\\Flagged'], { uid: true }),
-          (id) => {
+          onSuccess: (id) => {
             const c = this.getCacheEntry(id, folder); if (c) c.isStarred = isStarred;
             results.success++;
           },
-          (id, msg) => { results.failed++; results.errors.push(`Failed to star ${id}: ${msg}`); },
-          'Bulk star',
+          onFailure: (id, msg) => { results.failed++; results.errors.push(`Failed to star ${id}: ${msg}`); },
+          opName: 'Bulk star',
           folder,
-        );
+        });
       } finally { lock.release(); }
     }
     tags.successCount = results.success; tags.failCount = results.failed;
@@ -2667,15 +2674,15 @@ export class SimpleIMAPService {
         const accepted: string[] = [];
         const relocated = new Set<string>(); // source uids the server (UIDPLUS) confirmed copied
         let uidplus = false;
-        await this.chunkedBatchOp(
+        await this.chunkedBatchOp({
           present,
-          async (uidSet) => { uidplus = this.recordRelocatedUids(await this.client!.messageCopy(uidSet, targetFolder, { uid: true }), relocated) || uidplus; },
-          async (id) => { uidplus = this.recordRelocatedUids(await this.client!.messageCopy(id, targetFolder, { uid: true }), relocated) || uidplus; },
-          (id) => { accepted.push(id); },
-          (id, msg) => { results.failed++; results.errors.push(`Failed to copy ${id} to ${targetFolder}: ${msg}`); },
-          `Bulk copy →${targetFolder}`,
+          perChunk: async (uidSet) => { uidplus = this.recordRelocatedUids(await this.client!.messageCopy(uidSet, targetFolder, { uid: true }), relocated) || uidplus; },
+          perUid: async (id) => { uidplus = this.recordRelocatedUids(await this.client!.messageCopy(id, targetFolder, { uid: true }), relocated) || uidplus; },
+          onSuccess: (id) => { accepted.push(id); },
+          onFailure: (id, msg) => { results.failed++; results.errors.push(`Failed to copy ${id} to ${targetFolder}: ${msg}`); },
+          opName: `Bulk copy →${targetFolder}`,
           folder,
-        );
+        });
         verifyJobs.push({ accepted, midMap, relocated, uidplus });
       } finally { lock.release(); }
     }
@@ -2753,22 +2760,22 @@ export class SimpleIMAPService {
       if (present.length > 0) {
         // IMAP-016: see bulkDeleteEmails — flag \Deleted per UID then one EXPUNGE.
         const flaggedForExpunge: string[] = [];
-        await this.chunkedBatchOp(
+        await this.chunkedBatchOp({
           present,
-          (uidSet) => this.client!.messageDelete(uidSet, { uid: true }),
-          async (id) => { await this.client!.messageFlagsAdd(id, ['\\Deleted'], { uid: true }); flaggedForExpunge.push(id); },
-          (id) => { this.evictCacheEntry(`${folder}:${id}`); results.success++; },
-          (id, msg) => { results.failed++; results.errors.push(`Failed to delete ${id} from ${folder}: ${msg}`); },
-          'Bulk delete-from-folder',
+          perChunk: (uidSet) => this.client!.messageDelete(uidSet, { uid: true }),
+          perUid: async (id) => { await this.client!.messageFlagsAdd(id, ['\\Deleted'], { uid: true }); flaggedForExpunge.push(id); },
+          onSuccess: (id) => { this.evictCacheEntry(`${folder}:${id}`); results.success++; },
+          onFailure: (id, msg) => { results.failed++; results.errors.push(`Failed to delete ${id} from ${folder}: ${msg}`); },
+          opName: 'Bulk delete-from-folder',
           folder,
           // Chunk the trailing EXPUNGE (Copilot review on #154) — see
           // bulkDeleteEmails. Bounds the command line; O(N/chunk) round-trips.
-          async () => {
+          finalize: async () => {
             for (const uidSet of chunkUidsForWire(flaggedForExpunge)) {
               await this.client!.messageDelete(uidSet, { uid: true });
             }
           },
-        );
+        });
       }
     } finally { lock.release(); }
 
