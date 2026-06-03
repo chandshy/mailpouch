@@ -12,6 +12,7 @@
 
 import { ImapFlow } from "imapflow";
 import { buildMime, type SeedEmail } from "../support/mime-builder.js";
+import { assertScratch } from "../support/scratch.js";
 
 export interface ImapFixturesOptions {
   host: string;
@@ -169,6 +170,18 @@ export class ImapFixtures {
   /** Build a MIME message from a SeedEmail and APPEND it. Returns the UID. */
   async appendSeed(folder: string, seed: SeedEmail, flags: string[] = []): Promise<number> {
     return this.appendEmail(folder, buildMime(seed), flags);
+  }
+
+  /** Delete a mailbox. Used by the safe-gate cleanup (which guards the path). */
+  async deleteMailbox(path: string): Promise<void> {
+    await this.withReconnect(async () => { await this.client.mailboxDelete(path); });
+  }
+
+  /** SAFE seed: APPEND only into a token-bearing scratch folder. Refuses any
+   *  non-scratch folder so the safe gate can never write into real mail. */
+  async appendScratch(folder: string, token: string, seed: SeedEmail, flags: string[] = []): Promise<number> {
+    assertScratch(folder, token);
+    return this.appendSeed(folder, seed, flags);
   }
 
   /** Return the UIDs present in `folder`, sorted ascending. Reconnects

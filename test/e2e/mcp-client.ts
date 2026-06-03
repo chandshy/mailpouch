@@ -25,6 +25,7 @@ import { buildPermissions } from "../../src/config/loader.js";
 import { localAgentId } from "../../src/agents/caller-context.js";
 import { buildBridgeTlsOptions, readPinnedBridgeCert } from "../../src/services/bridge-tls.js";
 import { ImapFixtures } from "./fixtures/imap-fixtures.js";
+import { ScratchSession } from "./support/scratch.js";
 import { GREENMAIL_IMAP_PORT, GREENMAIL_SMTP_PORT, TEST_USER } from "./support/docker.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -55,6 +56,13 @@ export interface E2EHarness {
    */
   resetState(): Promise<void>;
   close(): Promise<void>;
+  /** SAFE mode only: the token-scoped scratch namespace. Use `scratch.create()`
+   *  for folders and `imap.appendScratch(path, runToken, seed)` for messages —
+   *  cleanup on close() deletes only token-bearing folders. Undefined in the
+   *  destructive (wipe-based) modes. */
+  scratch?: ScratchSession;
+  /** SAFE mode only: the unique per-run token every scratch folder name carries. */
+  runToken?: string;
 }
 
 export type HarnessMode = "greenmail" | "bridge";
@@ -63,6 +71,10 @@ export interface StartE2EOptions {
   mode?: HarnessMode;
   /** Override Greenmail user. Ignored in bridge mode. */
   user?: { email: string; username: string; password: string };
+  /** SAFE (non-destructive) mode: never wipe; confine all activity to a
+   *  token-scoped scratch namespace. Defaults from MAILPOUCH_E2E_SAFE=1. The
+   *  only way to run the Bridge gate against a real account without erasing it. */
+  safe?: boolean;
 }
 
 /** MCP client name the harness connects under. Local-agent gating derives the
@@ -207,6 +219,9 @@ export async function startE2E(opts: StartE2EOptions = {}): Promise<E2EHarness> 
   //     scenarios re-run via `test:e2e:bridge` actually target Bridge)
   //   - else default to greenmail
   const mode = opts.mode ?? (bridgeConfigAvailable() ? "bridge" : "greenmail");
+  // SAFE mode never wipes — it confines everything to a token-scoped scratch
+  // namespace, so it's the only mode safe to run against a real Bridge account.
+  const safe = opts.safe ?? process.env.MAILPOUCH_E2E_SAFE === "1";
   const greenmailUser = opts.user ?? TEST_USER;
 
   let configPath: string;
@@ -252,6 +267,9 @@ export async function startE2E(opts: StartE2EOptions = {}): Promise<E2EHarness> 
     imapTls = bridgeImapTls(bridge);
     allowWipe = process.env.MAILPOUCH_E2E_ALLOW_WIPE === "1";
   }
+  // Safe mode NEVER wipes, regardless of backend — defense in depth on top of
+  // the token-scoped scratch namespace.
+  if (safe) allowWipe = false;
 
   // Greenmail provisions users with bare logins ("alice") but rejects
   // outbound SMTP when MAIL FROM lacks a domain. Real Bridge has full-email
@@ -299,6 +317,11 @@ export async function startE2E(opts: StartE2EOptions = {}): Promise<E2EHarness> 
   });
   await imap.connect();
 
+  // SAFE mode: a token-scoped scratch namespace. Preflight asserts the unique
+  // run token is not already present on the server, so cleanup is unambiguous.
+  const scratch = safe ? new ScratchSession(imap) : undefined;
+  if (scratch) await scratch.preflight();
+
   const call = (name: string, args: Record<string, unknown> = {}): Promise<CallResult> =>
     client.callTool({ name, arguments: args }) as Promise<CallResult>;
 
@@ -340,7 +363,11 @@ export async function startE2E(opts: StartE2EOptions = {}): Promise<E2EHarness> 
   };
 
   const resetState = async (): Promise<void> => {
-    await imap.wipe();
+    // SAFE mode never wipes — scenarios isolate via unique scratch folders. We
+    // still bounce the mailpouch connection online (read-only sync).
+    if (!safe) {
+      await imap.wipe();
+    }
     // sync_emails (and the get_emails fallback) calls ensureConnection() —
     // mutations don't, so without this the next move/star/delete will hit
     // "IMAP client not connected".
@@ -358,6 +385,15 @@ export async function startE2E(opts: StartE2EOptions = {}): Promise<E2EHarness> 
   };
 
   const close = async (): Promise<void> => {
+    // SAFE mode: delete this run's scratch folders (token-guarded) before
+    // closing. Best-effort — never throws, never touches a non-token folder.
+    if (scratch) {
+      try {
+        await scratch.cleanup();
+      } catch {
+        // ignore — best-effort cleanup
+      }
+    }
     try {
       await imap.close();
     } catch {
@@ -382,5 +418,5 @@ export async function startE2E(opts: StartE2EOptions = {}): Promise<E2EHarness> 
     }
   };
 
-  return { client, imap, call, callRaw, json, domainErrorText, isPermissionBlocked, resetState, close };
+  return { client, imap, call, callRaw, json, domainErrorText, isPermissionBlocked, resetState, close, scratch, runToken: scratch?.token };
 }
