@@ -8,6 +8,53 @@
 import type { ParsedMail, Attachment, AddressObject } from "mailparser";
 import type { EmailMessage } from "../types/index.js";
 
+/** Per-source-folder record of a bulk move/copy: which UIDs the server accepted,
+ *  their captured Message-IDs, the UIDs UIDPLUS confirmed relocated, and whether
+ *  the server returned a COPYUID map at all. */
+export interface RelocationJob {
+  accepted: string[];
+  midMap: Map<string, string>;
+  relocated: Set<string>;
+  uidplus: boolean;
+  /** Source folder (move only) — woven into the failure message. */
+  folder?: string;
+}
+
+/**
+ * Honest verified-landing check for bulk move/copy. A relocation counts as
+ * success ONLY if the server's UIDPLUS COPYUID map confirmed it, or (no UIDPLUS)
+ * the message's Message-ID is found in the target. Anything else is a failure —
+ * never an assumed success — which is what catches the silent All-Mail-union
+ * no-op (Bug A). Was duplicated verbatim in bulkMoveEmails + bulkCopyToFolder.
+ */
+export async function verifyRelocatedMessages(
+  jobs: RelocationJob[],
+  targetFolder: string,
+  findMessageIdsInFolder: (folder: string, mids: string[]) => Promise<Set<string>>,
+  makeError: (uid: string, sourceFolder: string | undefined) => string,
+): Promise<{ success: number; failed: number; errors: string[] }> {
+  const out = { success: 0, failed: 0, errors: [] as string[] };
+  for (const job of jobs) {
+    if (job.accepted.length === 0) continue;
+    let found = new Set<string>();
+    if (!job.uidplus) {
+      const mids = job.accepted
+        .filter((u) => !job.relocated.has(u))
+        .map((u) => job.midMap.get(u))
+        .filter((m): m is string => !!m);
+      if (mids.length > 0) {
+        try { found = await findMessageIdsInFolder(targetFolder, mids); } catch { /* unverifiable → failure below */ }
+      }
+    }
+    for (const uid of job.accepted) {
+      const mid = job.midMap.get(uid);
+      if (job.relocated.has(uid) || (!job.uidplus && mid && found.has(mid))) out.success++;
+      else { out.failed++; out.errors.push(makeError(uid, job.folder)); }
+    }
+  }
+  return out;
+}
+
 /** Strip HTML to plain text. Decodes entities BEFORE stripping tags (PARSE-008)
  *  so encoded `&lt;script&gt;…` can't survive as literal markup, and drops HTML
  *  comments up front (PARSE-009) so their inner text doesn't leak as prose. */

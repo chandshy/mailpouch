@@ -7,7 +7,7 @@ import { readFileSync, statSync } from 'fs';
 import { join as pathJoin } from 'path';
 import type { ParsedMail, Attachment, AddressObject } from 'mailparser';
 import { simpleParser } from 'mailparser';
-import { buildEmailMessage, truncateBody, stripHtml, normalizeAddressList } from './imap-helpers.js';
+import { buildEmailMessage, verifyRelocatedMessages, truncateBody, stripHtml, normalizeAddressList } from './imap-helpers.js';
 // Re-export the pure helpers from their original home so existing importers
 // (index.ts, tests) keep working after the move to imap-helpers.ts.
 export { stripHtml, normalizeAddressList };
@@ -2322,25 +2322,14 @@ export class SimpleIMAPService {
     // Verify each move actually landed in the target. Primary signal: the
     // server's UIDPLUS COPYUID map; Message-ID search only as a no-UIDPLUS
     // fallback. Unverifiable → failure, never an assumed success.
-    for (const job of verifyJobs) {
-      if (job.accepted.length === 0) continue;
-      let found = new Set<string>();
-      if (!job.uidplus) {
-        const mids = job.accepted.filter(u => !job.relocated.has(u)).map(u => job.midMap.get(u)).filter((m): m is string => !!m);
-        if (mids.length > 0) {
-          try { found = await this.findMessageIdsInFolder(targetFolder, mids); } catch { /* unverifiable → failure below */ }
-        }
-      }
-      for (const uid of job.accepted) {
-        const mid = job.midMap.get(uid);
-        if (job.relocated.has(uid) || (!job.uidplus && mid && found.has(mid))) {
-          results.success++;
-        } else {
-          results.failed++;
-          results.errors.push(`Move of UID ${uid} from ${job.folder} to ${targetFolder} was accepted but could not be verified present in the target — likely a no-op from a union mailbox (e.g. All Mail). Pass the message's real source folder.`);
-        }
-      }
-    }
+    const verified = await verifyRelocatedMessages(
+      verifyJobs, targetFolder,
+      (f, mids) => this.findMessageIdsInFolder(f, mids),
+      (uid, src) => `Move of UID ${uid} from ${src} to ${targetFolder} was accepted but could not be verified present in the target — likely a no-op from a union mailbox (e.g. All Mail). Pass the message's real source folder.`,
+    );
+    results.success += verified.success;
+    results.failed += verified.failed;
+    results.errors.push(...verified.errors);
 
     tags.successCount = results.success;
     tags.failCount = results.failed;
@@ -2845,25 +2834,14 @@ export class SimpleIMAPService {
     // search. A copy the server "accepted" but didn't perform (the silent
     // All-Mail no-op) is an honest failure, never a false success — and a
     // message we simply cannot verify is also a failure, not an assumed success.
-    for (const job of verifyJobs) {
-      if (job.accepted.length === 0) continue;
-      let found = new Set<string>();
-      if (!job.uidplus) {
-        const mids = job.accepted.filter(u => !job.relocated.has(u)).map(u => job.midMap.get(u)).filter((m): m is string => !!m);
-        if (mids.length > 0) {
-          try { found = await this.findMessageIdsInFolder(targetFolder, mids); } catch { /* unverifiable → failure below */ }
-        }
-      }
-      for (const uid of job.accepted) {
-        const mid = job.midMap.get(uid);
-        if (job.relocated.has(uid) || (!job.uidplus && mid && found.has(mid))) {
-          results.success++;
-        } else {
-          results.failed++;
-          results.errors.push(`Copy of UID ${uid} to ${targetFolder} was accepted but could not be verified present there — likely a no-op from a union mailbox (e.g. All Mail). Pass the message's real source folder, or verify the target label exists.`);
-        }
-      }
-    }
+    const verified = await verifyRelocatedMessages(
+      verifyJobs, targetFolder,
+      (f, mids) => this.findMessageIdsInFolder(f, mids),
+      (uid) => `Copy of UID ${uid} to ${targetFolder} was accepted but could not be verified present there — likely a no-op from a union mailbox (e.g. All Mail). Pass the message's real source folder, or verify the target label exists.`,
+    );
+    results.success += verified.success;
+    results.failed += verified.failed;
+    results.errors.push(...verified.errors);
     tags.successCount = results.success; tags.failCount = results.failed;
     if (results.success > 0) this.clearFolderCache(); // target counts changed → next get_folders refetches
     logger.info(`Bulk copy completed: ${results.success}/${results.failed}`, 'IMAPService');

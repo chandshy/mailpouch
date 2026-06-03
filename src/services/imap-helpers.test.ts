@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import type { ParsedMail } from "mailparser";
-import { buildEmailMessage, stripHtml, truncateBody, normalizeAddressList } from "./imap-helpers.js";
+import { buildEmailMessage, verifyRelocatedMessages, stripHtml, truncateBody, normalizeAddressList } from "./imap-helpers.js";
+import type { RelocationJob } from "./imap-helpers.js";
 
 /** Minimal ParsedMail factory — only the fields buildEmailMessage reads. */
 function parsed(over: Partial<ParsedMail> & { headerEntries?: [string, unknown][] } = {}): ParsedMail {
@@ -129,5 +130,49 @@ describe("stripHtml / truncateBody / normalizeAddressList (moved, unchanged)", (
     expect(normalizeAddressList(undefined)).toEqual([]);
     expect(normalizeAddressList(addr("a@x.com"))).toEqual(["a@x.com"]);
     expect(normalizeAddressList([addr("a@x.com"), addr("b@x.com")])).toEqual(["a@x.com", "b@x.com"]);
+  });
+});
+
+describe("verifyRelocatedMessages", () => {
+  const noFind = async () => new Set<string>();
+  const err = (uid: string, src?: string) => `fail ${uid} from ${src ?? "?"}`;
+  const job = (o: Partial<RelocationJob>): RelocationJob => ({
+    accepted: [], midMap: new Map(), relocated: new Set(), uidplus: false, ...o,
+  });
+
+  it("UIDPLUS-confirmed relocations succeed (no Message-ID search needed)", async () => {
+    const r = await verifyRelocatedMessages(
+      [job({ accepted: ["1", "2"], relocated: new Set(["1", "2"]), uidplus: true })],
+      "Folders/X", noFind, err,
+    );
+    expect(r).toEqual({ success: 2, failed: 0, errors: [] });
+  });
+
+  it("no UIDPLUS: success only when the Message-ID is found in the target", async () => {
+    const find = async (_f: string, mids: string[]) => new Set(mids.filter((m) => m === "mid-1"));
+    const r = await verifyRelocatedMessages(
+      [job({ accepted: ["1", "2"], midMap: new Map([["1", "mid-1"], ["2", "mid-2"]]), uidplus: false, folder: "All Mail" })],
+      "Folders/X", find, err,
+    );
+    expect(r.success).toBe(1);
+    expect(r.failed).toBe(1);
+    expect(r.errors).toEqual(["fail 2 from All Mail"]);
+  });
+
+  it("a silent no-op (accepted, nothing lands) is an honest failure, never success", async () => {
+    const r = await verifyRelocatedMessages(
+      [job({ accepted: ["9"], midMap: new Map([["9", "mid-9"]]), uidplus: false, folder: "All Mail" })],
+      "Folders/X", noFind, err,
+    );
+    expect(r).toEqual({ success: 0, failed: 1, errors: ["fail 9 from All Mail"] });
+  });
+
+  it("a thrown Message-ID search degrades to failure, not a crash", async () => {
+    const find = async () => { throw new Error("boom"); };
+    const r = await verifyRelocatedMessages(
+      [job({ accepted: ["1"], midMap: new Map([["1", "mid-1"]]), uidplus: false })],
+      "Folders/X", find, err,
+    );
+    expect(r.failed).toBe(1);
   });
 });
