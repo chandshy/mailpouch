@@ -2069,6 +2069,19 @@ export class SimpleIMAPService {
         return true;
       }
 
+      // From the All Mail union a MOVE no-ops — you cannot remove a message from
+      // the union (Bridge maps MOVE to add-target-label + remove-source-label;
+      // the remove half is meaningless here). The supported, verified operation
+      // is the add-label half: COPY the message into the target. This files an
+      // All-Mail-only (archived) message into a folder (or applies a label).
+      // A message in a REAL folder never reaches here — getEmailById resolves
+      // its true folder when sourceFolder is omitted (so it takes the MOVE path)
+      // — which also avoids COPY's add-without-remove leaving a second folder.
+      if (this.isAllMailFolder({ path: folder })) {
+        logger.info(`Email ${emailId} sourced from the All Mail union; filing into ${targetFolder} via COPY (MOVE no-ops from the union)`, 'IMAPService');
+        return this.copyEmailToFolder(emailId, targetFolder, folder);
+      }
+
       let movedMid: string | undefined;
       const relocated = new Set<string>();
       let uidplus = false;
@@ -2395,6 +2408,17 @@ export class SimpleIMAPService {
       // move silently while moving nothing). Count as success, don't issue it.
       if (this.isSameLocation(folder, targetFolder)) {
         for (let i = 0; i < ids.length; i++) results.success++;
+        continue;
+      }
+      // From the All Mail union, MOVE no-ops — file via COPY (the add-label
+      // half), verified-landing. Files All-Mail-only (archived) mail into a
+      // folder / applies a label. Foldered mail resolves to its real folder
+      // (when sourceFolder is omitted) and takes the MOVE path below.
+      if (this.isAllMailFolder({ path: folder })) {
+        const copied = await this.bulkCopyToFolder(ids, targetFolder, folder);
+        results.success += copied.success;
+        results.failed += copied.failed;
+        results.errors.push(...copied.errors);
         continue;
       }
       const lock = await this.client.getMailboxLock(folder);

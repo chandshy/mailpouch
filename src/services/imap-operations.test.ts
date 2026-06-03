@@ -529,6 +529,17 @@ describe("SimpleIMAPService.moveEmail", () => {
     expect(client.messageMove).not.toHaveBeenCalled();
   });
 
+  it("from the All Mail union, files via COPY (MOVE no-ops from the union)", async () => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc);
+    seedUids(client, "All Mail", [700]);
+    const result = await svc.moveEmail("700", "Folders/Tech", "All Mail");
+    expect(result).toBe(true);
+    // Filed via COPY (add-label) — never MOVE, which no-ops from the union.
+    expect(client.messageCopy).toHaveBeenCalledWith("700", "Folders/Tech", { uid: true });
+    expect(client.messageMove).not.toHaveBeenCalled();
+  });
+
   it("evicts old cache entry on move (UID is not stable across folders)", async () => {
     const svc = new SimpleIMAPService();
     const client = connectSvc(svc);
@@ -812,6 +823,17 @@ describe("SimpleIMAPService.bulkMoveEmails", () => {
     const results = await svc.bulkMoveEmails(["80", "81"], "All Mail", "All Mail");
     expect(results.success).toBe(2);
     expect(results.failed).toBe(0);
+    expect(client.messageMove).not.toHaveBeenCalled();
+  });
+
+  it("from the All Mail union, bulk-files via COPY (MOVE no-ops from the union)", async () => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc);
+    seedUids(client, "All Mail", [701, 702]);
+    const results = await svc.bulkMoveEmails(["701", "702"], "Folders/Tech", "All Mail");
+    expect(results.success).toBe(2);
+    expect(results.failed).toBe(0);
+    expect(client.messageCopy).toHaveBeenCalled();
     expect(client.messageMove).not.toHaveBeenCalled();
   });
 
@@ -2665,10 +2687,13 @@ describe("SimpleIMAPService move/copy honest verification (Bug A, All Mail sourc
     expect(bad.failed).toBe(2);
   });
 
-  it("bulkMoveEmails reports FAILURE when the move resolves but the message is absent from the target", async () => {
+  it("bulkMoveEmails from All Mail reports FAILURE when the COPY-file resolves but nothing lands", async () => {
     const svc = new SimpleIMAPService();
     const client = connectSvc(svc);
-    clientState(client).silentNoOp.move = true; // Bridge accepts MOVE from All Mail but does nothing
+    // From the All Mail union, bulkMoveEmails files via COPY (MOVE no-ops there).
+    // A copy the union accepts but doesn't perform must be an honest failure,
+    // never a false success.
+    clientState(client).silentNoOp.copy = true;
     seedUids(client, "All Mail", [10, 11, 12]);
 
     const results = await svc.bulkMoveEmails(["10", "11", "12"], "Folders/Work", "All Mail");
@@ -2678,7 +2703,7 @@ describe("SimpleIMAPService move/copy honest verification (Bug A, All Mail sourc
     expect(results.errors.join(" ")).toMatch(/not present|All Mail|union/i);
   });
 
-  it("bulkMoveEmails from a non-INBOX source verifies landing and succeeds (real move)", async () => {
+  it("bulkMoveEmails from All Mail files via COPY and verifies landing (success)", async () => {
     const svc = new SimpleIMAPService();
     const client = connectSvc(svc);
     seedUids(client, "All Mail", [10, 11, 12]);
@@ -2687,6 +2712,8 @@ describe("SimpleIMAPService move/copy honest verification (Bug A, All Mail sourc
 
     expect(results.success).toBe(3);
     expect(results.failed).toBe(0);
+    expect(client.messageCopy).toHaveBeenCalled();
+    expect(client.messageMove).not.toHaveBeenCalled();
   });
 });
 
