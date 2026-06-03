@@ -51,7 +51,7 @@ export const defs: ToolDef[] = [
                 description: "Proton Bridge classification: system mailbox, user-created folder, or label (Labels/ prefix).",
               },
             },
-            required: ["name", "path", "totalMessages", "unreadMessages"],
+            required: ["name", "path", "totalMessages", "unreadMessages", "folderType"],
           },
         },
       },

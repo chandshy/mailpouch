@@ -22,9 +22,10 @@ describe("get_folders tool contract", () => {
     expect(props.properties.folderType).toBeDefined();
     expect((props.properties.folderType as { enum: string[] }).enum)
       .toEqual(["system", "user-folder", "label"]);
-    // The four always-present scalars stay required; the classification fields
-    // are optional (ordinary folders have no specialUse).
-    expect(props.required).toEqual(["name", "path", "totalMessages", "unreadMessages"]);
+    // folderType is always populated by the service, so the contract requires it;
+    // specialUse stays optional (ordinary folders have none).
+    expect(props.required).toEqual(["name", "path", "totalMessages", "unreadMessages", "folderType"]);
+    expect(props.required).toContain("folderType");
     expect(props.required).not.toContain("specialUse");
   });
 

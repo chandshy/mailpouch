@@ -2691,12 +2691,6 @@ export class SimpleIMAPService {
   }
 
   /**
-   * Create a mailbox if it does not already exist; no-op when it is present.
-   * Used by the label tools so "move/copy to label X" actually creates label X
-   * when missing (the COPY would otherwise target a nonexistent Labels/<name>,
-   * which Bridge may silently no-op).
-   */
-  /**
    * Proton shares ONE namespace across `Folders/` and `Labels/`, so a leaf name
    * is unique across both — creating `Labels/Tech` when `Folders/Tech` exists
    * collides. Returns true if `folderName` (exact path) or its leaf already
@@ -2715,6 +2709,12 @@ export class SimpleIMAPService {
     });
   }
 
+  /**
+   * Create a mailbox if it does not already exist; no-op when it is present.
+   * Used by the label tools so "move/copy to label X" actually creates label X
+   * when missing (the COPY would otherwise target a nonexistent Labels/<name>,
+   * which Bridge may silently no-op).
+   */
   async ensureFolderExists(folderName: string): Promise<void> {
     this.validateFolderName(folderName);
     if (!this.isConnected || !this.client) throw new Error('IMAP client not connected');
