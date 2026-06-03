@@ -2097,8 +2097,17 @@ export class SimpleIMAPService {
       return grouped;
     }
     for (const id of emailIds) {
+      // Keep ID-format validation distinct from discovery/transport failure so the
+      // error message names the real cause: a malformed ID the caller must fix vs.
+      // an IMAP discovery error the caller may retry.
       try {
         this.validateEmailId(id);
+      } catch (e: unknown) {
+        results.failed++;
+        results.errors.push(`Invalid email ID ${id}: ${e instanceof Error ? e.message : String(e)}`);
+        continue;
+      }
+      try {
         const cached = this.findCacheEntryByUid(id);
         let folder: string;
         if (cached) {
@@ -2112,7 +2121,7 @@ export class SimpleIMAPService {
         grouped.get(folder)!.push(id);
       } catch (e: unknown) {
         results.failed++;
-        results.errors.push(`Invalid email ID ${id}: ${e instanceof Error ? e.message : String(e)}`);
+        results.errors.push(`Failed to locate email ${id}: ${e instanceof Error ? e.message : String(e)}`);
       }
     }
     return grouped;

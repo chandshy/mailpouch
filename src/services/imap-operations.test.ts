@@ -2140,6 +2140,19 @@ describe("v3.0.44 sibling-path fixes (IMAP-003 / IMAP-006 / IMAP-008 / IMAP-009)
     expect(results.errors[0]).toMatch(/Email 99 not found in any folder/);
   });
 
+  it("bulkMarkRead surfaces discovery transport errors distinctly from ID-format errors", async () => {
+    const svc = new SimpleIMAPService();
+    connectSvc(svc);
+    vi.spyOn(svc, "getEmailById").mockRejectedValue(new Error("IMAP FETCH failed"));
+
+    const results = await svc.bulkMarkRead(["55"], true);
+
+    expect(results.failed).toBe(1);
+    // A valid-format ID that fails during discovery must NOT be mislabeled "Invalid email ID".
+    expect(results.errors[0]).toMatch(/Failed to locate email 55/);
+    expect(results.errors[0]).not.toMatch(/Invalid email ID/);
+  });
+
   it("bulkStar without sourceFolder discovers folder via getEmailById", async () => {
     const svc = new SimpleIMAPService();
     const client = connectSvc(svc);

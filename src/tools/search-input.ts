@@ -64,16 +64,21 @@ export function validateSearchInput(
   if (args.limit !== undefined && typeof args.limit !== "number") {
     throw new McpError(ErrorCode.InvalidParams, "'limit' must be a number.");
   }
-  if (args.dateFrom !== undefined && typeof args.dateFrom !== "string") {
-    throw new McpError(ErrorCode.InvalidParams, "'dateFrom' must be a string when provided.");
+  // TOOL-017: dateFrom/dateTo must be a string AND parseable when provided — same
+  // contract as sentBefore/sentSince below. The old type-only check let
+  // {dateFrom:"not-a-date"} pass through and be silently dropped downstream.
+  if (args.dateFrom !== undefined &&
+      (typeof args.dateFrom !== "string" || Number.isNaN(Date.parse(args.dateFrom)))) {
+    throw new McpError(ErrorCode.InvalidParams, "'dateFrom' must be a parseable date string when provided.");
   }
-  if (args.dateTo !== undefined && typeof args.dateTo !== "string") {
-    throw new McpError(ErrorCode.InvalidParams, "'dateTo' must be a string when provided.");
+  if (args.dateTo !== undefined &&
+      (typeof args.dateTo !== "string" || Number.isNaN(Date.parse(args.dateTo)))) {
+    throw new McpError(ErrorCode.InvalidParams, "'dateTo' must be a parseable date string when provided.");
   }
   if (args.dateFrom && args.dateTo) {
     const dfTs = Date.parse(args.dateFrom as string);
     const dtTs = Date.parse(args.dateTo as string);
-    if (!isNaN(dfTs) && !isNaN(dtTs) && dfTs > dtTs) {
+    if (dfTs > dtTs) {
       throw new McpError(ErrorCode.InvalidParams, "'dateFrom' must not be later than 'dateTo'.");
     }
   }

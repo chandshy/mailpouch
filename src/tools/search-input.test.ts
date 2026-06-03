@@ -46,4 +46,13 @@ describe("validateSearchInput", () => {
     expect(() => validateSearchInput({ dateFrom: "2026-06-10", dateTo: "2026-06-01" }, MAX))
       .toThrow(/must not be later than/);
   });
+
+  it("TOOL-017: rejects unparseable dateFrom/dateTo; accepts valid", () => {
+    expect(() => validateSearchInput({ dateFrom: "not-a-date" }, MAX)).toThrow(/parseable date string/);
+    expect(() => validateSearchInput({ dateTo: "garbage" }, MAX)).toThrow(/parseable date string/);
+    expect(() => validateSearchInput({ dateFrom: 1234 }, MAX)).toThrow(/parseable date string/);
+    const o = validateSearchInput({ dateFrom: "2026-06-01", dateTo: "2026-06-10" }, MAX);
+    expect(o.dateFrom).toBe("2026-06-01");
+    expect(o.dateTo).toBe("2026-06-10");
+  });
 });
