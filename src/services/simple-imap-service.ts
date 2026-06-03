@@ -1212,10 +1212,17 @@ export class SimpleIMAPService {
     }
 
     try {
-      // If a folder hint is provided, only look there; otherwise scan all folders
+      // If a folder hint is provided, only look there; otherwise scan all
+      // folders — but search the "All Mail" union LAST. All Mail holds every
+      // message, so scanning it first reports `folder:"All Mail"` for messages
+      // that actually live in a real folder (the union masks the true
+      // location). Real folders win; All Mail is the fallback only for mail
+      // that genuinely exists nowhere else (true archive).
       const foldersToSearch = folderHint
-        ? [{ path: folderHint }]
-        : await this.getFolders();
+        ? [{ path: folderHint } as { path: string; specialUse?: string | null }]
+        : [...await this.getFolders()].sort(
+            (a, b) => (this.isAllMailFolder(a) ? 1 : 0) - (this.isAllMailFolder(b) ? 1 : 0),
+          );
 
       for (const folder of foldersToSearch) {
         const lock = await this.client.getMailboxLock(folder.path);
@@ -2499,6 +2506,13 @@ export class SimpleIMAPService {
    *  issue the move. */
   private isSameLocation(a: string, b: string): boolean {
     return a.trim() === b.trim();
+  }
+
+  /** True if a folder is the "All Mail" union (specialUse \All, or the literal
+   *  path). All Mail holds EVERY message, so it must be searched LAST when
+   *  resolving a message's folder — otherwise it masks the real location. */
+  private isAllMailFolder(f: { path?: string; specialUse?: string | null }): boolean {
+    return f.specialUse === "\\All" || (f.path ?? "").trim() === "All Mail";
   }
 
   /**

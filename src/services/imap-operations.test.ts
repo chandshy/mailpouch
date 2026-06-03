@@ -2747,3 +2747,35 @@ describe("SimpleIMAPService.searchEmails freshness (cluster 7 / O1, v3.0.71)", (
     expect(results).toHaveLength(0);
   });
 });
+
+// ─── getEmailById folder resolution (#1: All Mail union must not mask the real folder) ───
+describe("SimpleIMAPService.getEmailById — All Mail must not mask the real folder", () => {
+  const folderList = [
+    { path: "All Mail", name: "All Mail", delimiter: "/", flags: new Set(), specialUse: "\\All" },
+    { path: "Folders/Tech", name: "Tech", delimiter: "/", flags: new Set(), specialUse: undefined },
+  ];
+
+  it("returns the real folder (not 'All Mail') when the message exists in both", async () => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc, {
+      list: vi.fn().mockResolvedValue(folderList),
+      status: vi.fn().mockResolvedValue({ messages: 1, unseen: 0 }),
+    });
+    // Same UID present in the union AND the real folder — All Mail scanned last.
+    seedMessage(client, "All Mail", 900, { subject: "filed message" });
+    seedMessage(client, "Folders/Tech", 900, { subject: "filed message" });
+    const email = await svc.getEmailById("900");
+    expect(email?.folder).toBe("Folders/Tech");
+  });
+
+  it("falls back to 'All Mail' for a message that exists ONLY there (true archive)", async () => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc, {
+      list: vi.fn().mockResolvedValue(folderList),
+      status: vi.fn().mockResolvedValue({ messages: 1, unseen: 0 }),
+    });
+    seedMessage(client, "All Mail", 901, { subject: "archived message" });
+    const email = await svc.getEmailById("901");
+    expect(email?.folder).toBe("All Mail");
+  });
+});
