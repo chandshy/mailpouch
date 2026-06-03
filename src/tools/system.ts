@@ -157,12 +157,38 @@ export const handlers: Record<string, ToolHandler> = {
     const { imapService, smtpService, ok, config, state } = ctx;
     const { configExists, getConfigPath } = await import("../config/loader.js");
     const smtpBackoffMs = smtpService.backoff.delayUntilMs();
+
+    // #6b: probe SMTP auth LIVE (mirrors IMAP's healthCheck below) so status
+    // can't report "connected" while sends fail. Skip while in backoff — a probe
+    // would add to the abuse signal, and backoff already means "not usable now".
+    let smtpConnected: boolean;
+    let smtpError: string | undefined = state.smtpStatus.error;
+    let smtpLastCheck = state.smtpStatus.lastCheck;
+    if (smtpService.backoff.isBlocked() || smtpService.initError) {
+      smtpConnected = false;
+    } else {
+      let probeErr: string | undefined;
+      const verify = smtpService.verifyConnection().then(() => true).catch((e: unknown) => {
+        probeErr = e instanceof Error ? e.message : String(e);
+        return false;
+      });
+      const timeout = new Promise<boolean>((res) => setTimeout(() => {
+        probeErr = probeErr ?? "SMTP auth probe timed out";
+        res(false);
+      }, 8000));
+      smtpConnected = await Promise.race([verify, timeout]);
+      smtpError = smtpConnected ? undefined : (probeErr ?? smtpError);
+      smtpLastCheck = new Date();
+      // Keep the shared snapshot honest for other readers.
+      state.smtpStatus = { connected: smtpConnected, lastCheck: smtpLastCheck, ...(smtpError ? { error: smtpError } : {}) };
+    }
+
     const status = {
       smtp: {
-        connected: state.smtpStatus.connected,
+        connected: smtpConnected,
         host: config.smtp.host,
         port: config.smtp.port,
-        lastCheck: state.smtpStatus.lastCheck.toISOString(),
+        lastCheck: smtpLastCheck.toISOString(),
         insecureTls: smtpService.insecureTls,
         backoff: {
           active: smtpService.backoff.isBlocked(),
@@ -170,7 +196,7 @@ export const handlers: Record<string, ToolHandler> = {
           remainingMs: smtpBackoffMs,
         },
         ...(smtpService.initError ? { initError: smtpService.initError } : {}),
-        ...(state.smtpStatus.error ? { error: state.smtpStatus.error } : {}),
+        ...(smtpError ? { error: smtpError } : {}),
       },
       imap: {
         connected: imapService.isActive(),
@@ -191,7 +217,12 @@ export const handlers: Record<string, ToolHandler> = {
     const initErrorWarning = smtpService.initError
       ? `\n\u26a0 SMTP is not ready: ${smtpService.initError}`
       : "";
-    return ok(status, JSON.stringify(status) + insecureTlsWarning + backoffWarning + initErrorWarning);
+    // #6b: a genuine live-probe auth failure (not backoff/init) \u2014 sending is
+    // broken. Surface it so an agent doesn't trust a green status before sending.
+    const smtpAuthWarning = (!smtpConnected && !smtpService.backoff.isBlocked() && !smtpService.initError)
+      ? `\n\u26a0 SMTP authentication failed \u2014 sending is currently broken${smtpError ? `: ${smtpError}` : ""}. Fix the Bridge password in Settings \u2192 Connection.`
+      : "";
+    return ok(status, JSON.stringify(status) + insecureTlsWarning + backoffWarning + initErrorWarning + smtpAuthWarning);
   },
 
   sync_emails: async (ctx) => {

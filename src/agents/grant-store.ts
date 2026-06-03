@@ -206,9 +206,16 @@ export class AgentGrantStore {
         transport: "http",
         note: "service account (client_credentials)",
       };
+      // No-op re-verify of an already-active service grant: this runs on EVERY
+      // client_credentials login, so re-emitting a "grant-approved" event here
+      // spammed a notification/toast on each re-auth (e.g. cowork reconnecting).
+      // Only notify on a real transition — first creation, or (re)activation of
+      // a grant that wasn't already active.
+      const wasActive = existing?.status === "active";
       this.grants.set(args.clientId, grant);
       this.persist();
-      notifications.emitGrantChanged(existing ? "grant-approved" : "grant-created", grant);
+      if (!existing) notifications.emitGrantChanged("grant-created", grant);
+      else if (!wasActive) notifications.emitGrantChanged("grant-approved", grant);
       return grant;
     });
   }

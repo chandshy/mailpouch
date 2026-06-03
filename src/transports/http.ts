@@ -87,6 +87,12 @@ export interface HttpTransportOptions {
    * Their matching active AgentGrant is ensured by the caller at startup.
    */
   serviceAccounts?: ServiceAccountStore;
+  /**
+   * Optional path for persisting issued OAuth access-token hashes so they
+   * survive a daemon restart (field finding #7). Only hashes + metadata are
+   * written (0600) — never raw bearers. When omitted, tokens are in-memory only.
+   */
+  oauthTokensPath?: string;
 }
 
 export interface HttpTransportHandle {
@@ -249,7 +255,7 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
     );
   }
 
-  const oauthStore = new OAuthStore();
+  const oauthStore = new OAuthStore(opts.oauthTokensPath);
   // Register persisted service accounts as client_credentials clients so their
   // token-authenticated calls resolve to a human-readable client_name. Identity
   // is still the service-account store; this is display + metadata only.

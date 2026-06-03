@@ -30,6 +30,7 @@ export class ConnectionStateError extends Error {
 /** Stable, machine-stable error categories surfaced to callers. */
 export type ErrorCategory =
   | "not_found" // a folder/label/mailbox does not exist
+  | "conflict" // a folder/label with that name already exists (Proton 409 / ALREADYEXISTS)
   | "auth" // IMAP/SMTP authentication failed
   | "connection" // connection lost / unavailable
   | "timeout" // operation timed out
@@ -103,6 +104,23 @@ export function classifyError(
       message: folderLabel
         ? `Folder/label '${folderLabel}' not found.`
         : "The requested folder or label was not found.",
+    };
+  }
+
+  // ── name conflict (folder/label already exists) ──────────────────────────
+  // Proton shares ONE namespace across folders and labels, so creating a name
+  // that exists in either returns the Proton 409 (Code=2500) / IMAP
+  // ALREADYEXISTS. Surface it as actionable instead of "internal".
+  if (
+    hay.includes("alreadyexists") ||
+    hay.includes("already exists") ||
+    hay.includes("code=2500")
+  ) {
+    return {
+      category: "conflict",
+      message: folderLabel
+        ? `A folder or label named '${folderLabel}' already exists. Proton shares one namespace across folders and labels, so the name can't be reused.`
+        : "A folder or label with that name already exists (Proton shares one namespace across folders and labels).",
     };
   }
 

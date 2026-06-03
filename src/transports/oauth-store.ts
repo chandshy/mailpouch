@@ -1,20 +1,19 @@
 /**
  * In-memory stores for the OAuth 2.1 authorization server.
  *
- * All state is process-local — matching mailpouch's single-user design.
- * A restart drops outstanding auth codes (short TTL anyway) and tokens
- * (requiring clients to re-auth); registered DCR clients are re-provisioned
- * on demand because MCP hosts will call the register endpoint again.
+ * Codes (60s TTL) and DCR clients are process-local: a restart drops codes
+ * (short-lived anyway) and clients re-register on demand.
  *
- * Rationale for not persisting to disk:
- *   - Keeps the attack surface small (no on-disk tokens to leak).
- *   - Tokens in this deployment are long-lived enough for an interactive
- *     session but re-issue is cheap.
- *   - Persistence is a follow-up PR when we tackle multi-instance or
- *     survivable restarts.
+ * Issued ACCESS TOKENS are optionally persisted (when the store is constructed
+ * with a path) so they survive a daemon restart — without persistence, a
+ * restart dropped the in-memory Map and 401'd every live token, silently
+ * breaking headless / static-config clients (field finding #7). Only the token
+ * HASH (the Map key) + metadata are written to disk (0600, atomic) — never the
+ * raw bearer — so a leaked file cannot be replayed as a credential.
  */
 
 import { createHash, randomBytes, randomUUID } from "crypto";
+import { readFileSync, writeFileSync, existsSync, renameSync } from "fs";
 
 export interface RegisteredClient {
   client_id: string;
@@ -89,6 +88,49 @@ export class OAuthStore {
    *  waiting for the 24 h TTL to expire. Kept consistent with `tokens` via the
    *  issueToken / revokeToken / evict / sweep paths. */
   private tokensByClient = new Map<string, Set<string>>();
+
+  /**
+   * Optional on-disk persistence of ISSUED TOKENS so they survive a daemon
+   * restart (XPORT/#7 — a restart used to drop the in-memory Map and 401 every
+   * live token, silently breaking headless/static-config clients). Only the
+   * token HASH (the Map key) + metadata are written — never the raw bearer — so
+   * a leaked file cannot be replayed as a credential. Codes (60s TTL) and DCR
+   * clients are intentionally NOT persisted.
+   */
+  constructor(private readonly persistPath?: string) {
+    if (persistPath) this.load();
+  }
+
+  private load(): void {
+    try {
+      if (!this.persistPath || !existsSync(this.persistPath)) return;
+      const raw = JSON.parse(readFileSync(this.persistPath, "utf-8")) as { tokens?: Array<{ h: string; r: IssuedToken }> };
+      const now = Date.now();
+      for (const entry of raw.tokens ?? []) {
+        const { h, r } = entry;
+        if (!h || !r || typeof r.expiresAt !== "number" || now > r.expiresAt) continue;
+        this.tokens.set(h, r);
+        let set = this.tokensByClient.get(r.clientId);
+        if (!set) { set = new Set(); this.tokensByClient.set(r.clientId, set); }
+        set.add(h);
+      }
+    } catch {
+      // Corrupt/unreadable token store → start fresh (clients re-auth). Never throw.
+    }
+  }
+
+  private persist(): void {
+    if (!this.persistPath) return;
+    try {
+      // Hashes only — the raw bearer is blanked so a leaked file can't be replayed.
+      const tokens = Array.from(this.tokens.entries()).map(([h, r]) => ({ h, r: { ...r, token: "" } }));
+      const tmp = `${this.persistPath}.${randomBytes(6).toString("hex")}.tmp`;
+      writeFileSync(tmp, JSON.stringify({ version: 1, tokens }), { mode: 0o600 });
+      renameSync(tmp, this.persistPath);
+    } catch {
+      // Best-effort — a failed persist must not break token issuance/verification.
+    }
+  }
 
   /** sha256(token) hex — the key under which a token's record lives. */
   private static hashToken(token: string): string {
@@ -182,6 +224,7 @@ export class OAuthStore {
     }
     this.tokens.set(OAuthStore.hashToken(token), rec);
     this.indexToken(rec);
+    this.persist();
     return rec;
   }
 
@@ -202,6 +245,7 @@ export class OAuthStore {
     const rec = this.tokens.get(hash);
     const removed = this.tokens.delete(hash);
     if (removed && rec) this.unindexToken(hash, rec.clientId);
+    if (removed) this.persist();
     return removed;
   }
 
@@ -217,6 +261,7 @@ export class OAuthStore {
       if (this.tokens.delete(token)) n++;
     }
     this.tokensByClient.delete(clientId);
+    if (n > 0) this.persist();
     return n;
   }
 
@@ -240,6 +285,7 @@ export class OAuthStore {
         tokens++;
       }
     }
+    if (tokens > 0) this.persist();
     return { codes, tokens };
   }
 

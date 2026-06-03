@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.73] — 2026-06-03
+
+Field-report fixes from driving the HTTP daemon against a real, All-Mail-heavy account, plus the Proton Bridge semantics research that grounds them (`docs/proton-bridge-imap.md`).
+
+### Fixed
+
+- **`get_email_by_id` reported the real folder, not "All Mail".** The folder scan returned the first UID match, and the All Mail union holds every message, so it masked the true location (breaking move verification). The union (`specialUse \All`) is now scanned **last** — real folders win; All Mail only for genuinely archived mail.
+- **`get_folders` counts no longer go stale after mutations.** The 5-minute folder-count cache was never invalidated on move/copy/delete/flag changes. It now clears on every count-changing op, and `sync_folders` force-refreshes (bypasses the cache).
+- **Name-collision on `create_folder` surfaces the Proton 409** ("a folder or label named X already exists — Proton shares one namespace") instead of an opaque "internal error", via error text **and** an existence check.
+- **`get_connection_status` probes SMTP auth live** (STARTTLS+AUTH, 8s timeout) instead of reporting a startup-only flag — it can no longer claim "connected" while sends fail. (The acute breakage was a stale Bridge password, fixed via keychain sync.)
+- **`move_to_folder` accepts nested folder paths** (`Life/Bills/X`), matching `bulk_move_emails`; it previously rejected the `/` separator.
+- **Cowork "agent approved" notification no longer repeats** — `ensureActiveServiceGrant` re-emitted `grant-approved` on every `client_credentials` re-auth; now only on a real transition.
+
+### Added / Changed
+
+- **File archived (All-Mail-only) mail into folders.** Bridge forbids MOVE out of the All Mail union (it's a union view with no "remove"), so `move_email`/`move_to_folder`/`bulk_move_emails` from an All-Mail source now degrade to a **verified-landing COPY** (the add-label half) — confirmed live (UIDPLUS). Real-folder sources keep MOVE. Same-location (source==target) moves short-circuit as no-ops.
+- **OAuth access tokens survive a daemon restart.** Tokens were in-memory only, so a restart 401'd every live token. They now persist to `~/.mailpouch-oauth-tokens.json` (0600, atomic) — **hashes only**, never the raw bearer, so a leaked file can't be replayed.
+- **`get_emails` adds `messageId`** (stable cross-folder identity; the `id` UID is per-folder) and a **`summaryOnly`** projection to omit body fields for lean listing.
+
 ## [3.0.72] — 2026-05-31
 
 ### Changed — deletion moves to Trash; mail is never permanently deleted (BREAKING)

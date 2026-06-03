@@ -73,6 +73,7 @@ export interface EmailMessage {
 
   // Proton-specific
   protonId?: string;         // X-Pm-Internal-Id header — stable Proton message ID (survives folder moves)
+  messageId?: string;        // RFC 5322 Message-ID header — stable identity across folders (the per-folder `id` UID is not)
 }
 
 export interface EmailAttachment {

@@ -218,6 +218,7 @@ function recordFromEmail(m: EmailMessage): FtsRecord {
 const AGENT_GRANTS_PATH = _homeFile("MAILPOUCH_AGENTS", ".mailpouch-agents.json");
 const AGENT_AUDIT_PATH = _homeFile("MAILPOUCH_AGENT_AUDIT", ".mailpouch-agent-audit.jsonl");
 const SERVICE_ACCOUNTS_PATH = _homeFile("MAILPOUCH_SERVICE_ACCOUNTS", ".mailpouch-service-accounts.json");
+const OAUTH_TOKENS_PATH = _homeFile("MAILPOUCH_OAUTH_TOKENS", ".mailpouch-oauth-tokens.json");
 const agentGrants = new AgentGrantStore(AGENT_GRANTS_PATH);
 const grantManager = new GrantManager(agentGrants);
 const agentAudit = new AgentAuditLog({ path: AGENT_AUDIT_PATH });
@@ -2606,6 +2607,7 @@ async function main() {
         rateLimitBurst: remoteCn?.remoteRateLimitBurst ?? undefined,
         agentGrants,
         serviceAccounts,
+        oauthTokensPath: OAUTH_TOKENS_PATH,
       });
       logger.info(`mailpouch started on HTTP transport at ${handle.url}${handle.issuer ? ` (OAuth issuer ${handle.issuer})` : ""}`, "MCPServer");
       (globalThis as unknown as { __mailpouchHttpHandle?: { close(): Promise<void> } }).__mailpouchHttpHandle = handle;

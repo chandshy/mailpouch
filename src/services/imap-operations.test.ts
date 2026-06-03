@@ -521,6 +521,25 @@ describe("SimpleIMAPService.moveEmail", () => {
     expect(client.messageMove).toHaveBeenCalledWith("20", "Trash", { uid: true });
   });
 
+  it("source == target is a no-op (never issues a move; guards the All Mail union)", async () => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc);
+    const result = await svc.moveEmail("20", "All Mail", "All Mail");
+    expect(result).toBe(true);
+    expect(client.messageMove).not.toHaveBeenCalled();
+  });
+
+  it("from the All Mail union, files via COPY (MOVE no-ops from the union)", async () => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc);
+    seedUids(client, "All Mail", [700]);
+    const result = await svc.moveEmail("700", "Folders/Tech", "All Mail");
+    expect(result).toBe(true);
+    // Filed via COPY (add-label) — never MOVE, which no-ops from the union.
+    expect(client.messageCopy).toHaveBeenCalledWith("700", "Folders/Tech", { uid: true });
+    expect(client.messageMove).not.toHaveBeenCalled();
+  });
+
   it("evicts old cache entry on move (UID is not stable across folders)", async () => {
     const svc = new SimpleIMAPService();
     const client = connectSvc(svc);
@@ -796,6 +815,26 @@ describe("SimpleIMAPService.bulkMoveEmails", () => {
     // Cache entries at the old folder key should be evicted (UID is not stable across folders)
     expect((svc as any).emailCache.has("INBOX:80")).toBe(false);
     expect((svc as any).emailCache.has("INBOX:81")).toBe(false);
+  });
+
+  it("source == target is a no-op per folder (counts success, issues no move; All Mail guard)", async () => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc);
+    const results = await svc.bulkMoveEmails(["80", "81"], "All Mail", "All Mail");
+    expect(results.success).toBe(2);
+    expect(results.failed).toBe(0);
+    expect(client.messageMove).not.toHaveBeenCalled();
+  });
+
+  it("from the All Mail union, bulk-files via COPY (MOVE no-ops from the union)", async () => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc);
+    seedUids(client, "All Mail", [701, 702]);
+    const results = await svc.bulkMoveEmails(["701", "702"], "Folders/Tech", "All Mail");
+    expect(results.success).toBe(2);
+    expect(results.failed).toBe(0);
+    expect(client.messageCopy).toHaveBeenCalled();
+    expect(client.messageMove).not.toHaveBeenCalled();
   });
 
   it("falls back to per-email move when batch fails", async () => {
@@ -2648,10 +2687,13 @@ describe("SimpleIMAPService move/copy honest verification (Bug A, All Mail sourc
     expect(bad.failed).toBe(2);
   });
 
-  it("bulkMoveEmails reports FAILURE when the move resolves but the message is absent from the target", async () => {
+  it("bulkMoveEmails from All Mail reports FAILURE when the COPY-file resolves but nothing lands", async () => {
     const svc = new SimpleIMAPService();
     const client = connectSvc(svc);
-    clientState(client).silentNoOp.move = true; // Bridge accepts MOVE from All Mail but does nothing
+    // From the All Mail union, bulkMoveEmails files via COPY (MOVE no-ops there).
+    // A copy the union accepts but doesn't perform must be an honest failure,
+    // never a false success.
+    clientState(client).silentNoOp.copy = true;
     seedUids(client, "All Mail", [10, 11, 12]);
 
     const results = await svc.bulkMoveEmails(["10", "11", "12"], "Folders/Work", "All Mail");
@@ -2661,7 +2703,7 @@ describe("SimpleIMAPService move/copy honest verification (Bug A, All Mail sourc
     expect(results.errors.join(" ")).toMatch(/not present|All Mail|union/i);
   });
 
-  it("bulkMoveEmails from a non-INBOX source verifies landing and succeeds (real move)", async () => {
+  it("bulkMoveEmails from All Mail files via COPY and verifies landing (success)", async () => {
     const svc = new SimpleIMAPService();
     const client = connectSvc(svc);
     seedUids(client, "All Mail", [10, 11, 12]);
@@ -2670,6 +2712,8 @@ describe("SimpleIMAPService move/copy honest verification (Bug A, All Mail sourc
 
     expect(results.success).toBe(3);
     expect(results.failed).toBe(0);
+    expect(client.messageCopy).toHaveBeenCalled();
+    expect(client.messageMove).not.toHaveBeenCalled();
   });
 });
 
@@ -2728,5 +2772,70 @@ describe("SimpleIMAPService.searchEmails freshness (cluster 7 / O1, v3.0.71)", (
 
     const results = await svc.searchEmails({ folder: "INBOX", subject: "no such subject" });
     expect(results).toHaveLength(0);
+  });
+});
+
+// ─── getEmailById folder resolution (#1: All Mail union must not mask the real folder) ───
+describe("SimpleIMAPService.getEmailById — All Mail must not mask the real folder", () => {
+  const folderList = [
+    { path: "All Mail", name: "All Mail", delimiter: "/", flags: new Set(), specialUse: "\\All" },
+    { path: "Folders/Tech", name: "Tech", delimiter: "/", flags: new Set(), specialUse: undefined },
+  ];
+
+  it("returns the real folder (not 'All Mail') when the message exists in both", async () => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc, {
+      list: vi.fn().mockResolvedValue(folderList),
+      status: vi.fn().mockResolvedValue({ messages: 1, unseen: 0 }),
+    });
+    // Same UID present in the union AND the real folder — All Mail scanned last.
+    seedMessage(client, "All Mail", 900, { subject: "filed message" });
+    seedMessage(client, "Folders/Tech", 900, { subject: "filed message" });
+    const email = await svc.getEmailById("900");
+    expect(email?.folder).toBe("Folders/Tech");
+  });
+
+  it("falls back to 'All Mail' for a message that exists ONLY there (true archive)", async () => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc, {
+      list: vi.fn().mockResolvedValue(folderList),
+      status: vi.fn().mockResolvedValue({ messages: 1, unseen: 0 }),
+    });
+    seedMessage(client, "All Mail", 901, { subject: "archived message" });
+    const email = await svc.getEmailById("901");
+    expect(email?.folder).toBe("All Mail");
+  });
+});
+
+// ─── #2: folder-count cache must invalidate on mutation ───
+describe("SimpleIMAPService folder-count cache invalidation (#2)", () => {
+  function svcWithFolders() {
+    const svc = new SimpleIMAPService();
+    const list = vi.fn().mockResolvedValue([
+      { path: "INBOX", name: "INBOX", delimiter: "/", flags: new Set(), specialUse: undefined },
+    ]);
+    const status = vi.fn().mockResolvedValue({ messages: 5, unseen: 1 });
+    const client = connectSvc(svc, { list, status });
+    return { svc, client, status };
+  }
+
+  it("get_folders caches, but a move invalidates the cache so counts refetch", async () => {
+    const { svc, client, status } = svcWithFolders();
+    await svc.getFolders();
+    const afterFirst = status.mock.calls.length;
+    await svc.getFolders();
+    expect(status.mock.calls.length).toBe(afterFirst); // 2nd call served from cache — no STATUS
+    seedUids(client, "INBOX", [1]);
+    await svc.moveEmail("1", "Folders/X", "INBOX");      // mutation → clearFolderCache()
+    await svc.getFolders();
+    expect(status.mock.calls.length).toBeGreaterThan(afterFirst); // refetched after the move
+  });
+
+  it("syncFolders always bypasses the cache (explicit refresh)", async () => {
+    const { svc, status } = svcWithFolders();
+    await svc.getFolders();
+    const n = status.mock.calls.length;
+    await svc.syncFolders();
+    expect(status.mock.calls.length).toBeGreaterThan(n);
   });
 });

@@ -103,6 +103,43 @@ When an email is moved to Trash, Bridge removes all labels from it (same behavio
 - Moving an email to `Labels/Important` in IMAP applies the "Important" label (additive)
 - Bridge's `LabelConflictManager` handles inconsistencies between the local Gluon SQLite state and the Proton API state
 
+### How IMAP MOVE/COPY map to Proton label actions
+
+Bridge translates IMAP mailbox membership into Proton **label** operations (DeepWiki, *IMAP Service*): `AddMessagesToMailbox` → Proton `LabelMessages`, `RemoveMessagesFromMailbox` → `UnlabelMessages`. So:
+
+- An IMAP **COPY** to a mailbox = *add a label* (for `Folders/<x>`, the exclusive folder label; for `Labels/<x>`, an additive label).
+- An IMAP **MOVE** = *add the target label* **+** *remove the source label*.
+
+### The "All Mail" union — why you cannot MOVE out of it
+
+`All Mail` (`\All`) is **not a real storage location** — it is a *union view* of every message in the account, independent of the folder/label a message actually carries. Every message appears in `All Mail`.
+
+Because union membership is implicit (a message is in All Mail because it *exists*), **there is no "remove from All Mail" operation**. The *remove-from-source* half of a MOVE is therefore meaningless when the source is `All Mail`, and Bridge **accepts the MOVE but performs nothing** (a silent no-op), or rejects a MOVE into a system folder (`"IMAP operation failed"`). This is the field-observed "Bug A": `bulk_move_emails`/`move_email` with `sourceFolder:"All Mail"` returns *"accepted but could not be verified present in the target."*
+
+**COPY still works from All Mail**, because it is only an *add-label* — no removal from the union is attempted. This is also why `bulk_move_to_label` (IMAP COPY to `Labels/<x>`) succeeds from All Mail while MOVE does not. It matches Proton's own guidance: *"copy the message to the folder instead of moving it."*
+
+### Filing an "All-Mail-only" (archived) message into a folder
+
+A message that lives **only** in the `All Mail` union (no Inbox/Sent/custom folder — a true archive) cannot be relocated with MOVE. The working path:
+
+1. **COPY** the message (by its All Mail UID) to the destination `Folders/<name>` mailbox. This applies the folder label and files the message into that folder.
+2. **Verify it landed** (UIDPLUS `COPYUID`, or Message-ID search) — never assume success; a union no-op must be reported as a failure.
+
+This is the same `AddMessagesToMailbox` → `LabelMessages` mechanism as the label-COPY path that is already reliable from All Mail.
+
+> **Verified 2026-06-03 against live Bridge** (non-destructive scratch test, UIDPLUS-confirmed):
+> - `COPY` from `All Mail` → `Folders/<scratch>` **succeeds and the message lands** (server returns a `COPYUID` map).
+> - `MOVE` from `All Mail` → `Folders/<scratch>` is **accepted but lands nothing** (the no-op).
+>
+> **Caveat — COPY adds, it does not atomically replace:** after a COPY-to-folder, the source message was observed *still present in its original folder* (checked +2 s). So COPY applies the target folder label without removing other folder labels at the IMAP layer; Proton's exclusivity is reconciled separately (and lazily). Implications for filing:
+> - **All-Mail-only (archived) message** → COPY-to-folder files it cleanly (there is no other folder to leave behind). This is the #3 path.
+> - **Message already in a real folder** → use a normal `MOVE` with the real `sourceFolder` (which works), *not* COPY-from-All-Mail — otherwise the message may transiently appear in two folders until Proton reconciles.
+>
+> This composes with finding #1: `get_email_by_id` now reports a message's real folder (or `All Mail` if it is archived), so a caller can choose MOVE-from-real-folder vs COPY-from-All-Mail correctly.
+
+### Same-location moves are no-ops
+Moving a message from/to the **identical** mailbox does nothing, and the All Mail union "accepts" such a move silently. The MCP server short-circuits `source == target` as a success no-op rather than issuing the operation (`isSameLocation` in `SimpleIMAPService`).
+
 ## Special Folder Handling for Drafts
 
 Bridge handles draft messages distinctly:
@@ -211,7 +248,7 @@ These are used by `getFolders()` in the MCP server to populate `totalMessages` a
 ## Known Quirks and Issues
 
 ### 1. UID Scope is Per-Mailbox
-IMAP UIDs are unique within a mailbox, not globally. A UID `12345` in INBOX is a different message than UID `12345` in Sent. The MCP server's `getEmailById` searches all folders to find a UID, which is a workaround for this limitation but adds latency.
+IMAP UIDs are unique within a mailbox, not globally. A UID `12345` in INBOX is a different message than UID `12345` in Sent. The MCP server's `getEmailById` searches all folders to find a UID, which is a workaround for this limitation but adds latency. **The `All Mail` union is searched LAST** — because it contains every message, scanning it first would report `folder:"All Mail"` for messages that actually live in a real folder (the union masks the true location). Real folders win; All Mail is reported only for messages that exist nowhere else (true archive).
 
 ### 2. Label Duplication in IMAP
 Emails with labels appear in multiple IMAP folders simultaneously (their primary folder AND all `Labels/x` folders). Clients that count all mailboxes will see duplicates. The MCP server exposes folder listing as-is without deduplication.
@@ -237,6 +274,9 @@ In combined mode, all addresses share one IMAP mailbox. There is no way via stan
 ### 9. Labels Lost on Move to Trash
 When an email is moved to Trash via Bridge/IMAP, all its Proton labels are removed. This is by design (matching Proton web behavior) but may surprise users who move emails to Trash and then restore them — the labels will not be restored.
 
+### 10. Cannot MOVE Out of the "All Mail" Union (COPY Instead)
+`All Mail` (`\All`) is a union view of every message, not a real location, and has no "remove" operation. A MOVE whose source is `All Mail` is accepted but silently does nothing (or errors into a system folder). To file an All-Mail-only (archived) message into a folder, **COPY** it to the `Folders/<name>` mailbox (which applies the exclusive folder label) and verify it landed. See "The 'All Mail' union" section above. Deleting mail is likewise a move-to-Trash, never an EXPUNGE from the union.
+
 ## Sources
 
 - https://proton.me/support/labels-in-bridge
@@ -246,3 +286,5 @@ When an email is moved to Trash via Bridge/IMAP, all its Proton labels are remov
 - https://man.sr.ht/~rjarry/aerc/providers/protonmail.md
 - https://pkg.go.dev/github.com/ProtonMail/proton-bridge@v1.8.12/internal/imap/idle
 - https://github.com/Foundry376/Mailspring/issues/429
+- https://github.com/ProtonMail/gluon — Gluon IMAP server library (MOVE/UIDPLUS support; connector maps IMAP membership ↔ Proton labels)
+- https://proton.me/blog/gluon-imap-library — Gluon snapshot model overview

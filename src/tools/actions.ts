@@ -9,7 +9,6 @@ import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import {
   optionalSourceFolder,
   requireNumericEmailId,
-  validateFolderName,
   validateLabelName,
   validateTargetFolder,
 } from "../utils/helpers.js";
@@ -41,7 +40,7 @@ const BULK_RESULT_SCHEMA = {
 const SOURCE_FOLDER_SCHEMA = {
   type: "string",
   description:
-    "Folder the UID(s) live in (e.g. INBOX, Folders/Work, Labels/Foo). Strongly recommended whenever the UIDs came from a folder other than INBOX — IMAP UIDs are folder-scoped, so without this the wrong folder may be selected and the operation may silently no-op.",
+    "Folder the UID(s) live in (e.g. INBOX, Folders/Work, Labels/Foo). Strongly recommended whenever the UIDs came from a folder other than INBOX — IMAP UIDs are folder-scoped, so without this the wrong folder may be selected and the operation may silently no-op. Avoid passing 'All Mail' as the source: it is a union view of every folder, not a real location, so moves out of it can silently do nothing — pass the message's actual folder instead. Moving to the folder a message is already in is a no-op.",
 };
 
 export const defs: ToolDef[] = [
@@ -357,11 +356,28 @@ export const handlers: Record<string, ToolHandler> = {
   move_to_folder: async (ctx) => {
     const { args, imapService, actionOk } = ctx;
     const mtfEmailId = requireNumericEmailId(args.emailId);
-    const folderName = args.folder as string;
-    const folderValidErr = validateFolderName(folderName);
-    if (folderValidErr) throw new McpError(ErrorCode.InvalidParams, folderValidErr);
+    if (typeof args.folder !== "string" || args.folder.trim() === "") {
+      throw new McpError(ErrorCode.InvalidParams, "folder must be a non-empty string.");
+    }
+    const folderName = args.folder.trim();
+    // Accept nested folder paths (mirror bulk_move_emails) — nested folders are
+    // first-class in get_folders. Reject only traversal / control chars / bad
+    // slashes, NOT the "/" separator itself (the old leaf-only validator broke
+    // every nested target). A leaf ("Work") or sub-path ("Life/Bills/Anthropic")
+    // is namespaced under Folders/; a fully-qualified "Folders/…" / "Labels/…"
+    // path is used as-is. The service re-validates the final path.
+    if (
+      folderName.includes("..") ||
+      /[\u0000-\u001f\u007f]/.test(folderName) ||
+      folderName.startsWith("/") ||
+      folderName.endsWith("/") ||
+      folderName.includes("//")
+    ) {
+      throw new McpError(ErrorCode.InvalidParams, "folder contains invalid characters (.., control characters, or leading/trailing/empty path segments).");
+    }
+    const target = /^(Folders|Labels)\//.test(folderName) ? folderName : `Folders/${folderName}`;
     const mtfSourceFolder = optionalSourceFolder(args.sourceFolder);
-    await imapService.moveEmail(mtfEmailId, `Folders/${folderName}`, mtfSourceFolder);
+    await imapService.moveEmail(mtfEmailId, target, mtfSourceFolder);
     return actionOk();
   },
 

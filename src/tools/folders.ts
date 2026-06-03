@@ -115,7 +115,9 @@ export const handlers: Record<string, ToolHandler> = {
 
   sync_folders: async (ctx) => {
     const { imapService, ok } = ctx;
-    const folders = await imapService.getFolders();
+    // Force a fresh fetch (bypass the folder cache) — that's the whole point of
+    // an explicit "sync"; the cached get_folders could otherwise echo stale data.
+    const folders = await imapService.syncFolders();
     return ok({ success: true, folderCount: folders.length });
   },
 

@@ -955,6 +955,16 @@ export class SimpleIMAPService {
     this.folderCachedAt = 0;
   }
 
+  /**
+   * Force a fresh folder fetch from IMAP, bypassing the cache. Backs the
+   * `sync_folders` tool — the cached `getFolders()` could otherwise return stale
+   * counts/structure right after a mutation made by another client.
+   */
+  async syncFolders(): Promise<EmailFolder[]> {
+    this.clearFolderCache();
+    return this.getFolders();
+  }
+
   /** Fetch all IMAP folders with message and unseen counts. Results are cached for {@link FOLDER_CACHE_TTL_MS}. */
   async getFolders(): Promise<EmailFolder[]> {
     const tags: SpanTags = {};
@@ -1151,6 +1161,8 @@ export class SimpleIMAPService {
               isHtml: looksLikeHtml,
               date: env.date ?? new Date(),
               folder,
+              // #9: stable cross-folder identity (the `id` UID is per-folder).
+              messageId: env.messageId || undefined,
               isRead: message.flags?.has('\\Seen') ?? false,
               isStarred: message.flags?.has('\\Flagged') ?? false,
               hasAttachment: attachmentCount > 0,
@@ -1212,10 +1224,17 @@ export class SimpleIMAPService {
     }
 
     try {
-      // If a folder hint is provided, only look there; otherwise scan all folders
+      // If a folder hint is provided, only look there; otherwise scan all
+      // folders — but search the "All Mail" union LAST. All Mail holds every
+      // message, so scanning it first reports `folder:"All Mail"` for messages
+      // that actually live in a real folder (the union masks the true
+      // location). Real folders win; All Mail is the fallback only for mail
+      // that genuinely exists nowhere else (true archive).
       const foldersToSearch = folderHint
-        ? [{ path: folderHint }]
-        : await this.getFolders();
+        ? [{ path: folderHint } as { path: string; specialUse?: string | null }]
+        : [...await this.getFolders()].sort(
+            (a, b) => (this.isAllMailFolder(a) ? 1 : 0) - (this.isAllMailFolder(b) ? 1 : 0),
+          );
 
       for (const folder of foldersToSearch) {
         const lock = await this.client.getMailboxLock(folder.path);
@@ -1283,6 +1302,8 @@ export class SimpleIMAPService {
               isEncryptedPGP: ctStr.includes('multipart/encrypted') && ctStr.includes('application/pgp-encrypted'),
               // Proton-specific stable ID
               protonId: typeof pmId === 'string' ? pmId.trim() : undefined,
+              // RFC Message-ID — stable identity across folders (#9).
+              messageId: parsed.messageId || undefined,
             };
 
             // GAP 7.5: setCacheEntry strips attachment binary content before storing
@@ -1947,6 +1968,7 @@ export class SimpleIMAPService {
         }
 
         logger.info(`Email ${emailId} marked as ${isRead ? 'read' : 'unread'}`, 'IMAPService');
+        this.clearFolderCache(); // unread count changed → next get_folders refetches
         return true;
       } finally {
         lock.release();
@@ -2055,6 +2077,26 @@ export class SimpleIMAPService {
         folder = email.folder;
       }
 
+      // Source == target → no-op. Moving within the same mailbox does nothing,
+      // and from the All Mail union it "succeeds" silently while moving nothing.
+      if (this.isSameLocation(folder, targetFolder)) {
+        logger.info(`Email ${emailId} is already in ${targetFolder}; move is a no-op (same location)`, 'IMAPService');
+        return true;
+      }
+
+      // From the All Mail union a MOVE no-ops — you cannot remove a message from
+      // the union (Bridge maps MOVE to add-target-label + remove-source-label;
+      // the remove half is meaningless here). The supported, verified operation
+      // is the add-label half: COPY the message into the target. This files an
+      // All-Mail-only (archived) message into a folder (or applies a label).
+      // A message in a REAL folder never reaches here — getEmailById resolves
+      // its true folder when sourceFolder is omitted (so it takes the MOVE path)
+      // — which also avoids COPY's add-without-remove leaving a second folder.
+      if (this.isAllMailFolder({ path: folder })) {
+        logger.info(`Email ${emailId} sourced from the All Mail union; filing into ${targetFolder} via COPY (MOVE no-ops from the union)`, 'IMAPService');
+        return this.copyEmailToFolder(emailId, targetFolder, folder);
+      }
+
       let movedMid: string | undefined;
       const relocated = new Set<string>();
       let uidplus = false;
@@ -2092,6 +2134,7 @@ export class SimpleIMAPService {
       }
 
       logger.info(`Email ${emailId} moved from ${folder} to ${targetFolder}`, 'IMAPService');
+      this.clearFolderCache(); // folder counts changed → next get_folders refetches
       return true;
     } catch (error) {
       logger.error('Failed to move email', 'IMAPService', error);
@@ -2164,6 +2207,7 @@ export class SimpleIMAPService {
         throw new Error(`Copy of email ${emailId} to ${targetFolder} was accepted but could not be verified present there — likely a no-op from a union mailbox (e.g. All Mail), or the target does not exist. Pass the message's real source folder.`);
       }
       logger.info(`Email ${emailId} copied from ${folder} to ${targetFolder}`, 'IMAPService');
+      this.clearFolderCache(); // target folder count changed → next get_folders refetches
       return true;
     } catch (error) {
       logger.error('Failed to copy email to folder', 'IMAPService', error);
@@ -2203,6 +2247,7 @@ export class SimpleIMAPService {
         // Remove from cache using folder-qualified key
         this.evictCacheEntry(`${folder}:${emailId}`);
         logger.info(`Email ${emailId} deleted from ${folder}`, 'IMAPService');
+        this.clearFolderCache(); // folder count changed → next get_folders refetches
         return true;
       } finally {
         lock.release();
@@ -2377,6 +2422,23 @@ export class SimpleIMAPService {
     // otherwise count as a false success.
     const verifyJobs: Array<{ folder: string; accepted: string[]; midMap: Map<string, string>; relocated: Set<string>; uidplus: boolean }> = [];
     for (const [folder, ids] of emailsByFolder.entries()) {
+      // Source == target → no-op (incl. the All Mail union, which "accepts" the
+      // move silently while moving nothing). Count as success, don't issue it.
+      if (this.isSameLocation(folder, targetFolder)) {
+        for (let i = 0; i < ids.length; i++) results.success++;
+        continue;
+      }
+      // From the All Mail union, MOVE no-ops — file via COPY (the add-label
+      // half), verified-landing. Files All-Mail-only (archived) mail into a
+      // folder / applies a label. Foldered mail resolves to its real folder
+      // (when sourceFolder is omitted) and takes the MOVE path below.
+      if (this.isAllMailFolder({ path: folder })) {
+        const copied = await this.bulkCopyToFolder(ids, targetFolder, folder);
+        results.success += copied.success;
+        results.failed += copied.failed;
+        results.errors.push(...copied.errors);
+        continue;
+      }
       const lock = await this.client.getMailboxLock(folder);
       try {
         let existing: Set<string>;
@@ -2450,6 +2512,7 @@ export class SimpleIMAPService {
 
     tags.successCount = results.success;
     tags.failCount = results.failed;
+    if (results.success > 0) this.clearFolderCache(); // counts changed → next get_folders refetches
     logger.info(`Bulk move completed: ${results.success} succeeded, ${results.failed} failed`, 'IMAPService');
     return results;
     }); // end tracer.span('imap.bulkMoveEmails')
@@ -2477,6 +2540,22 @@ export class SimpleIMAPService {
    *  we never permanently delete (EXPUNGE) mail. */
   private isTrashFolder(folder: string, trashPath: string): boolean {
     return folder === trashPath || folder.toLowerCase() === 'trash';
+  }
+
+  /** True if two folder paths refer to the same mailbox. Moving from/to the
+   *  identical location is a no-op — and critically, the "All Mail" union
+   *  (which holds every message from every folder) "accepts" such a move
+   *  silently while doing nothing, so we must short-circuit it rather than
+   *  issue the move. */
+  private isSameLocation(a: string, b: string): boolean {
+    return a.trim() === b.trim();
+  }
+
+  /** True if a folder is the "All Mail" union (specialUse \All, or the literal
+   *  path). All Mail holds EVERY message, so it must be searched LAST when
+   *  resolving a message's folder — otherwise it masks the real location. */
+  private isAllMailFolder(f: { path?: string; specialUse?: string | null }): boolean {
+    return f.specialUse === "\\All" || (f.path ?? "").trim() === "All Mail";
   }
 
   /**
@@ -2716,6 +2795,7 @@ export class SimpleIMAPService {
       } finally { lock.release(); }
     }
     tags.successCount = results.success; tags.failCount = results.failed;
+    if (results.success > 0) this.clearFolderCache(); // unread counts changed → next get_folders refetches
     logger.info(`Bulk mark-read completed: ${results.success}/${results.failed}`, 'IMAPService');
     return results;
     }); // end tracer.span('imap.bulkMarkRead')
@@ -2953,6 +3033,7 @@ export class SimpleIMAPService {
       }
     }
     tags.successCount = results.success; tags.failCount = results.failed;
+    if (results.success > 0) this.clearFolderCache(); // target counts changed → next get_folders refetches
     logger.info(`Bulk copy completed: ${results.success}/${results.failed}`, 'IMAPService');
     return results;
     }); // end tracer.span('imap.bulkCopyToFolder')
@@ -3030,6 +3111,7 @@ export class SimpleIMAPService {
     } finally { lock.release(); }
 
     tags.successCount = results.success; tags.failCount = results.failed;
+    if (results.success > 0) this.clearFolderCache(); // counts changed → next get_folders refetches
     logger.info(`Bulk delete-from-folder completed: ${results.success}/${results.failed}`, 'IMAPService');
     return results;
     }); // end tracer.span('imap.bulkDeleteFromFolder')
@@ -3075,10 +3157,30 @@ export class SimpleIMAPService {
       logger.info(`Folder created: ${folderName}`, 'IMAPService');
       return true;
     } catch (error: unknown) {
-      const rt = (error as { responseText?: string }).responseText;
-      if (rt?.includes('ALREADYEXISTS')) {
-        logger.warn(`Folder already exists: ${folderName}`, 'IMAPService');
-        throw new Error(`Folder '${folderName}' already exists`);
+      const rt = (error as { responseText?: string }).responseText || '';
+      const em = error instanceof Error ? error.message : String(error);
+      const hay = `${rt} ${em}`.toLowerCase();
+      // Proton shares ONE namespace across folders and labels, so creating
+      // `Labels/Tech` when `Folders/Tech` exists (or a duplicate path) collides.
+      // Bridge surfaces this as an IMAP ALREADYEXISTS or the Proton 409
+      // (Code=2500) — but the text isn't always passed through, so also verify
+      // by listing (a folder/label leaf name is unique across both namespaces).
+      let conflict = hay.includes('alreadyexists') || hay.includes('already exists') || hay.includes('code=2500');
+      if (!conflict) {
+        try {
+          const leaf = (folderName.split('/').pop() || '').trim().toLowerCase();
+          const folders = await this.getFolders();
+          conflict = folders.some((f) => {
+            const p = f.path;
+            return p === folderName ||
+              ((p.startsWith('Folders/') || p.startsWith('Labels/')) &&
+                (p.split('/').pop() || '').trim().toLowerCase() === leaf);
+          });
+        } catch { /* listing failed — fall through to the raw error */ }
+      }
+      if (conflict) {
+        logger.warn(`Folder/label name already in use: ${folderName}`, 'IMAPService');
+        throw new Error(`A folder or label named '${folderName}' already exists. Proton shares one namespace across folders and labels, so the name can't be reused.`);
       }
       logger.error('Failed to create folder', 'IMAPService', error);
       throw error;
