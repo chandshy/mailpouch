@@ -2806,3 +2806,36 @@ describe("SimpleIMAPService.getEmailById — All Mail must not mask the real fol
     expect(email?.folder).toBe("All Mail");
   });
 });
+
+// ─── #2: folder-count cache must invalidate on mutation ───
+describe("SimpleIMAPService folder-count cache invalidation (#2)", () => {
+  function svcWithFolders() {
+    const svc = new SimpleIMAPService();
+    const list = vi.fn().mockResolvedValue([
+      { path: "INBOX", name: "INBOX", delimiter: "/", flags: new Set(), specialUse: undefined },
+    ]);
+    const status = vi.fn().mockResolvedValue({ messages: 5, unseen: 1 });
+    const client = connectSvc(svc, { list, status });
+    return { svc, client, status };
+  }
+
+  it("get_folders caches, but a move invalidates the cache so counts refetch", async () => {
+    const { svc, client, status } = svcWithFolders();
+    await svc.getFolders();
+    const afterFirst = status.mock.calls.length;
+    await svc.getFolders();
+    expect(status.mock.calls.length).toBe(afterFirst); // 2nd call served from cache — no STATUS
+    seedUids(client, "INBOX", [1]);
+    await svc.moveEmail("1", "Folders/X", "INBOX");      // mutation → clearFolderCache()
+    await svc.getFolders();
+    expect(status.mock.calls.length).toBeGreaterThan(afterFirst); // refetched after the move
+  });
+
+  it("syncFolders always bypasses the cache (explicit refresh)", async () => {
+    const { svc, status } = svcWithFolders();
+    await svc.getFolders();
+    const n = status.mock.calls.length;
+    await svc.syncFolders();
+    expect(status.mock.calls.length).toBeGreaterThan(n);
+  });
+});

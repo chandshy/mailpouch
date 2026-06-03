@@ -955,6 +955,16 @@ export class SimpleIMAPService {
     this.folderCachedAt = 0;
   }
 
+  /**
+   * Force a fresh folder fetch from IMAP, bypassing the cache. Backs the
+   * `sync_folders` tool — the cached `getFolders()` could otherwise return stale
+   * counts/structure right after a mutation made by another client.
+   */
+  async syncFolders(): Promise<EmailFolder[]> {
+    this.clearFolderCache();
+    return this.getFolders();
+  }
+
   /** Fetch all IMAP folders with message and unseen counts. Results are cached for {@link FOLDER_CACHE_TTL_MS}. */
   async getFolders(): Promise<EmailFolder[]> {
     const tags: SpanTags = {};
@@ -1954,6 +1964,7 @@ export class SimpleIMAPService {
         }
 
         logger.info(`Email ${emailId} marked as ${isRead ? 'read' : 'unread'}`, 'IMAPService');
+        this.clearFolderCache(); // unread count changed → next get_folders refetches
         return true;
       } finally {
         lock.release();
@@ -2119,6 +2130,7 @@ export class SimpleIMAPService {
       }
 
       logger.info(`Email ${emailId} moved from ${folder} to ${targetFolder}`, 'IMAPService');
+      this.clearFolderCache(); // folder counts changed → next get_folders refetches
       return true;
     } catch (error) {
       logger.error('Failed to move email', 'IMAPService', error);
@@ -2191,6 +2203,7 @@ export class SimpleIMAPService {
         throw new Error(`Copy of email ${emailId} to ${targetFolder} was accepted but could not be verified present there — likely a no-op from a union mailbox (e.g. All Mail), or the target does not exist. Pass the message's real source folder.`);
       }
       logger.info(`Email ${emailId} copied from ${folder} to ${targetFolder}`, 'IMAPService');
+      this.clearFolderCache(); // target folder count changed → next get_folders refetches
       return true;
     } catch (error) {
       logger.error('Failed to copy email to folder', 'IMAPService', error);
@@ -2230,6 +2243,7 @@ export class SimpleIMAPService {
         // Remove from cache using folder-qualified key
         this.evictCacheEntry(`${folder}:${emailId}`);
         logger.info(`Email ${emailId} deleted from ${folder}`, 'IMAPService');
+        this.clearFolderCache(); // folder count changed → next get_folders refetches
         return true;
       } finally {
         lock.release();
@@ -2494,6 +2508,7 @@ export class SimpleIMAPService {
 
     tags.successCount = results.success;
     tags.failCount = results.failed;
+    if (results.success > 0) this.clearFolderCache(); // counts changed → next get_folders refetches
     logger.info(`Bulk move completed: ${results.success} succeeded, ${results.failed} failed`, 'IMAPService');
     return results;
     }); // end tracer.span('imap.bulkMoveEmails')
@@ -2776,6 +2791,7 @@ export class SimpleIMAPService {
       } finally { lock.release(); }
     }
     tags.successCount = results.success; tags.failCount = results.failed;
+    if (results.success > 0) this.clearFolderCache(); // unread counts changed → next get_folders refetches
     logger.info(`Bulk mark-read completed: ${results.success}/${results.failed}`, 'IMAPService');
     return results;
     }); // end tracer.span('imap.bulkMarkRead')
@@ -3013,6 +3029,7 @@ export class SimpleIMAPService {
       }
     }
     tags.successCount = results.success; tags.failCount = results.failed;
+    if (results.success > 0) this.clearFolderCache(); // target counts changed → next get_folders refetches
     logger.info(`Bulk copy completed: ${results.success}/${results.failed}`, 'IMAPService');
     return results;
     }); // end tracer.span('imap.bulkCopyToFolder')
@@ -3090,6 +3107,7 @@ export class SimpleIMAPService {
     } finally { lock.release(); }
 
     tags.successCount = results.success; tags.failCount = results.failed;
+    if (results.success > 0) this.clearFolderCache(); // counts changed → next get_folders refetches
     logger.info(`Bulk delete-from-folder completed: ${results.success}/${results.failed}`, 'IMAPService');
     return results;
     }); // end tracer.span('imap.bulkDeleteFromFolder')
