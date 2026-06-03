@@ -1924,6 +1924,7 @@ async function _startSettingsServerDaemon(): Promise<void> {
   const retryMs            = 1000;
   for (let offset = 0; offset <= PORT_FALLBACK_SPAN; offset++) {
     const port = basePort + offset;
+    if (port > 65535) break; // never try an out-of-range port (Node rejects >65535)
     const retries = offset === 0 ? BASE_PORT_RETRIES : 1; // only the base port waits
     for (let attempt = 1; attempt <= retries; attempt++) {
       try {
