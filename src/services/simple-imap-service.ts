@@ -7,6 +7,10 @@ import { readFileSync, statSync } from 'fs';
 import { join as pathJoin } from 'path';
 import type { ParsedMail, Attachment, AddressObject } from 'mailparser';
 import { simpleParser } from 'mailparser';
+import { buildEmailMessage, truncateBody, stripHtml, normalizeAddressList } from './imap-helpers.js';
+// Re-export the pure helpers from their original home so existing importers
+// (index.ts, tests) keep working after the move to imap-helpers.ts.
+export { stripHtml, normalizeAddressList };
 import nodemailer, { type SendMailOptions } from 'nodemailer';
 import { EmailMessage, EmailFolder, SearchEmailOptions, SaveDraftOptions } from '../types/index.js';
 import { logger } from '../utils/logger.js';
@@ -73,85 +77,6 @@ interface ImapBodyNode {
 }
 
 // ImapSearchCriteria is provided by imapflow as SearchObject (imported above).
-
-/**
- * Truncate email body to a reasonable length for list views
- * @param body The full email body
- * @param maxLength Maximum length (default: 300 characters)
- * @returns Truncated body with ellipsis if needed
- */
-export function stripHtml(html: string): string {
-  if (!html) return '';
-  // Decode entities BEFORE stripping tags (PARSE-008). The old order stripped
-  // tags first then decoded, so an encoded `&lt;script&gt;...&lt;/script&gt;`
-  // emerged as a literal `<script>...</script>` in the FTS body / bodyPreview —
-  // stored-XSS if any consumer rendered those fields as HTML. Decoding first
-  // turns the encoded markup into real tags that the tag-strip then removes.
-  // HTML comments are dropped up front (PARSE-009) so their inner text (e.g.
-  // `<!-- secret: pw123 -->`) doesn't survive as tag-stripped prose.
-  const decodeEntities = (s: string): string =>
-    s
-      .replace(/&nbsp;/g, ' ')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&quot;/g, '"')
-      .replace(/&#39;/g, "'")
-      .replace(/&#x27;/gi, "'")
-      // Numeric entities (decimal &#60; and hex &#x3c;) for parity, so
-      // `&#60;script&#62;` is also neutralised by the subsequent tag-strip.
-      .replace(/&#(\d{1,7});/g, (_m, d) => String.fromCodePoint(Number(d)))
-      .replace(/&#x([0-9a-f]{1,6});/gi, (_m, h) => String.fromCodePoint(parseInt(h, 16)))
-      .replace(/&amp;/g, '&');
-
-  return decodeEntities(html.replace(/<!--[\s\S]*?-->/g, ' '))
-    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function truncateBody(body: string, maxLength: number = 300): string {
-  if (!body) return '';
-
-  // Remove excessive whitespace and newlines
-  const cleaned = body.replace(/\s+/g, ' ').trim();
-
-  if (cleaned.length <= maxLength) {
-    return cleaned;
-  }
-
-  // Truncate at the last space before maxLength to avoid cutting words
-  const truncated = cleaned.substring(0, maxLength);
-  const lastSpace = truncated.lastIndexOf(' ');
-
-  if (lastSpace > maxLength * 0.8) {
-    return truncated.substring(0, lastSpace) + '...';
-  }
-
-  return truncated + '...';
-}
-
-/**
- * Normalise a mailparser address field into a flat array of display strings.
- *
- * IMAP-007: `ParsedMail.to` / `.cc` are typed `AddressObject | AddressObject[]
- * | undefined`. When a message carries multiple separate `To:` header lines
- * (legal per RFC 5322 §3.6.3, and emitted by Proton on bridged forwards) the
- * field becomes an array; the old `parsed.to?.text ? [parsed.to.text] : []`
- * shape then collapsed to `[]` and the recipient list silently disappeared.
- */
-export function normalizeAddressList(
-  field: AddressObject | AddressObject[] | undefined,
-): string[] {
-  if (!field) return [];
-  const objs = Array.isArray(field) ? field : [field];
-  const result: string[] = [];
-  for (const obj of objs) {
-    if (obj?.text) result.push(obj.text);
-  }
-  return result;
-}
 
 /**
  * Split a list of UID strings into wire-bounded chunks suitable for a single
@@ -1253,58 +1178,7 @@ export class SimpleIMAPService {
             if (!message.source) continue;
             const parsed = await simpleParser(message.source);
 
-            const fullBody = parsed.text || parsed.html || '';
-            const plainBody = parsed.text || stripHtml(parsed.html || '');
-
-            // Extract content-type for PGP detection
-            const contentType = parsed.headers?.get('content-type');
-            const ctStr = typeof contentType === 'string' ? contentType : ((contentType as unknown as { value?: string } | null)?.value ?? '');
-
-            // Extract X-Pm-Internal-Id for stable Proton message ID
-            const pmId = parsed.headers?.get('x-pm-internal-id');
-
-            const emailMessage: EmailMessage = {
-              id: message.uid.toString(),
-              from: parsed.from?.text || '',
-              to: normalizeAddressList(parsed.to),
-              cc: normalizeAddressList(parsed.cc),
-              subject: parsed.subject || '(No Subject)',
-              body: fullBody, // Full body for individual email view
-              bodyPreview: truncateBody(plainBody),
-              isHtml: !!parsed.html,
-              date: parsed.date || new Date(),
-              folder: folder.path,
-              isRead: message.flags?.has('\\Seen') || false,
-              isStarred: message.flags?.has('\\Flagged') || false,
-              hasAttachment: (parsed.attachments?.length || 0) > 0,
-              attachments: parsed.attachments?.map((att: Attachment) => ({
-                filename: att.filename || 'unnamed',
-                contentType: att.contentType,
-                size: att.size,
-                content: att.content,
-                contentId: att.cid
-              })),
-              headers: parsed.headers
-                ? Object.fromEntries(
-                    Array.from(parsed.headers.entries()).map(([k, v]) => [
-                      k,
-                      Array.isArray(v) ? v.join(', ') : String(v),
-                    ])
-                  )
-                : undefined,
-              inReplyTo: parsed.inReplyTo,
-              references: parsed.references,
-              // IMAP flags
-              isAnswered: message.flags?.has('\\Answered') ?? false,
-              isForwarded: message.flags?.has('\\Forward') ?? false,
-              // MIME-level PGP detection
-              isSignedPGP: ctStr.includes('multipart/signed') && ctStr.includes('application/pgp-signature'),
-              isEncryptedPGP: ctStr.includes('multipart/encrypted') && ctStr.includes('application/pgp-encrypted'),
-              // Proton-specific stable ID
-              protonId: typeof pmId === 'string' ? pmId.trim() : undefined,
-              // RFC Message-ID — stable identity across folders (#9).
-              messageId: parsed.messageId || undefined,
-            };
+            const emailMessage = buildEmailMessage(message, parsed, folder.path);
 
             // GAP 7.5: setCacheEntry strips attachment binary content before storing
             this.setCacheEntry(emailMessage.id, emailMessage);
@@ -1455,49 +1329,7 @@ export class SimpleIMAPService {
           if (!message.source) continue;
           const parsed = await simpleParser(message.source);
 
-          const fullBody = parsed.text || parsed.html || '';
-          const plainBody = parsed.text || stripHtml(parsed.html || '');
-          const contentType = parsed.headers?.get('content-type');
-          const ctStr = typeof contentType === 'string' ? contentType : ((contentType as unknown as { value?: string } | null)?.value ?? '');
-          const pmId = parsed.headers?.get('x-pm-internal-id');
-
-          const emailMessage: EmailMessage = {
-            id: message.uid.toString(),
-            from: parsed.from?.text || '',
-            to: normalizeAddressList(parsed.to),
-            cc: normalizeAddressList(parsed.cc),
-            subject: parsed.subject || '(No Subject)',
-            body: fullBody,
-            bodyPreview: truncateBody(plainBody),
-            isHtml: !!parsed.html,
-            date: parsed.date || new Date(),
-            folder,
-            isRead: message.flags?.has('\\Seen') || false,
-            isStarred: message.flags?.has('\\Flagged') || false,
-            hasAttachment: (parsed.attachments?.length || 0) > 0,
-            attachments: parsed.attachments?.map((att: Attachment) => ({
-              filename: att.filename || 'unnamed',
-              contentType: att.contentType,
-              size: att.size,
-              content: att.content,
-              contentId: att.cid
-            })),
-            headers: parsed.headers
-              ? Object.fromEntries(
-                  Array.from(parsed.headers.entries()).map(([k, v]) => [
-                    k,
-                    Array.isArray(v) ? v.join(', ') : String(v),
-                  ])
-                )
-              : undefined,
-            inReplyTo: parsed.inReplyTo,
-            references: parsed.references,
-            isAnswered: message.flags?.has('\\Answered') ?? false,
-            isForwarded: message.flags?.has('\\Forward') ?? false,
-            isSignedPGP: ctStr.includes('multipart/signed') && ctStr.includes('application/pgp-signature'),
-            isEncryptedPGP: ctStr.includes('multipart/encrypted') && ctStr.includes('application/pgp-encrypted'),
-            protonId: typeof pmId === 'string' ? pmId.trim() : undefined,
-          };
+          const emailMessage = buildEmailMessage(message, parsed, folder);
 
           this.setCacheEntry(emailMessage.id, emailMessage);
 
