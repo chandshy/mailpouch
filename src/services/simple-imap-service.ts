@@ -14,10 +14,7 @@ import { EmailMessage, EmailFolder, SearchEmailOptions, SaveDraftOptions } from 
 import { logger } from '../utils/logger.js';
 import {
   validateImapPath,
-  attachmentByteSize,
-  MAX_ATTACHMENT_COUNT,
-  MAX_ATTACHMENT_BYTES,
-  MAX_TOTAL_ATTACHMENT_BYTES,
+  validateAttachmentLimits,
 } from '../utils/helpers.js';
 import { buildBridgeTlsConfig } from './bridge-tls.js';
 import { classifyError, ConnectionStateError } from '../utils/error-classify.js';
@@ -1633,26 +1630,11 @@ export class SimpleIMAPService {
       };
 
       if (options.attachments && options.attachments.length > 0) {
-        // VALID-005: enforce the SAME count/size caps as the SMTP send path
-        // (smtp-service.ts). saveDraft previously mirrored only the sanitisation,
-        // so an unbounded base64 payload could OOM the process before append.
-        if (options.attachments.length > MAX_ATTACHMENT_COUNT) {
-          return { success: false, error: `Too many attachments: ${options.attachments.length} supplied, max ${MAX_ATTACHMENT_COUNT} allowed.` };
-        }
-        let totalBytes = 0;
-        for (const att of options.attachments) {
-          const bytes = attachmentByteSize(att.content);
-          if (bytes === null) {
-            return { success: false, error: `Attachment '${att.filename ?? "unnamed"}': content must be a Buffer or base64 string.` };
-          }
-          if (bytes > MAX_ATTACHMENT_BYTES) {
-            return { success: false, error: `Attachment '${att.filename ?? "unnamed"}' is too large: ${Math.round(bytes / 1024 / 1024)}MB exceeds the ${MAX_ATTACHMENT_BYTES / 1024 / 1024}MB per-file limit.` };
-          }
-          totalBytes += bytes;
-          if (totalBytes > MAX_TOTAL_ATTACHMENT_BYTES) {
-            return { success: false, error: `Total attachment size exceeds the ${MAX_TOTAL_ATTACHMENT_BYTES / 1024 / 1024}MB limit.` };
-          }
-        }
+        // VALID-005/006: enforce the SAME count/size caps as the SMTP send path
+        // (shared validateAttachmentLimits) — an unbounded base64 payload could
+        // otherwise OOM the process before append.
+        const limitErr = validateAttachmentLimits(options.attachments);
+        if (limitErr) return { success: false, error: limitErr };
 
         // Mirror the sanitization performed in smtp-service.ts sendEmail() to prevent
         // MIME header injection via crafted attachment filenames or content-type values.

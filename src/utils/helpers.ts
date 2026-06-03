@@ -602,6 +602,38 @@ export function validateAttachments(attachments: unknown): string | null {
 }
 
 /**
+ * Service-layer attachment LIMIT check (count + per-file + total size) — shared
+ * by the SMTP send path and the IMAP saveDraft path. Both enforce the caps even
+ * though the tool layer's {@link validateAttachments} already did (VALID-005/006:
+ * defense in depth, so an unbounded base64 payload can't OOM the process before
+ * it reaches the wire). Operates on already-structured attachments (assumes the
+ * shape {@link validateAttachments} guarantees); returns an error string or null.
+ */
+export function validateAttachmentLimits(
+  attachments: ReadonlyArray<{ filename?: string; content?: unknown }>,
+): string | null {
+  if (attachments.length > MAX_ATTACHMENT_COUNT) {
+    return `Too many attachments: ${attachments.length} supplied, max ${MAX_ATTACHMENT_COUNT} allowed.`;
+  }
+  let totalBytes = 0;
+  for (const att of attachments) {
+    const name = att.filename ?? "unnamed";
+    const bytes = attachmentByteSize(att.content);
+    if (bytes === null) {
+      return `Attachment '${name}': content must be a Buffer or base64 string.`;
+    }
+    if (bytes > MAX_ATTACHMENT_BYTES) {
+      return `Attachment '${name}' is too large: ${Math.round(bytes / 1024 / 1024)}MB exceeds the ${MAX_ATTACHMENT_BYTES / 1024 / 1024}MB per-file limit.`;
+    }
+    totalBytes += bytes;
+    if (totalBytes > MAX_TOTAL_ATTACHMENT_BYTES) {
+      return `Total attachment size exceeds the ${MAX_TOTAL_ATTACHMENT_BYTES / 1024 / 1024}MB limit.`;
+    }
+  }
+  return null;
+}
+
+/**
  * Coerce a raw `args.attachments` value into a clean `EmailAttachment[]` that
  * carries ONLY the known fields. VALID-015: tools previously did
  * `args.attachments as EmailAttachment[]`, which let attacker-controlled extra
