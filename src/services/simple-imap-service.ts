@@ -3153,10 +3153,30 @@ export class SimpleIMAPService {
       logger.info(`Folder created: ${folderName}`, 'IMAPService');
       return true;
     } catch (error: unknown) {
-      const rt = (error as { responseText?: string }).responseText;
-      if (rt?.includes('ALREADYEXISTS')) {
-        logger.warn(`Folder already exists: ${folderName}`, 'IMAPService');
-        throw new Error(`Folder '${folderName}' already exists`);
+      const rt = (error as { responseText?: string }).responseText || '';
+      const em = error instanceof Error ? error.message : String(error);
+      const hay = `${rt} ${em}`.toLowerCase();
+      // Proton shares ONE namespace across folders and labels, so creating
+      // `Labels/Tech` when `Folders/Tech` exists (or a duplicate path) collides.
+      // Bridge surfaces this as an IMAP ALREADYEXISTS or the Proton 409
+      // (Code=2500) — but the text isn't always passed through, so also verify
+      // by listing (a folder/label leaf name is unique across both namespaces).
+      let conflict = hay.includes('alreadyexists') || hay.includes('already exists') || hay.includes('code=2500');
+      if (!conflict) {
+        try {
+          const leaf = (folderName.split('/').pop() || '').trim().toLowerCase();
+          const folders = await this.getFolders();
+          conflict = folders.some((f) => {
+            const p = f.path;
+            return p === folderName ||
+              ((p.startsWith('Folders/') || p.startsWith('Labels/')) &&
+                (p.split('/').pop() || '').trim().toLowerCase() === leaf);
+          });
+        } catch { /* listing failed — fall through to the raw error */ }
+      }
+      if (conflict) {
+        logger.warn(`Folder/label name already in use: ${folderName}`, 'IMAPService');
+        throw new Error(`A folder or label named '${folderName}' already exists. Proton shares one namespace across folders and labels, so the name can't be reused.`);
       }
       logger.error('Failed to create folder', 'IMAPService', error);
       throw error;

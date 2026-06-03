@@ -41,14 +41,26 @@ describe('Folder Management', () => {
       expect(result).toBe(true);
     });
 
-    it('should throw error if folder already exists', async () => {
+    it('should throw a clear "already exists" error on an IMAP ALREADYEXISTS', async () => {
       const mockClient = (service as any).client;
       mockClient.mailboxCreate.mockRejectedValueOnce({
         responseText: 'ALREADYEXISTS',
       });
 
       await expect(service.createFolder('INBOX')).rejects.toThrow(
-        "Folder 'INBOX' already exists"
+        /already exists/
+      );
+    });
+
+    it('surfaces the Proton 409 (Code=2500) cross-namespace collision as "already exists"', async () => {
+      const mockClient = (service as any).client;
+      // Bridge can return the Proton message without the uppercase IMAP token.
+      mockClient.mailboxCreate.mockRejectedValueOnce({
+        responseText: 'NO Label or folder with this name already exists (Code=2500)',
+      });
+
+      await expect(service.createFolder('Labels/Tech')).rejects.toThrow(
+        /already exists.*Proton shares one namespace/
       );
     });
 
