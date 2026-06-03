@@ -193,6 +193,8 @@ export class ImapFixtures {
     await this.withReconnect(async () => {
       const lock = await this.client.getMailboxLock(folder);
       try {
+        // Empty folder → nothing to move (and FETCH 1:* would throw on Bridge).
+        if (this.client.mailbox && (this.client.mailbox as { exists?: number }).exists === 0) return;
         const uids: number[] = [];
         for await (const msg of this.client.fetch("1:*", { uid: true }, { uid: false })) {
           if (typeof msg.uid === "number") uids.push(msg.uid);
@@ -228,6 +230,10 @@ export class ImapFixtures {
       await this.reconnect();
       const lock = await this.client.getMailboxLock(folder);
       try {
+        // Bridge throws "Command failed" on FETCH 1:* against an EMPTY mailbox
+        // (the state of a move SOURCE after a successful relocation). The SELECT
+        // that getMailboxLock just performed gives the count — short-circuit.
+        if ((this.client.mailbox && (this.client.mailbox as { exists?: number }).exists === 0)) return [];
         const uids: number[] = [];
         for await (const msg of this.client.fetch("1:*", { uid: true }, { uid: false })) {
           if (typeof msg.uid === "number") uids.push(msg.uid);
@@ -242,6 +248,12 @@ export class ImapFixtures {
   /** Number of messages in `folder`. */
   async messageCount(folder: string): Promise<number> {
     return (await this.listUids(folder)).length;
+  }
+
+  /** ScratchImap alias for messageCount — used by cleanup to verify a folder is
+   *  empty before deleting it (so a no-op move can never orphan mail). */
+  async countMessages(folder: string): Promise<number> {
+    return this.messageCount(folder);
   }
 
   /** UIDs in `folder` whose Subject header contains `substr` (server-side

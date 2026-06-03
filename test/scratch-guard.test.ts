@@ -29,8 +29,19 @@ function fakeImap(init: Record<string, Msg[]> = {}) {
     async purgeTrash(marker) {
       folders.set("Trash", folders.get("Trash")!.filter((m) => !m.id.includes(marker)));
     },
+    async countMessages(folder) {
+      return (folders.get(folder) ?? []).length;
+    },
   };
   return { imap, folders, deleted, created };
+}
+
+/** A fake whose emptyToTrash silently no-ops (models the Proton Bug-A class:
+ *  a move-to-Trash that "succeeds" but leaves the messages in place). */
+function fakeImapNoMove(init: Record<string, Msg[]> = {}) {
+  const f = fakeImap(init);
+  f.imap.emptyToTrash = async () => { /* no-op: move silently fails to relocate */ };
+  return f;
 }
 
 describe("scratch guard — non-destructive safety contract", () => {
@@ -82,6 +93,20 @@ describe("scratch guard — non-destructive safety contract", () => {
     expect(trash).toContainEqual({ id: "<real-trashed@bank.com>" });
     // No token folder survives.
     expect([...folders.keys()].some((p) => p.includes(t))).toBe(false);
+  });
+
+  it("retains a token folder (never orphans its mail) when messages can't be relocated", async () => {
+    const t = "mpE2E-NOMOVE-xyz";
+    const { imap, folders, deleted } = fakeImapNoMove({
+      [`Folders/${t}-1`]: [{ id: "<a@test.local>" }, { id: "<b@test.local>" }],
+    });
+    const retained = await new ScratchSession(imap, t).cleanup();
+
+    // The folder still has its messages → it must NOT be deleted (would orphan
+    // them into the unpurgeable All Mail union). It is reported as retained.
+    expect(deleted).toEqual([]);
+    expect(retained).toEqual([`Folders/${t}-1`]);
+    expect(folders.get(`Folders/${t}-1`)).toHaveLength(2);
   });
 
   it("preflight aborts if the run token is already present on the server", async () => {

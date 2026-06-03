@@ -389,7 +389,14 @@ export async function startE2E(opts: StartE2EOptions = {}): Promise<E2EHarness> 
     // closing. Best-effort — never throws, never touches a non-token folder.
     if (scratch) {
       try {
-        await scratch.cleanup();
+        const retained = await scratch.cleanup();
+        if (retained.length) {
+          console.warn(
+            `safe-gate cleanup retained ${retained.length} scratch folder(s) whose mail could not be ` +
+            `relocated to Trash (Proton would otherwise orphan it in All Mail): ${retained.join(", ")}. ` +
+            `Remove via Proton web UI (search "${"@test.local".replace("@", "")}").`,
+          );
+        }
       } catch {
         // ignore — best-effort cleanup
       }

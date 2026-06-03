@@ -46,6 +46,11 @@ export interface ScratchImap {
   emptyToTrash(folder: string): Promise<void>;
   /** Permanently delete messages in Trash whose Message-ID contains `marker`. */
   purgeTrash(marker: string): Promise<void>;
+  /** Number of messages currently in `folder`. Used to VERIFY a folder is empty
+   *  before deleting it — on Proton a move-to-Trash that silently no-ops (the
+   *  Bug-A class) would otherwise let us delete a non-empty folder and strand its
+   *  messages in the unpurgeable All Mail union. */
+  countMessages(folder: string): Promise<number>;
 }
 
 export type ScratchKind = "folders" | "labels" | "spaced";
@@ -99,22 +104,34 @@ export class ScratchSession {
    * unpurgeable All Mail union), we must purge the MESSAGES first:
    *   1. move each token folder's messages to Trash (never EXPUNGE-in-place),
    *   2. permanently delete the test messages from Trash (clears All Mail too),
-   *   3. delete the now-empty token folders.
+   *   3. delete a token folder ONLY once it is verified empty.
    * Every step is guarded — only token-bearing folders are emptied/deleted, and
    * only `@test.local` messages are purged from Trash.
+   *
+   * Safety bias: if a folder's messages could not be relocated (move threw, or
+   * silently no-op'd), we leave the labeled scratch folder standing rather than
+   * delete it and orphan its messages into the unpurgeable All Mail union. A
+   * leftover `mpE2E-*` folder is visible and re-cleanable; an All Mail orphan is
+   * not. `cleanup` reports any folder it had to retain.
    */
-  async cleanup(marker: string = TEST_MESSAGE_ID_MARKER): Promise<void> {
+  async cleanup(marker: string = TEST_MESSAGE_ID_MARKER): Promise<string[]> {
     const all = await this.imap.listMailboxes();
     const mine = all.filter((m) => m.includes(this.token)).sort((a, b) => b.length - a.length);
+    const emptied: string[] = [];
     for (const p of mine) {
       assertScratch(p, this.token);
-      try { await this.imap.emptyToTrash(p); } catch { /* best-effort */ }
+      try {
+        await this.imap.emptyToTrash(p);
+        if ((await this.imap.countMessages(p)) === 0) emptied.push(p);
+      } catch { /* leave folder standing rather than risk orphaning its mail */ }
     }
     try { await this.imap.purgeTrash(marker); } catch { /* best-effort */ }
-    for (const p of mine) {
+    for (const p of emptied) {
       assertScratch(p, this.token);
       try { await this.imap.deleteMailbox(p); } catch { /* best-effort */ }
     }
     this.created.clear();
+    const retained = mine.filter((p) => !emptied.includes(p));
+    return retained; // non-empty ⇒ a folder whose mail could not be relocated
   }
 }
