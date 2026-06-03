@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { AgentGrantStore } from "./grant-store.js";
+import { notifications } from "./notifications.js";
 import { rmSync, existsSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -18,6 +19,31 @@ describe("AgentGrantStore", () => {
   it("starts empty when no file exists", () => {
     const s = new AgentGrantStore(path);
     expect(s.list()).toEqual([]);
+  });
+
+  it("ensureActiveServiceGrant notifies once on create, NOT on every re-verify (no toast spam)", () => {
+    const s = new AgentGrantStore(path);
+    const kinds: string[] = [];
+    const unsub = notifications.subscribe((ev) => kinds.push(ev.kind));
+    try {
+      const args = { clientId: "pmc_cc", clientName: "cowork", preset: "full" as const };
+      s.ensureActiveServiceGrant(args); // first login → created
+      s.ensureActiveServiceGrant(args); // client_credentials re-auth → no-op, silent
+      s.ensureActiveServiceGrant(args); // again → still silent
+      expect(kinds).toEqual(["grant-created"]);
+      expect(s.get("pmc_cc")?.status).toBe("active");
+    } finally { unsub(); }
+  });
+
+  it("ensureActiveServiceGrant re-activating a non-active grant DOES notify (grant-approved)", () => {
+    const s = new AgentGrantStore(path);
+    s.createPending({ clientId: "pmc_cc2", clientName: "cowork" }); // pending, not active
+    const kinds: string[] = [];
+    const unsub = notifications.subscribe((ev) => kinds.push(ev.kind));
+    try {
+      s.ensureActiveServiceGrant({ clientId: "pmc_cc2", clientName: "cowork", preset: "full" });
+      expect(kinds).toEqual(["grant-approved"]); // real transition pending→active
+    } finally { unsub(); }
   });
 
   it("createPending seeds a pending grant and persists it", () => {
