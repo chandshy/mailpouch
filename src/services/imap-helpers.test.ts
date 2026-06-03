@@ -176,3 +176,36 @@ describe("verifyRelocatedMessages", () => {
     expect(r.failed).toBe(1);
   });
 });
+
+import { buildSearchCriteria, sanitizeImapSearchValue } from "./imap-helpers.js";
+import type { SearchEmailOptions } from "../types/index.js";
+
+describe("buildSearchCriteria", () => {
+  it("maps fields + sanitizes injection chars", () => {
+    const c = buildSearchCriteria({ from: 'a"\\\r\nx', subject: "hi", isRead: false, isStarred: true } as SearchEmailOptions);
+    expect(c.from).toBe("ax");          // quote/backslash/CR/LF stripped
+    expect(c.subject).toBe("hi");
+    expect(c.seen).toBe(false);
+    expect(c.flagged).toBe(true);
+  });
+  it("maps dates, size, flag, sent predicates", () => {
+    const sb = new Date("2026-06-01");
+    const c = buildSearchCriteria({ dateFrom: "2026-05-01", larger: 1000, answered: true, isDraft: false, sentBefore: sb } as SearchEmailOptions);
+    expect(c.since).toBeInstanceOf(Date);
+    expect(c.larger).toBe(1000);
+    expect(c.answered).toBe(true);
+    expect(c.draft).toBe(false);
+    expect(c.sentBefore).toBe(sb);
+  });
+  it("enforces the header field-name grammar (IMAP-004)", () => {
+    expect(() => buildSearchCriteria({ header: { field: "X bad", value: "v" } } as SearchEmailOptions)).toThrow(/Invalid header field/);
+    const c = buildSearchCriteria({ header: { field: "X-Custom", value: 'v"x' } } as SearchEmailOptions);
+    expect(c.header).toEqual({ "X-Custom": "vx" });
+  });
+  it("ignores an invalid date silently", () => {
+    expect(buildSearchCriteria({ dateFrom: "not-a-date" } as SearchEmailOptions).since).toBeUndefined();
+  });
+  it("sanitizeImapSearchValue strips quote/backslash/CRLF/NUL", () => {
+    expect(sanitizeImapSearchValue('a"b\\c\r\nd\x00e')).toBe("abcde");
+  });
+});

@@ -2,10 +2,10 @@
  * IMAP Service for reading emails via Proton Bridge
  */
 
-import { ImapFlow, type SearchObject } from 'imapflow';
+import { ImapFlow } from 'imapflow';
 import type { ParsedMail, Attachment, AddressObject } from 'mailparser';
 import { simpleParser } from 'mailparser';
-import { buildEmailMessage, verifyRelocatedMessages, truncateBody, stripHtml, normalizeAddressList } from './imap-helpers.js';
+import { buildEmailMessage, verifyRelocatedMessages, buildSearchCriteria, truncateBody, stripHtml, normalizeAddressList } from './imap-helpers.js';
 // Re-export the pure helpers from their original home so existing importers
 // (index.ts, tests) keep working after the move to imap-helpers.ts.
 export { stripHtml, normalizeAddressList };
@@ -1173,63 +1173,7 @@ export class SimpleIMAPService {
     const lock = await this.client.getMailboxLock(folder);
 
     try {
-      const searchCriteria: SearchObject = {};
-
-      // Strip IMAP search-unsafe characters (quote and backslash) to prevent
-      // search criteria injection.  imapflow passes these as quoted strings
-      // in the IMAP SEARCH command, so an unescaped '"' would close the
-      // quoted string early, and '\' could escape the closing quote.
-      // VALID-002: also strip CR/LF/NUL — a value like "x\r\nA002 LOGOUT" would
-      // otherwise smuggle a command line into the IMAP stream.
-      const sanitizeImapStr = (s: string) => s.replace(/["\\\r\n\x00]/g, "");
-      if (options.from) searchCriteria.from = sanitizeImapStr(options.from);
-      if (options.to) searchCriteria.to = sanitizeImapStr(options.to);
-      if (options.subject) searchCriteria.subject = sanitizeImapStr(options.subject);
-      if (options.dateFrom) {
-        const d = new Date(options.dateFrom);
-        if (!isNaN(d.getTime())) searchCriteria.since = d;
-      }
-      if (options.dateTo) {
-        const d = new Date(options.dateTo);
-        if (!isNaN(d.getTime())) searchCriteria.before = d;
-      }
-
-      // imapflow SearchObject uses a single boolean for seen/unseen, answered/unanswered,
-      // and draft/undraft — `seen: false` means "unseen", etc.
-      if (options.isRead    !== undefined) searchCriteria.seen     = options.isRead;
-      if (options.isStarred !== undefined) searchCriteria.flagged  = options.isStarred;
-
-      // Body/text search
-      if (options.body) searchCriteria.body = sanitizeImapStr(options.body);
-      if (options.text) searchCriteria.text = sanitizeImapStr(options.text);
-
-      // Additional header fields
-      if (options.bcc) searchCriteria.bcc = sanitizeImapStr(options.bcc);
-      // header is { [field]: value } in the SearchObject API (not a tuple).
-      // IMAP-004: the field+value here were the only SEARCH inputs not passed
-      // through sanitizeImapStr. A raw '"' in the value closes imapflow's
-      // quoted string early; a malformed field name breaks the
-      // `SEARCH HEADER <field-name> <value>` grammar. Sanitise the value and
-      // enforce the RFC 5322 field-name grammar on the field.
-      if (options.header) {
-        const field = options.header.field;
-        if (!/^[A-Za-z][A-Za-z0-9-]*$/.test(field)) {
-          throw new Error(`Invalid header field name: ${JSON.stringify(field)}`);
-        }
-        searchCriteria.header = { [field]: sanitizeImapStr(options.header.value) };
-      }
-
-      // Flag criteria — imapflow uses boolean: true = flag set, false = flag not set
-      if (options.answered !== undefined) searchCriteria.answered = options.answered;
-      if (options.isDraft  !== undefined) searchCriteria.draft    = options.isDraft;
-
-      // Size criteria
-      if (options.larger !== undefined)  searchCriteria.larger = options.larger;
-      if (options.smaller !== undefined) searchCriteria.smaller = options.smaller;
-
-      // Sent-date criteria (Date: header vs INTERNALDATE)
-      if (options.sentBefore) searchCriteria.sentBefore = options.sentBefore;
-      if (options.sentSince)  searchCriteria.sentSince  = options.sentSince;
+      const searchCriteria = buildSearchCriteria(options);
 
       // Request ESEARCH PARTIAL so the server returns only the first `limit` UIDs
       // rather than the full result set. Falls back transparently to a plain number[]

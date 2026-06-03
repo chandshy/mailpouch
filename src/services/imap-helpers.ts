@@ -6,7 +6,57 @@
  */
 
 import type { ParsedMail, Attachment, AddressObject } from "mailparser";
-import type { EmailMessage } from "../types/index.js";
+import type { SearchObject } from "imapflow";
+import type { EmailMessage, SearchEmailOptions } from "../types/index.js";
+
+/** Strip IMAP search-unsafe characters before they reach the SEARCH command:
+ *  quote/backslash (would break imapflow's quoted strings) and CR/LF/NUL (could
+ *  smuggle a command line into the IMAP stream — VALID-002 / IMAP-004). */
+export function sanitizeImapSearchValue(s: string): string {
+  return s.replace(/["\\\r\n\x00]/g, "");
+}
+
+/**
+ * Map a validated SearchEmailOptions to an imapflow SearchObject — all values
+ * sanitized, the header field-name held to the RFC 5322 grammar. Pure; throws
+ * only on an invalid header field name. (Was inlined in searchSingleFolder.)
+ */
+export function buildSearchCriteria(options: SearchEmailOptions): SearchObject {
+  const c: SearchObject = {};
+  if (options.from) c.from = sanitizeImapSearchValue(options.from);
+  if (options.to) c.to = sanitizeImapSearchValue(options.to);
+  if (options.subject) c.subject = sanitizeImapSearchValue(options.subject);
+  if (options.dateFrom) {
+    const d = new Date(options.dateFrom);
+    if (!isNaN(d.getTime())) c.since = d;
+  }
+  if (options.dateTo) {
+    const d = new Date(options.dateTo);
+    if (!isNaN(d.getTime())) c.before = d;
+  }
+  // imapflow uses a single boolean: `seen:false` = unseen, etc.
+  if (options.isRead !== undefined) c.seen = options.isRead;
+  if (options.isStarred !== undefined) c.flagged = options.isStarred;
+  if (options.body) c.body = sanitizeImapSearchValue(options.body);
+  if (options.text) c.text = sanitizeImapSearchValue(options.text);
+  if (options.bcc) c.bcc = sanitizeImapSearchValue(options.bcc);
+  // IMAP-004: sanitize the header value AND enforce the field-name grammar so a
+  // raw '"' or malformed field can't break the `SEARCH HEADER <field> <value>` syntax.
+  if (options.header) {
+    const field = options.header.field;
+    if (!/^[A-Za-z][A-Za-z0-9-]*$/.test(field)) {
+      throw new Error(`Invalid header field name: ${JSON.stringify(field)}`);
+    }
+    c.header = { [field]: sanitizeImapSearchValue(options.header.value) };
+  }
+  if (options.answered !== undefined) c.answered = options.answered;
+  if (options.isDraft !== undefined) c.draft = options.isDraft;
+  if (options.larger !== undefined) c.larger = options.larger;
+  if (options.smaller !== undefined) c.smaller = options.smaller;
+  if (options.sentBefore) c.sentBefore = options.sentBefore;
+  if (options.sentSince) c.sentSince = options.sentSince;
+  return c;
+}
 
 /** Per-source-folder record of a bulk move/copy: which UIDs the server accepted,
  *  their captured Message-IDs, the UIDs UIDPLUS confirmed relocated, and whether
