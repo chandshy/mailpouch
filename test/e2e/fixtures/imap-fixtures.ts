@@ -184,27 +184,79 @@ export class ImapFixtures {
     return this.appendSeed(folder, seed, flags);
   }
 
+  /** Move EVERY message in `folder` to Trash. Used by safe-gate cleanup: on
+   *  Proton, deleting a folder strands its messages in the unpurgeable All Mail
+   *  union, so we relocate them to Trash (deletable) first. The caller guards
+   *  that `folder` is a scratch folder. */
+  async emptyToTrash(folder: string): Promise<void> {
+    try { await this.createMailbox("Trash"); } catch { /* Bridge has it; Greenmail may need it */ }
+    await this.withReconnect(async () => {
+      const lock = await this.client.getMailboxLock(folder);
+      try {
+        const uids: number[] = [];
+        for await (const msg of this.client.fetch("1:*", { uid: true }, { uid: false })) {
+          if (typeof msg.uid === "number") uids.push(msg.uid);
+        }
+        if (uids.length) await this.client.messageMove(uids, "Trash", { uid: true });
+      } finally { lock.release(); }
+    });
+  }
+
+  /** Permanently delete Trash messages whose Message-ID contains `marker`
+   *  (e.g. `@test.local`). On Proton this also clears them from the All Mail
+   *  union. Only test-seed messages match — real mail never carries the marker. */
+  async purgeTrash(marker: string): Promise<void> {
+    await this.withReconnect(async () => {
+      const lock = await this.client.getMailboxLock("Trash");
+      try {
+        const uids = await this.client.search({ header: { "message-id": marker } }, { uid: true });
+        if (Array.isArray(uids) && uids.length) await this.client.messageDelete(uids, { uid: true });
+      } finally { lock.release(); }
+    });
+  }
+
   /** Return the UIDs present in `folder`, sorted ascending. Reconnects
    *  before fetching so the SELECT sees the latest server state — mailpouch
    *  shares the same Greenmail user and its mutations would otherwise be
    *  invisible to a stale persistent SELECT. */
   async listUids(folder: string): Promise<number[]> {
-    await this.reconnect();
-    const lock = await this.client.getMailboxLock(folder);
-    try {
-      const uids: number[] = [];
-      for await (const msg of this.client.fetch("1:*", { uid: true }, { uid: false })) {
-        if (typeof msg.uid === "number") uids.push(msg.uid);
+    // withReconnect retries once on a transient "Command failed"/"NoConnection"
+    // — Bridge can leave the client wedged right after mailpouch mutates the
+    // folder (move/expunge). reconnect() first forces a fresh SELECT so we see
+    // the latest server state.
+    return this.withReconnect(async () => {
+      await this.reconnect();
+      const lock = await this.client.getMailboxLock(folder);
+      try {
+        const uids: number[] = [];
+        for await (const msg of this.client.fetch("1:*", { uid: true }, { uid: false })) {
+          if (typeof msg.uid === "number") uids.push(msg.uid);
+        }
+        return uids.sort((a, b) => a - b);
+      } finally {
+        lock.release();
       }
-      return uids.sort((a, b) => a - b);
-    } finally {
-      lock.release();
-    }
+    });
   }
 
   /** Number of messages in `folder`. */
   async messageCount(folder: string): Promise<number> {
     return (await this.listUids(folder)).length;
+  }
+
+  /** UIDs in `folder` whose Subject header contains `substr` (server-side
+   *  SEARCH). Used to locate a self-seeded, token-subjected message inside the
+   *  All Mail union for the Bug-A move-out-of-All-Mail test. */
+  async searchSubject(folder: string, substr: string): Promise<number[]> {
+    return this.withReconnect(async () => {
+      const lock = await this.client.getMailboxLock(folder);
+      try {
+        const uids = await this.client.search({ header: { subject: substr } }, { uid: true });
+        return Array.isArray(uids) ? uids : [];
+      } finally {
+        lock.release();
+      }
+    });
   }
 
   /** Return the IMAP flags set on a specific UID in `folder`, or null if not found.
