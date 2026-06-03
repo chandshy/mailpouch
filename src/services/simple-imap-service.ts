@@ -861,44 +861,61 @@ export class SimpleIMAPService {
       return cached;
     }
 
+    // On a connection failure, serve the last-known folders if we have them
+    // (degraded but truthful). With an EMPTY cache we must NOT return [] —
+    // that's indistinguishable from "this account has zero folders" (IMAP-012,
+    // same contract as getEmails). Throw so callers see the connection error.
+    const cachedOrThrow = (why: string): EmailFolder[] => {
+      if (this.folderCache.size > 0) {
+        logger.warn(`${why} — returning cached folders`, 'IMAPService');
+        const cached = Array.from(this.folderCache.values());
+        tags.resultCount = cached.length;
+        return cached;
+      }
+      throw new IMAPNotConnectedError(`Cannot list folders: ${why}`);
+    };
+
     try {
       await this.ensureConnection();
     } catch (error) {
-      logger.warn('IMAP not connected, returning cached folders', 'IMAPService');
-      const cached = Array.from(this.folderCache.values());
-      tags.resultCount = cached.length;
-      return cached;
+      return cachedOrThrow('IMAP not connected');
     }
 
     if (!this.client) {
-      logger.warn('IMAP client not available, returning cached folders', 'IMAPService');
-      const cached = Array.from(this.folderCache.values());
-      tags.resultCount = cached.length;
-      return cached;
+      return cachedOrThrow('IMAP client not available');
     }
 
     try {
       const folders = await this.client.list();
       const result: EmailFolder[] = [];
 
-      const SYSTEM_PATHS = new Set(['inbox','sent','drafts','trash','spam','archive','all mail','starred']);
-
       // IMAP-022: issue the per-folder STATUS probes concurrently. The previous
       // serial `await` loop cost one full round-trip per folder (30+ on a
       // label-heavy Proton account => >1s per cache miss). imapflow pipelines
-      // STATUS commands fine, so Promise.all collapses this to ~one round-trip.
+      // STATUS commands fine, so this collapses to ~one round-trip.
+      // allSettled (not all): one folder's STATUS rejecting — a transient
+      // per-mailbox error or a folder that vanished mid-list — must NOT nuke the
+      // entire listing. A failed probe yields a folder with 0/0 counts rather
+      // than dropping it or throwing.
       const client = this.client;
-      const statuses = await Promise.all(
+      const statuses = await Promise.allSettled(
         folders.map(folder => client.status(folder.path, { messages: true, unseen: true })),
       );
 
       folders.forEach((folder, i) => {
-        const status = statuses[i];
+        const settled = statuses[i];
+        const status = settled.status === 'fulfilled' ? settled.value : undefined;
+        if (!status) {
+          logger.warn(`STATUS probe failed for folder '${folder.path}' — reporting 0 counts`, 'IMAPService');
+        }
 
+        // specialUse is the authoritative system-mailbox signal (works for
+        // localised paths like `Papelera`); the name set is the fallback for
+        // servers that don't report it.
         let folderType: 'system' | 'user-folder' | 'label';
         if (folder.path.startsWith('Labels/')) {
           folderType = 'label';
-        } else if (folder.specialUse || SYSTEM_PATHS.has(folder.path.toLowerCase())) {
+        } else if (folder.specialUse || SimpleIMAPService.SYSTEM_FOLDER_NAMES.has(folder.path.toLowerCase())) {
           folderType = 'system';
         } else {
           folderType = 'user-folder';
@@ -907,8 +924,8 @@ export class SimpleIMAPService {
         const emailFolder: EmailFolder = {
           name: folder.name,
           path: folder.path,
-          totalMessages: status.messages || 0,
-          unreadMessages: status.unseen || 0,
+          totalMessages: status?.messages || 0,
+          unreadMessages: status?.unseen || 0,
           specialUse: folder.specialUse,
           folderType,
         };
@@ -2674,6 +2691,25 @@ export class SimpleIMAPService {
   }
 
   /**
+   * Proton shares ONE namespace across `Folders/` and `Labels/`, so a leaf name
+   * is unique across both — creating `Labels/Tech` when `Folders/Tech` exists
+   * collides. Returns true if `folderName` (exact path) or its leaf already
+   * exists as a folder or label. The server reports this as ALREADYEXISTS /
+   * 409 Code=2500, but doesn't always pass the text through — this is the
+   * listing-based fallback verification shared by createFolder + renameFolder.
+   */
+  private async isNameInUse(folderName: string): Promise<boolean> {
+    const leaf = (folderName.split('/').pop() || '').trim().toLowerCase();
+    const folders = await this.getFolders();
+    return folders.some((f) => {
+      const p = f.path;
+      return p === folderName ||
+        ((p.startsWith('Folders/') || p.startsWith('Labels/')) &&
+          (p.split('/').pop() || '').trim().toLowerCase() === leaf);
+    });
+  }
+
+  /**
    * Create a mailbox if it does not already exist; no-op when it is present.
    * Used by the label tools so "move/copy to label X" actually creates label X
    * when missing (the COPY would otherwise target a nonexistent Labels/<name>,
@@ -2723,16 +2759,8 @@ export class SimpleIMAPService {
       // by listing (a folder/label leaf name is unique across both namespaces).
       let conflict = hay.includes('alreadyexists') || hay.includes('already exists') || hay.includes('code=2500');
       if (!conflict) {
-        try {
-          const leaf = (folderName.split('/').pop() || '').trim().toLowerCase();
-          const folders = await this.getFolders();
-          conflict = folders.some((f) => {
-            const p = f.path;
-            return p === folderName ||
-              ((p.startsWith('Folders/') || p.startsWith('Labels/')) &&
-                (p.split('/').pop() || '').trim().toLowerCase() === leaf);
-          });
-        } catch { /* listing failed — fall through to the raw error */ }
+        try { conflict = await this.isNameInUse(folderName); }
+        catch { /* listing failed — fall through to the raw error */ }
       }
       if (conflict) {
         logger.warn(`Folder/label name already in use: ${folderName}`, 'IMAPService');
@@ -2748,9 +2776,14 @@ export class SimpleIMAPService {
   private static readonly PROTECTED_SPECIAL_USE = new Set([
     '\\Inbox', '\\Sent', '\\Drafts', '\\Trash', '\\Junk', '\\Archive', '\\All', '\\Flagged',
   ]);
-  private static readonly PROTECTED_NAMES = new Set([
+  /** The one authoritative set of system-mailbox names (casefolded). Drives BOTH
+   *  folder classification (getFolders) AND destructive-op protection
+   *  (isProtectedFolder) so the two can't drift — `spam`/`junk` both map to
+   *  \Junk, so both are listed. */
+  private static readonly SYSTEM_FOLDER_NAMES = new Set([
     'inbox', 'sent', 'drafts', 'trash', 'spam', 'junk', 'archive', 'all mail', 'starred',
   ]);
+  private static readonly PROTECTED_NAMES = SimpleIMAPService.SYSTEM_FOLDER_NAMES;
 
   /**
    * IMAP-014: decide whether a folder is a protected system mailbox before a
@@ -2762,17 +2795,16 @@ export class SimpleIMAPService {
   private async isProtectedFolder(folderName: string): Promise<boolean> {
     const normalized = folderName.trim().toLowerCase();
     if (SimpleIMAPService.PROTECTED_NAMES.has(normalized)) return true;
-    try {
-      const folders = await this.getFolders();
-      const match = folders.find(f => f.path.trim().toLowerCase() === normalized);
-      if (match?.specialUse && SimpleIMAPService.PROTECTED_SPECIAL_USE.has(match.specialUse)) {
-        return true;
-      }
-    } catch (error) {
-      // Discovery failed — fall back to the name check already performed above.
-      logger.warn('Folder discovery failed during protected-folder check', 'IMAPService', error);
-    }
-    return false;
+    // A localised system mailbox (e.g. `Papelera` = \Trash) is only identifiable
+    // by its server-reported specialUse, which requires folder discovery. If
+    // discovery fails we CANNOT prove the target isn't a system mailbox, so we
+    // must fail CLOSED: let the error propagate and refuse the destructive op,
+    // never swallow-and-return-false (which would let INBOX/Trash be deleted on
+    // a transient blip). getFolders serves a warm cache when merely disconnected,
+    // so this only throws when there's genuinely no way to verify.
+    const folders = await this.getFolders();
+    const match = folders.find(f => f.path.trim().toLowerCase() === normalized);
+    return !!(match?.specialUse && SimpleIMAPService.PROTECTED_SPECIAL_USE.has(match.specialUse));
   }
 
   /**
@@ -2831,6 +2863,10 @@ export class SimpleIMAPService {
     if (await this.isProtectedFolder(oldName)) {
       throw new Error(`Cannot rename protected folder: ${oldName}`);
     }
+    // ...and don't let a folder be renamed INTO a reserved system-mailbox name.
+    if (SimpleIMAPService.PROTECTED_NAMES.has(newName.trim().toLowerCase())) {
+      throw new Error(`Cannot rename to a protected folder name: ${newName}`);
+    }
 
     try {
       logger.debug(`Renaming folder: ${oldName} -> ${newName}`, 'IMAPService');
@@ -2843,12 +2879,21 @@ export class SimpleIMAPService {
       logger.info(`Folder renamed: ${oldName} -> ${newName}`, 'IMAPService');
       return true;
     } catch (error: unknown) {
-      const rt = (error as { responseText?: string }).responseText;
-      if (rt?.includes('NONEXISTENT')) {
+      const rt = (error as { responseText?: string }).responseText || '';
+      const em = error instanceof Error ? error.message : String(error);
+      const hay = `${rt} ${em}`.toLowerCase();
+      if (hay.includes('nonexistent')) {
         throw new Error(`Folder '${oldName}' does not exist`);
       }
-      if (rt?.includes('ALREADYEXISTS')) {
-        throw new Error(`Folder '${newName}' already exists`);
+      // Same cross-namespace collision as createFolder: ALREADYEXISTS / 409
+      // Code=2500, with a listing-based fallback when the text isn't passed through.
+      let conflict = hay.includes('alreadyexists') || hay.includes('already exists') || hay.includes('code=2500');
+      if (!conflict) {
+        try { conflict = await this.isNameInUse(newName); }
+        catch { /* listing failed — fall through to the raw error */ }
+      }
+      if (conflict) {
+        throw new Error(`A folder or label named '${newName}' already exists. Proton shares one namespace across folders and labels, so the name can't be reused.`);
       }
       logger.error('Failed to rename folder', 'IMAPService', error);
       throw error;

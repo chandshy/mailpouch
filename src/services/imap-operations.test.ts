@@ -1220,13 +1220,13 @@ describe("SimpleIMAPService.getFolders", () => {
     expect(folders[0].path).toBe("INBOX");
   });
 
-  it("returns empty array when ensureConnection throws and cache is empty", async () => {
+  it("throws (not []) when ensureConnection fails and cache is empty (IMAP-012)", async () => {
     const svc = new SimpleIMAPService();
     vi.spyOn(svc as any, "ensureConnection").mockRejectedValue(new Error("no connection config"));
 
-    const folders = await svc.getFolders();
-
-    expect(folders).toEqual([]);
+    // An empty array would be indistinguishable from a real zero-folder account;
+    // surface the connection failure instead.
+    await expect(svc.getFolders()).rejects.toThrow(/Cannot list folders/);
   });
 
   it("returns cached folders when ensureConnection throws and cache has data", async () => {
@@ -1242,15 +1242,13 @@ describe("SimpleIMAPService.getFolders", () => {
     expect(folders[0].path).toBe("Sent");
   });
 
-  it("returns empty array when client is null after ensureConnection", async () => {
+  it("throws (not []) when client is null after ensureConnection and cache is empty (IMAP-012)", async () => {
     const svc = new SimpleIMAPService();
     // ensureConnection succeeds but client remains null
     vi.spyOn(svc as any, "ensureConnection").mockResolvedValue(undefined);
     (svc as any).client = null;
 
-    const folders = await svc.getFolders();
-
-    expect(folders).toEqual([]);
+    await expect(svc.getFolders()).rejects.toThrow(/Cannot list folders/);
   });
 
   it("fetches from IMAP when cache is empty and client is connected", async () => {
@@ -1286,6 +1284,46 @@ describe("SimpleIMAPService.getFolders", () => {
     (svc as any).client = mockClient;
 
     await expect(svc.getFolders()).rejects.toThrow("IMAP list failed");
+  });
+
+  it("one folder's STATUS rejection does not nuke the whole listing (allSettled)", async () => {
+    const svc = new SimpleIMAPService();
+    const mockClient = {
+      list: vi.fn().mockResolvedValue([
+        { path: "INBOX", name: "INBOX", delimiter: "/", flags: new Set(), specialUse: undefined },
+        { path: "Folders/Flaky", name: "Flaky", delimiter: "/", flags: new Set(), specialUse: undefined },
+      ]),
+      status: vi.fn().mockImplementation((path: string) =>
+        path === "Folders/Flaky"
+          ? Promise.reject(new Error("STATUS failed for this mailbox"))
+          : Promise.resolve({ messages: 7, unseen: 1 })),
+    };
+    vi.spyOn(svc as any, "ensureConnection").mockResolvedValue(undefined);
+    (svc as any).client = mockClient;
+
+    const folders = await svc.getFolders();
+
+    expect(folders).toHaveLength(2);
+    expect(folders.find(f => f.path === "INBOX")!.totalMessages).toBe(7);
+    // The flaky folder still appears, with safe 0 counts rather than dropping it.
+    const flaky = folders.find(f => f.path === "Folders/Flaky")!;
+    expect(flaky.totalMessages).toBe(0);
+    expect(flaky.unreadMessages).toBe(0);
+  });
+
+  it("classifies a folder named 'Junk' as system (SYSTEM_FOLDER_NAMES includes junk)", async () => {
+    const svc = new SimpleIMAPService();
+    const mockClient = {
+      list: vi.fn().mockResolvedValue([
+        { path: "Junk", name: "Junk", delimiter: "/", flags: new Set(), specialUse: undefined },
+      ]),
+      status: vi.fn().mockResolvedValue({ messages: 0, unseen: 0 }),
+    };
+    vi.spyOn(svc as any, "ensureConnection").mockResolvedValue(undefined);
+    (svc as any).client = mockClient;
+
+    const folders = await svc.getFolders();
+    expect(folders.find(f => f.path === "Junk")!.folderType).toBe("system");
   });
 
   it("uses 0 when status.messages and status.unseen are missing (lines 526-527)", async () => {
