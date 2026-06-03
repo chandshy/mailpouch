@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.0.72] — 2026-05-31
 
+### Changed — deletion moves to Trash; mail is never permanently deleted (BREAKING)
+
+- **`delete_email` / `bulk_delete_emails` / `bulk_delete` now MOVE mail to Trash instead of issuing `\Deleted` + EXPUNGE.** Deleted mail stays recoverable from Trash (Proton purges Trash on its own schedule); mailpouch no longer directly/permanently deletes a message. An email already in Trash is left in place (the delete is a no-op success). The move uses the verified-landing path (UIDPLUS `COPYUID` / Message-ID fallback), so a no-op from a union mailbox (e.g. All Mail) is reported as a failure rather than a silent success — pass the message's real `sourceFolder`.
+- **Unchanged:** `remove_label` / `bulk_remove_label` still detach a label by removing the message from its `Labels/<name>` folder (the message survives in All Mail / its other folders) — that is label removal, not deletion. The destructive-confirm gate (`{ confirmed: true }`) on the delete tools is retained.
+
 ### Changed — global agent auth: every agent authenticates (BREAKING)
 
 - **The shared static bearer token was removed.** It authenticated as a single shared identity (`bearer:static`) that **bypassed the per-agent grant store and the audit log entirely** — if it leaked, every tool ran with zero per-agent attribution. Remote mode is now **OAuth-only**: every caller authenticates as its own client and is independently gated, audited, and revocable. A configured `remoteBearerToken` is ignored with a startup warning; `remoteMode` now **refuses to start** unless `remoteOauthEnabled` is set.

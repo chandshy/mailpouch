@@ -625,7 +625,7 @@ describe("SimpleIMAPService.deleteEmail", () => {
     expect(await svc.deleteEmail("1")).toBe(false);
   });
 
-  it("deletes email and returns true", async () => {
+  it("deletes email by MOVING it to Trash (never EXPUNGE) and returns true", async () => {
     const svc = new SimpleIMAPService();
     const client = connectSvc(svc);
     seedUids(client, "INBOX", [60]);
@@ -634,7 +634,19 @@ describe("SimpleIMAPService.deleteEmail", () => {
     const result = await svc.deleteEmail("60");
 
     expect(result).toBe(true);
-    expect(client.messageDelete).toHaveBeenCalledWith("60", { uid: true });
+    expect(client.messageMove).toHaveBeenCalledWith("60", "Trash", { uid: true });
+    expect(client.messageDelete).not.toHaveBeenCalled();
+  });
+
+  it("is a no-op success when the email is already in Trash (never permanently deletes)", async () => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc);
+
+    const result = await svc.deleteEmail("62", "Trash");
+
+    expect(result).toBe(true);
+    expect(client.messageMove).not.toHaveBeenCalled();
+    expect(client.messageDelete).not.toHaveBeenCalled();
   });
 
   it("evicts email from cache after deletion", async () => {
@@ -889,7 +901,7 @@ describe("SimpleIMAPService.bulkDeleteEmails", () => {
     await expect(svc.bulkDeleteEmails(["1"])).rejects.toThrow("not connected");
   });
 
-  it("batch-deletes emails grouped by folder", async () => {
+  it("batch-deletes emails by MOVING them to Trash (never EXPUNGE)", async () => {
     const svc = new SimpleIMAPService();
     const client = connectSvc(svc);
     seedUids(client, "INBOX", [90, 91]);
@@ -900,53 +912,24 @@ describe("SimpleIMAPService.bulkDeleteEmails", () => {
 
     expect(results.success).toBe(2);
     expect(results.failed).toBe(0);
-    expect(client.messageDelete).toHaveBeenCalledWith("90,91", { uid: true });
+    // Delete = move to Trash, in a single batched messageMove. Never messageDelete.
+    expect(client.messageMove).toHaveBeenCalledWith("90,91", "Trash", { uid: true });
+    expect(client.messageDelete).not.toHaveBeenCalled();
     // Cache entries should be evicted (compound key)
     expect((svc as any).emailCache.has("INBOX:90")).toBe(false);
     expect((svc as any).emailCache.has("INBOX:91")).toBe(false);
   });
 
-  // IMAP-016: when the bulk delete chunk fails, the fallback must NOT issue N
-  // serial EXPUNGEs (each messageDelete is a full EXPUNGE round-trip that holds
-  // the mailbox lock and blocks IDLE). Instead it flags \Deleted per UID (cheap
-  // STORE) and runs exactly ONE trailing EXPUNGE for all flagged UIDs.
-  it("falls back to flag-then-single-expunge when batch fails (IMAP-016)", async () => {
+  it("is a no-op success for emails already in Trash (never permanently deletes)", async () => {
     const svc = new SimpleIMAPService();
-    const messageDelete = vi.fn()
-      .mockRejectedValueOnce(new Error("batch error")) // the chunk EXPUNGE fails
-      .mockResolvedValue(undefined);                   // the trailing EXPUNGE succeeds
-    const client = connectSvc(svc, { messageDelete });
-    seedUids(client, "INBOX", [92, 93]);
-    (svc as any).setCacheEntry("92", makeEmail("92", "INBOX"));
-    (svc as any).setCacheEntry("93", makeEmail("93", "INBOX"));
+    const client = connectSvc(svc);
 
-    const results = await svc.bulkDeleteEmails(["92", "93"]);
+    const results = await svc.bulkDeleteEmails(["92", "93"], "Trash");
 
     expect(results.success).toBe(2);
     expect(results.failed).toBe(0);
-    // Per-UID fallback marks \Deleted, never per-UID EXPUNGE.
-    expect(client.messageFlagsAdd).toHaveBeenCalledWith("92", ["\\Deleted"], { uid: true });
-    expect(client.messageFlagsAdd).toHaveBeenCalledWith("93", ["\\Deleted"], { uid: true });
-    // messageDelete called exactly twice total: the failed chunk + ONE trailing
-    // EXPUNGE of the flagged set — NOT once per UID.
-    expect(messageDelete).toHaveBeenCalledTimes(2);
-    expect(messageDelete).toHaveBeenLastCalledWith("92,93", { uid: true });
-  });
-
-  it("records per-email failure in fallback mode", async () => {
-    const svc = new SimpleIMAPService();
-    const client = connectSvc(svc, {
-      // The chunk EXPUNGE fails, then the per-UID \Deleted STORE also fails.
-      messageDelete: vi.fn().mockRejectedValue(new Error("batch error")),
-      messageFlagsAdd: vi.fn().mockRejectedValue(new Error("EXPUNGED")),
-    });
-    seedUids(client, "INBOX", [94]);
-    (svc as any).setCacheEntry("94", makeEmail("94", "INBOX"));
-
-    const results = await svc.bulkDeleteEmails(["94"]);
-
-    expect(results.failed).toBe(1);
-    expect(results.errors[0]).toMatch(/EXPUNGED/);
+    expect(client.messageMove).not.toHaveBeenCalled();
+    expect(client.messageDelete).not.toHaveBeenCalled();
   });
 
   it("counts invalid email IDs as failed immediately", async () => {
@@ -970,23 +953,7 @@ describe("SimpleIMAPService.bulkDeleteEmails", () => {
     expect(results.errors[0]).toContain("[object Object]"); // String({code:99})
   });
 
-  it("handles non-Error in per-email delete fallback", async () => {
-    const svc = new SimpleIMAPService();
-    const client = connectSvc(svc, {
-      messageDelete: vi.fn().mockRejectedValueOnce(new Error("batch fail")),
-      // The per-UID \Deleted STORE throws a non-Error value.
-      messageFlagsAdd: vi.fn().mockRejectedValueOnce("delete-error-string"),
-    });
-    seedUids(client, "INBOX", [96]);
-    (svc as any).setCacheEntry("96", makeEmail("96", "INBOX"));
-
-    const results = await svc.bulkDeleteEmails(["96"]);
-
-    expect(results.failed).toBe(1);
-    expect(results.errors[0]).toContain("delete-error-string");
-  });
-
-  it("discovers folder via getEmailById when email not in cache", async () => {
+  it("discovers folder via getEmailById when email not in cache (then moves to Trash)", async () => {
     const svc = new SimpleIMAPService();
     const client = connectSvc(svc);
     seedUids(client, "INBOX", [95]);
@@ -997,6 +964,7 @@ describe("SimpleIMAPService.bulkDeleteEmails", () => {
 
     expect(results.success).toBe(1);
     expect(client.getMailboxLock).toHaveBeenCalledWith("INBOX");
+    expect(client.messageMove).toHaveBeenCalledWith("95", "Trash", { uid: true });
   });
 });
 
@@ -2316,7 +2284,7 @@ describe("v3.0.45 runIdleLoop refuses TLS downgrade (IMAP-001)", () => {
 });
 
 describe("v3.0.45 bulk methods chunk wire calls (IMAP-002)", () => {
-  it("bulkDeleteEmails splits 2000 UIDs across multiple messageDelete calls", async () => {
+  it("bulkDeleteEmails splits 2000 UIDs across multiple messageMove calls (delete = move to Trash)", async () => {
     const svc = new SimpleIMAPService();
     const client = connectSvc(svc);
     const uids = Array.from({ length: 2000 }, (_, i) => String(1_000_000 + i));
@@ -2326,11 +2294,14 @@ describe("v3.0.45 bulk methods chunk wire calls (IMAP-002)", () => {
     seedUids(client, "INBOX", uids);
     await svc.bulkDeleteEmails(uids, "INBOX");
 
-    const calls = (client.messageDelete as ReturnType<typeof vi.fn>).mock.calls;
+    // Delete now moves to Trash; the UID-set still chunks under the wire cap.
+    const calls = (client.messageMove as ReturnType<typeof vi.fn>).mock.calls;
     expect(calls.length).toBeGreaterThan(1);
-    for (const [arg] of calls) {
+    for (const [arg, target] of calls) {
       expect(String(arg).length).toBeLessThanOrEqual(7500);
+      expect(target).toBe("Trash");
     }
+    expect(client.messageDelete).not.toHaveBeenCalled();
   });
 
   it("bulkMoveEmails per-chunk failure falls back per-UID for that chunk only", async () => {

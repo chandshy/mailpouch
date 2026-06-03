@@ -552,16 +552,18 @@ Refresh the folder list from IMAP. Returns `{ success, folderCount }`.
 
 ### Deletion — requires `full` (capped at 20/hr in `supervised`)
 
-**Deletion is permanent. There is no undo.**
+**Deletion moves mail to Trash — it is never permanently deleted. Mail stays recoverable from Trash (Proton purges Trash on its own schedule). An email already in Trash is left in place.** Move-to-Trash is verified-landing, so a no-op from a union mailbox (e.g. All Mail) is reported as a failure rather than a silent success — pass the message's real `sourceFolder`.
 
 #### `delete_email`
 ```
-emailId  string
+emailId       string
+sourceFolder  string   Recommended for non-INBOX UIDs.
 ```
 
 #### `bulk_delete_emails`
 ```
-emailIds  string[]  Max 200.
+emailIds      string[]  Max 200.
+sourceFolder  string    Recommended for non-INBOX UIDs.
 ```
 Returns `{ success, failed, errors }`.
 

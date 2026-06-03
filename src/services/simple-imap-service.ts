@@ -2455,60 +2455,79 @@ export class SimpleIMAPService {
     }); // end tracer.span('imap.bulkMoveEmails')
   }
 
+  /**
+   * Resolve the Trash mailbox path. Prefers the server-reported specialUse
+   * `\\Trash` (so localised names like `Papelera` resolve correctly), falls
+   * back to a folder literally named "Trash", then the bare path "Trash".
+   */
+  private async resolveTrashPath(): Promise<string> {
+    try {
+      const folders = await this.getFolders();
+      const byUse = folders.find(f => f.specialUse === '\\Trash');
+      if (byUse) return byUse.path;
+      const byName = folders.find(f => f.path.toLowerCase() === 'trash');
+      if (byName) return byName.path;
+    } catch {
+      logger.warn('Could not resolve Trash from the folder list; defaulting to "Trash"', 'IMAPService');
+    }
+    return 'Trash';
+  }
+
+  /** True if `folder` is the Trash mailbox — a delete there is a no-op, because
+   *  we never permanently delete (EXPUNGE) mail. */
+  private isTrashFolder(folder: string, trashPath: string): boolean {
+    return folder === trashPath || folder.toLowerCase() === 'trash';
+  }
+
+  /**
+   * Delete an email — implemented as a MOVE TO TRASH, never an EXPUNGE. Mail is
+   * always recoverable from Trash (and Proton purges Trash on its own schedule);
+   * mailpouch never directly/permanently deletes a message. An email already in
+   * Trash is left in place (the delete is a no-op success).
+   */
   async deleteEmail(emailId: string, sourceFolder?: string): Promise<boolean> {
     this.validateEmailId(emailId);
     if (sourceFolder !== undefined) this.validateFolderName(sourceFolder);
     return tracer.span('imap.deleteEmail', { emailId, sourceFolder }, async () => {
-    logger.debug('Deleting email', 'IMAPService', { emailId, sourceFolder });
+    logger.debug('Deleting email (move to Trash)', 'IMAPService', { emailId, sourceFolder });
 
     if (!this.client || !this.isConnected) {
       logger.warn('IMAP not connected', 'IMAPService');
       return false;
     }
 
-    try {
-      let folder: string;
-      if (sourceFolder) {
-        folder = sourceFolder;
-      } else {
-        const email = await this.getEmailById(emailId);
-        if (!email) {
-          throw new Error(`Email ${emailId} not found`);
-        }
-        folder = email.folder;
+    const trash = await this.resolveTrashPath();
+
+    let folder: string;
+    if (sourceFolder) {
+      folder = sourceFolder;
+    } else {
+      const email = await this.getEmailById(emailId);
+      if (!email) {
+        throw new Error(`Email ${emailId} not found`);
       }
-
-      const lock = await this.client.getMailboxLock(folder);
-
-      try {
-        const existing = await this.findExistingUidsInLockedFolder([emailId]);
-        if (!existing.has(emailId)) {
-          throw new Error(`Email ${emailId} not found in folder ${folder}`);
-        }
-
-        await this.client.messageDelete(emailId, { uid: true });
-
-        this.evictCacheEntry(`${folder}:${emailId}`);
-
-        logger.info(`Email ${emailId} deleted from ${folder}`, 'IMAPService');
-        return true;
-      } finally {
-        lock.release();
-      }
-    } catch (error) {
-      logger.error('Failed to delete email', 'IMAPService', error);
-      throw error;
+      folder = email.folder;
     }
+
+    if (this.isTrashFolder(folder, trash)) {
+      logger.info(`Email ${emailId} is already in Trash (${folder}); delete is a no-op — mail is never permanently deleted`, 'IMAPService');
+      return true;
+    }
+
+    // MOVE to Trash (verified-landing via moveEmail) instead of EXPUNGE.
+    return this.moveEmail(emailId, trash, folder);
     }); // end tracer.span('imap.deleteEmail')
   }
 
   /**
-   * Permanently delete many emails in one IMAP UID STORE+EXPUNGE per source folder.
+   * Delete many emails — implemented as a MOVE TO TRASH per source folder, never
+   * an EXPUNGE. Mail is always recoverable from Trash; mailpouch never directly/
+   * permanently deletes. Messages already in Trash are counted as success no-ops.
    *
    * @param sourceFolder When provided, all UIDs are assumed to live in this
    *   folder; cache lookup is skipped. Strongly recommended whenever the UIDs
-   *   came from anything other than INBOX. Pre-flight UID existence check
-   *   prevents silent no-ops from being counted as success.
+   *   came from anything other than INBOX. Move-to-Trash is verified-landing
+   *   (via bulkMoveEmails) so a union-mailbox no-op is reported as failure.
    */
   async bulkDeleteEmails(emailIds: string[], sourceFolder?: string): Promise<{ success: number; failed: number; errors: string[] }> {
     if (sourceFolder !== undefined) this.validateFolderName(sourceFolder);
@@ -2567,61 +2586,21 @@ export class SimpleIMAPService {
       }
     }
 
-    for (const [folder, ids] of emailsByFolder2.entries()) {
-      const lock = await this.client.getMailboxLock(folder);
-      try {
-        let existing: Set<string>;
-        try {
-          existing = await this.findExistingUidsInLockedFolder(ids);
-        } catch (e: unknown) {
-          // IMAP-006: transport error during pre-flight. Surface the real
-          // failure mode rather than collapsing into "UIDs not found" — the
-          // caller needs to distinguish "definitely absent" from "couldn't
-          // verify" so a retry is meaningful.
-          const msg = e instanceof Error ? e.message : String(e);
-          for (const id of ids) {
-            results.failed++;
-            results.errors.push(`UID ${id} existence check failed in folder ${folder}: ${msg}`);
-          }
-          continue;
-        }
-        const present: string[] = [];
-        for (const id of ids) {
-          if (existing.has(id)) {
-            present.push(id);
-          } else {
-            results.failed++;
-            results.errors.push(`UID ${id} not found in folder ${folder}`);
-          }
-        }
-        if (present.length === 0) continue;
+    const trash = await this.resolveTrashPath();
 
-        // IMAP-016: per-UID fallback flags \Deleted (cheap STORE, no EXPUNGE)
-        // and records the UID; the single trailing EXPUNGE in `finalize`
-        // removes all flagged UIDs in one round-trip instead of N serial
-        // EXPUNGEs holding the mailbox lock (and blocking IDLE).
-        const flaggedForExpunge: string[] = [];
-        await this.chunkedBatchOp(
-          present,
-          (uidSet) => this.client!.messageDelete(uidSet, { uid: true }),
-          async (id) => { await this.client!.messageFlagsAdd(id, ['\\Deleted'], { uid: true }); flaggedForExpunge.push(id); },
-          (id) => { this.evictCacheEntry(`${folder}:${id}`); results.success++; },
-          (id, msg) => { results.failed++; results.errors.push(`Failed to delete email ${id}: ${msg}`); },
-          'Bulk delete',
-          folder,
-          // Chunk the trailing EXPUNGE through chunkUidsForWire so a large
-          // fallback set can't re-introduce IMAP-002's unbounded command line
-          // (Copilot review on #154). Still O(N/chunk) round-trips, not the
-          // O(N) serial EXPUNGEs IMAP-016 set out to avoid.
-          async () => {
-            for (const uidSet of chunkUidsForWire(flaggedForExpunge)) {
-              await this.client!.messageDelete(uidSet, { uid: true });
-            }
-          },
-        );
-      } finally {
-        lock.release();
+    for (const [folder, ids] of emailsByFolder2.entries()) {
+      // Already in Trash → deletion is a no-op; we never permanently delete.
+      if (this.isTrashFolder(folder, trash)) {
+        for (let i = 0; i < ids.length; i++) results.success++;
+        continue;
       }
+      // Delete = move to Trash, with verified landing (so a union-mailbox no-op
+      // is an honest failure, not a silent success). Per-folder so each group's
+      // UIDs resolve correctly.
+      const moved = await this.bulkMoveEmails(ids, trash, folder);
+      results.success += moved.success;
+      results.failed += moved.failed;
+      results.errors.push(...moved.errors);
     }
 
     tags.successCount = results.success;

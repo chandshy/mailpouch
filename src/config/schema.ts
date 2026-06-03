@@ -100,7 +100,7 @@ export const TOOL_CATEGORIES: Record<string, ToolCategory> = {
   },
   deletion: {
     label: "Deletion",
-    description: "Permanently delete emails — irreversible",
+    description: "Delete emails by moving them to Trash — recoverable, never permanently deleted",
     tools: ["delete_email", "bulk_delete_emails", "bulk_delete"],
     risk: "destructive",
   },
