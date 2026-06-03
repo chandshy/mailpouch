@@ -1031,7 +1031,7 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
         // This prevents SSRF probing of cloud-metadata endpoints (169.254.169.254),
         // internal services, or arbitrary internet hosts.
         const ALLOWED_HOST_RE =
-          /^(?:localhost|127\.0\.0\.1|::1|(?:192\.168|10)\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})$/;
+          /^(?:localhost|127\.0\.0\.1|::1|192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})$/;
         if (typeof smtpHost !== "string" || !ALLOWED_HOST_RE.test(smtpHost)) {
           json(res, 400, { error: "smtpHost must be localhost or a private LAN address." }); return;
         }

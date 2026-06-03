@@ -34,15 +34,32 @@ const DEFAULT_TIMEOUT_MS = 8000;
 const isLocalhost = (host: string): boolean =>
   host === "localhost" || host === "127.0.0.1" || host === "::1";
 
-/** TCP-only reachability — the port answered a connect(). */
+/**
+ * SSRF guard, co-located with the network sink: a connection probe may only
+ * target localhost or an RFC1918 private-LAN address — never a public host, a
+ * resolvable name, or the link-local cloud-metadata range (169.254/16). Mirrors
+ * the request-boundary allow-list in server.ts, but enforced HERE at the socket
+ * so the sink is safe regardless of which caller reaches it (defense in depth;
+ * also the barrier the SSRF taint analysis needs — js/request-forgery).
+ */
+const PROBE_HOST_ALLOWLIST =
+  /^(?:localhost|127\.0\.0\.1|::1|192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})$/;
+export function isAllowedProbeHost(host: unknown): host is string {
+  return typeof host === "string" && PROBE_HOST_ALLOWLIST.test(host);
+}
+
+/** TCP-only reachability — the port answered a connect(). Refuses any host that
+ *  is not localhost / private-LAN (SSRF guard) before opening the socket. */
 export function tcpReachable(host: string, port: number, timeoutMs = 5000): Promise<boolean> {
   return new Promise((resolve) => {
+    if (!isAllowedProbeHost(host)) { resolve(false); return; }
+    const safeHost = host;
     const socket = new Socket();
     socket.setTimeout(timeoutMs);
     socket.on("connect", () => { socket.destroy(); resolve(true); });
     socket.on("error", () => resolve(false));
     socket.on("timeout", () => { socket.destroy(); resolve(false); });
-    socket.connect(port, host);
+    socket.connect(port, safeHost);
   });
 }
 
@@ -96,6 +113,7 @@ export async function probeImap(
   host: string, port: number, user: string, pass: string,
   certPath: string, allowInsecure: boolean, timeoutMs = DEFAULT_TIMEOUT_MS,
 ): Promise<ProtocolCheck> {
+  if (!isAllowedProbeHost(host)) return { reachable: false, authenticated: null, error: "host not permitted (must be localhost or private LAN)" };
   const reachable = await tcpReachable(host, port, Math.min(5000, timeoutMs));
   if (!reachable) return { reachable: false, authenticated: null, error: null };
   if (!user || !pass) return { reachable: true, authenticated: null, error: "no credentials configured" };
@@ -125,6 +143,7 @@ export async function probeSmtp(
   host: string, port: number, user: string, pass: string,
   certPath: string, allowInsecure: boolean, timeoutMs = DEFAULT_TIMEOUT_MS,
 ): Promise<ProtocolCheck> {
+  if (!isAllowedProbeHost(host)) return { reachable: false, authenticated: null, error: "host not permitted (must be localhost or private LAN)" };
   const reachable = await tcpReachable(host, port, Math.min(5000, timeoutMs));
   if (!reachable) return { reachable: false, authenticated: null, error: null };
   if (!user || !pass) return { reachable: true, authenticated: null, error: "no credentials configured" };

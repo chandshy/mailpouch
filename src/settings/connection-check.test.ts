@@ -57,7 +57,7 @@ vi.mock("nodemailer", () => ({
   },
 }));
 
-import { probeImap, probeSmtp } from "./connection-check.js";
+import { probeImap, probeSmtp, isAllowedProbeHost } from "./connection-check.js";
 
 beforeEach(() => {
   globalThis.__tcpOk = true;
@@ -124,5 +124,25 @@ describe("probeSmtp", () => {
     expect(r.reachable).toBe(true);
     expect(r.authenticated).toBe(false);
     expect(r.error).toContain("454");
+  });
+});
+
+describe("SSRF guard — connection probes only target localhost / private LAN", () => {
+  it("allows localhost and RFC1918 private-LAN hosts", () => {
+    for (const h of ["localhost", "127.0.0.1", "::1", "192.168.1.178", "10.0.0.5", "172.16.0.1", "172.31.255.254"]) {
+      expect(isAllowedProbeHost(h)).toBe(true);
+    }
+  });
+  it("blocks public hosts, names, and the link-local cloud-metadata range", () => {
+    for (const h of ["169.254.169.254", "8.8.8.8", "evil.example.com", "metadata.google.internal", "172.32.0.1", "11.0.0.1", "", 123 as unknown as string]) {
+      expect(isAllowedProbeHost(h)).toBe(false);
+    }
+  });
+  it("probeImap/probeSmtp refuse a disallowed host without attempting a connection", async () => {
+    const im = await probeImap("169.254.169.254", 1143, "u", "p", "", true);
+    const sm = await probeSmtp("8.8.8.8", 25, "u", "p", "", true);
+    expect(im).toEqual({ reachable: false, authenticated: null, error: "host not permitted (must be localhost or private LAN)" });
+    expect(sm.reachable).toBe(false);
+    expect(sm.authenticated).toBe(null);
   });
 });
