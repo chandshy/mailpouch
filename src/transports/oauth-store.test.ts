@@ -1,5 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { OAuthStore, OAUTH_CODE_TTL_MS, OAUTH_ACCESS_TOKEN_TTL_MS } from "./oauth-store.js";
+import { mkdtempSync, rmSync, existsSync, readFileSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 
 describe("OAuthStore", () => {
   let store: OAuthStore;
@@ -173,4 +176,47 @@ describe("OAuthStore", () => {
       expect(store.stats().codes).toBeLessThanOrEqual(OAUTH_MAX_CODES);
     });
   });
+
+  describe("token persistence (#7 — survive daemon restart)", () => {
+    let dir: string; let path: string;
+    beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "mp-oauth-")); path = join(dir, "tokens.json"); });
+    afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+    it("a token issued by one store is valid in a fresh store loaded from disk", () => {
+      const a = new OAuthStore(path);
+      const t = a.issueToken({ clientId: "pmc_x", scopes: ["mcp"] });
+      // New process / daemon restart:
+      const b = new OAuthStore(path);
+      const rec = b.verifyToken(t.token);
+      expect(rec).not.toBeNull();
+      expect(rec!.clientId).toBe("pmc_x");
+    });
+
+    it("never writes the raw bearer to disk (hashes only)", () => {
+      const a = new OAuthStore(path);
+      const t = a.issueToken({ clientId: "pmc_y", scopes: ["mcp"] });
+      expect(existsSync(path)).toBe(true);
+      const onDisk = readFileSync(path, "utf-8");
+      expect(onDisk).not.toContain(t.token); // raw token must not be persisted
+    });
+
+    it("does not resurrect expired tokens on load", () => {
+      const a = new OAuthStore(path);
+      const t = a.issueToken({ clientId: "pmc_z", scopes: ["mcp"] });
+      vi.useFakeTimers();
+      vi.setSystemTime(Date.now() + OAUTH_ACCESS_TOKEN_TTL_MS + 1000);
+      const b = new OAuthStore(path);
+      expect(b.verifyToken(t.token)).toBeNull();
+      vi.useRealTimers();
+    });
+
+    it("revocation is persisted (revoked token stays invalid after restart)", () => {
+      const a = new OAuthStore(path);
+      const t = a.issueToken({ clientId: "pmc_r", scopes: ["mcp"] });
+      a.revokeToken(t.token);
+      const b = new OAuthStore(path);
+      expect(b.verifyToken(t.token)).toBeNull();
+    });
+  });
+
 });
