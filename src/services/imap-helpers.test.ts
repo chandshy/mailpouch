@@ -119,9 +119,11 @@ describe("stripHtml / truncateBody / normalizeAddressList (moved, unchanged)", (
     expect(stripHtml("a &lt;script&gt;alert(1)&lt;/script&gt; b")).toBe("a b");
     expect(stripHtml("<!-- secret: pw -->visible")).toBe("visible");
   });
-  it("stripHtml strips script/style blocks closed with trailing whitespace (CodeQL)", () => {
+  it("stripHtml strips script/style blocks with junk in the close tag (CodeQL js/bad-tag-filter)", () => {
     expect(stripHtml("a<script>evil()</script >b")).toBe("a b");
     expect(stripHtml("a<style>.x{}</style\t>b")).toBe("a b");
+    expect(stripHtml("a<script>evil()</script\t\n bar>b")).toBe("a b");
+    expect(stripHtml("a<script>evil()</script foo>b")).toBe("a b");
   });
   it("truncateBody breaks on a word boundary near the cap", () => {
     expect(truncateBody("short")).toBe("short");
