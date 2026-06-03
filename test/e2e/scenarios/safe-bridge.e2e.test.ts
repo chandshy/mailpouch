@@ -42,7 +42,20 @@ describe("safe-bridge.e2e — non-destructive Bridge audit (scratch-scoped)", ()
     h = await startE2E({ safe: true });
     token = h.runToken!;
     expect(h.scratch).toBeDefined();
-  }, 60_000);
+    // Wait for the mailpouch IMAP connection to be LIVE before any test runs.
+    // docker.restart() only TCP-probes the port, and a cold Bridge connect also
+    // lags — the server can be mid-(re)connect (1-min backoff) when the port is
+    // already open, so without this the first scratch ops race it and fail
+    // "IMAP client not connected". get_folders calls ensureConnection(); retry
+    // until it lands.
+    let ready = false;
+    for (let i = 0; i < 20 && !ready; i++) {
+      const r = await h.callRaw("get_folders");
+      ready = r.ok === true && r.isError !== true;
+      if (!ready) await new Promise((res) => setTimeout(res, 1000));
+    }
+    expect(ready).toBe(true);
+  }, 90_000);
 
   afterAll(async () => { if (h) await h.close(); }); // cleanup() deletes only token folders
 
