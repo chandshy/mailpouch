@@ -122,12 +122,20 @@ Because union membership is implicit (a message is in All Mail because it *exist
 
 A message that lives **only** in the `All Mail` union (no Inbox/Sent/custom folder — a true archive) cannot be relocated with MOVE. The working path:
 
-1. **COPY** the message to the destination `Folders/<name>` mailbox. Because Proton folders are *exclusive*, applying the folder label *sets the message's folder* — there is no separate "remove from All Mail" step to perform.
+1. **COPY** the message (by its All Mail UID) to the destination `Folders/<name>` mailbox. This applies the folder label and files the message into that folder.
 2. **Verify it landed** (UIDPLUS `COPYUID`, or Message-ID search) — never assume success; a union no-op must be reported as a failure.
 
 This is the same `AddMessagesToMailbox` → `LabelMessages` mechanism as the label-COPY path that is already reliable from All Mail.
 
-> **Verification status (2026-06-03):** the COPY-to-`Folders/` path from All Mail is derived from the documented MOVE/COPY→label mapping and Proton's copy-not-move guidance, **not yet empirically confirmed** against live Bridge. Confirm with a non-destructive live test (scratch folders only) before wiring it into the move tools. Tracked as field finding #3.
+> **Verified 2026-06-03 against live Bridge** (non-destructive scratch test, UIDPLUS-confirmed):
+> - `COPY` from `All Mail` → `Folders/<scratch>` **succeeds and the message lands** (server returns a `COPYUID` map).
+> - `MOVE` from `All Mail` → `Folders/<scratch>` is **accepted but lands nothing** (the no-op).
+>
+> **Caveat — COPY adds, it does not atomically replace:** after a COPY-to-folder, the source message was observed *still present in its original folder* (checked +2 s). So COPY applies the target folder label without removing other folder labels at the IMAP layer; Proton's exclusivity is reconciled separately (and lazily). Implications for filing:
+> - **All-Mail-only (archived) message** → COPY-to-folder files it cleanly (there is no other folder to leave behind). This is the #3 path.
+> - **Message already in a real folder** → use a normal `MOVE` with the real `sourceFolder` (which works), *not* COPY-from-All-Mail — otherwise the message may transiently appear in two folders until Proton reconciles.
+>
+> This composes with finding #1: `get_email_by_id` now reports a message's real folder (or `All Mail` if it is archived), so a caller can choose MOVE-from-real-folder vs COPY-from-All-Mail correctly.
 
 ### Same-location moves are no-ops
 Moving a message from/to the **identical** mailbox does nothing, and the All Mail union "accepts" such a move silently. The MCP server short-circuits `source == target` as a success no-op rather than issuing the operation (`isSameLocation` in `SimpleIMAPService`).
