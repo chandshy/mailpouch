@@ -521,6 +521,14 @@ describe("SimpleIMAPService.moveEmail", () => {
     expect(client.messageMove).toHaveBeenCalledWith("20", "Trash", { uid: true });
   });
 
+  it("source == target is a no-op (never issues a move; guards the All Mail union)", async () => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc);
+    const result = await svc.moveEmail("20", "All Mail", "All Mail");
+    expect(result).toBe(true);
+    expect(client.messageMove).not.toHaveBeenCalled();
+  });
+
   it("evicts old cache entry on move (UID is not stable across folders)", async () => {
     const svc = new SimpleIMAPService();
     const client = connectSvc(svc);
@@ -796,6 +804,15 @@ describe("SimpleIMAPService.bulkMoveEmails", () => {
     // Cache entries at the old folder key should be evicted (UID is not stable across folders)
     expect((svc as any).emailCache.has("INBOX:80")).toBe(false);
     expect((svc as any).emailCache.has("INBOX:81")).toBe(false);
+  });
+
+  it("source == target is a no-op per folder (counts success, issues no move; All Mail guard)", async () => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc);
+    const results = await svc.bulkMoveEmails(["80", "81"], "All Mail", "All Mail");
+    expect(results.success).toBe(2);
+    expect(results.failed).toBe(0);
+    expect(client.messageMove).not.toHaveBeenCalled();
   });
 
   it("falls back to per-email move when batch fails", async () => {

@@ -41,7 +41,7 @@ const BULK_RESULT_SCHEMA = {
 const SOURCE_FOLDER_SCHEMA = {
   type: "string",
   description:
-    "Folder the UID(s) live in (e.g. INBOX, Folders/Work, Labels/Foo). Strongly recommended whenever the UIDs came from a folder other than INBOX — IMAP UIDs are folder-scoped, so without this the wrong folder may be selected and the operation may silently no-op.",
+    "Folder the UID(s) live in (e.g. INBOX, Folders/Work, Labels/Foo). Strongly recommended whenever the UIDs came from a folder other than INBOX — IMAP UIDs are folder-scoped, so without this the wrong folder may be selected and the operation may silently no-op. Avoid passing 'All Mail' as the source: it is a union view of every folder, not a real location, so moves out of it can silently do nothing — pass the message's actual folder instead. Moving to the folder a message is already in is a no-op.",
 };
 
 export const defs: ToolDef[] = [

@@ -2055,6 +2055,13 @@ export class SimpleIMAPService {
         folder = email.folder;
       }
 
+      // Source == target → no-op. Moving within the same mailbox does nothing,
+      // and from the All Mail union it "succeeds" silently while moving nothing.
+      if (this.isSameLocation(folder, targetFolder)) {
+        logger.info(`Email ${emailId} is already in ${targetFolder}; move is a no-op (same location)`, 'IMAPService');
+        return true;
+      }
+
       let movedMid: string | undefined;
       const relocated = new Set<string>();
       let uidplus = false;
@@ -2377,6 +2384,12 @@ export class SimpleIMAPService {
     // otherwise count as a false success.
     const verifyJobs: Array<{ folder: string; accepted: string[]; midMap: Map<string, string>; relocated: Set<string>; uidplus: boolean }> = [];
     for (const [folder, ids] of emailsByFolder.entries()) {
+      // Source == target → no-op (incl. the All Mail union, which "accepts" the
+      // move silently while moving nothing). Count as success, don't issue it.
+      if (this.isSameLocation(folder, targetFolder)) {
+        for (let i = 0; i < ids.length; i++) results.success++;
+        continue;
+      }
       const lock = await this.client.getMailboxLock(folder);
       try {
         let existing: Set<string>;
@@ -2477,6 +2490,15 @@ export class SimpleIMAPService {
    *  we never permanently delete (EXPUNGE) mail. */
   private isTrashFolder(folder: string, trashPath: string): boolean {
     return folder === trashPath || folder.toLowerCase() === 'trash';
+  }
+
+  /** True if two folder paths refer to the same mailbox. Moving from/to the
+   *  identical location is a no-op — and critically, the "All Mail" union
+   *  (which holds every message from every folder) "accepts" such a move
+   *  silently while doing nothing, so we must short-circuit it rather than
+   *  issue the move. */
+  private isSameLocation(a: string, b: string): boolean {
+    return a.trim() === b.trim();
   }
 
   /**
