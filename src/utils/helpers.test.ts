@@ -17,6 +17,7 @@ import {
   validateTargetFolder,
   requireNumericEmailId,
   validateAttachments,
+  validateAttachmentLimits,
   validateImapPath,
   sanitizeAttachments,
   attachmentByteSize,
@@ -3986,4 +3987,27 @@ describe('helpers', () => {
       expect(extractEmailAddress('  plain@x.com  ')).toBe('plain@x.com');
     });
   });
+
+  describe('validateAttachmentLimits (service-layer count/size caps)', () => {
+    const big = 'a'.repeat(35 * 1024 * 1024); // ~26MB base64 -> over 25MB/file
+    it('accepts a normal attachment set', () => {
+      expect(validateAttachmentLimits([{ filename: 'a.pdf', content: 'aGVsbG8=' }])).toBeNull();
+      expect(validateAttachmentLimits([])).toBeNull();
+    });
+    it('rejects too many attachments', () => {
+      const many = Array.from({ length: 21 }, () => ({ content: 'aa' }));
+      expect(validateAttachmentLimits(many)).toMatch(/Too many attachments/);
+    });
+    it('rejects a single oversized attachment', () => {
+      expect(validateAttachmentLimits([{ filename: 'big', content: big }])).toMatch(/is too large/);
+    });
+    it('rejects when the total exceeds the cap', () => {
+      const half = 'a'.repeat(20 * 1024 * 1024);
+      expect(validateAttachmentLimits([{ content: half }, { content: half }])).toMatch(/Total attachment size/);
+    });
+    it('rejects non-Buffer/non-string content (e.g. a stream)', () => {
+      expect(validateAttachmentLimits([{ filename: 'x', content: {} as unknown }])).toMatch(/must be a Buffer or base64 string/);
+    });
+  });
+
 });

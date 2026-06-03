@@ -9,7 +9,7 @@ import { join as pathJoin } from "path";
 import { ProtonMailConfig, SendEmailOptions } from "../types/index.js";
 import { logger } from "../utils/logger.js";
 import { buildBridgeTlsOptions, readPinnedBridgeCert } from "./bridge-tls.js";
-import { parseEmails, parseEmailsDetailed, isValidEmail, sanitizeForLog } from "../utils/helpers.js";
+import { parseEmails, parseEmailsDetailed, isValidEmail, sanitizeForLog, validateAttachmentLimits } from "../utils/helpers.js";
 import { tracer } from "../utils/tracer.js";
 import { classifyError } from "../utils/error-classify.js";
 import { BackoffTracker, isTransientAbuseError } from "../utils/backoff.js";
@@ -35,10 +35,8 @@ export function escapeHtml(str: string): string {
 /** Header keys that must never be overridden via caller-supplied headers */
 const BLOCKED_HEADER_KEYS = /^(to|cc|bcc|from|return-path|reply-to|sender)$/i;
 
-/** Attachment limits — prevents OOM / DoS via oversized email payloads. */
-const MAX_ATTACHMENTS       = 20;
-const MAX_ATTACHMENT_BYTES  = 25 * 1024 * 1024; // 25 MB per file (matches Proton limit)
-const MAX_TOTAL_ATT_BYTES   = 25 * 1024 * 1024; // 25 MB total across all attachments
+// Attachment count/size caps live in helpers.ts (validateAttachmentLimits),
+// shared with the IMAP saveDraft path.
 
 export class SMTPService {
   private transporter: nodemailer.Transporter | null = null;
@@ -421,43 +419,11 @@ export class SMTPService {
       }
 
       if (options.attachments && options.attachments.length > 0) {
-        // Enforce count cap
-        if (options.attachments.length > MAX_ATTACHMENTS) {
-          throw new Error(
-            `Too many attachments: ${options.attachments.length} supplied, max ${MAX_ATTACHMENTS} allowed.`
-          );
-        }
-
-        // Enforce per-file and total size caps.
-        // att.content may be a base64 string, Buffer, or Readable — only string/Buffer are
-        // trivially sizable; Readable streams are rejected to prevent unbounded streaming.
-        let totalBytes = 0;
-        for (const att of options.attachments) {
-          const content = att.content;
-          let bytes: number;
-          if (Buffer.isBuffer(content)) {
-            bytes = content.length;
-          } else if (typeof content === "string") {
-            // base64 string: actual binary size ≈ str.length * 0.75
-            bytes = Math.ceil(content.length * 0.75);
-          } else {
-            throw new Error(
-              `Attachment '${att.filename ?? "unnamed"}': content must be a Buffer or base64 string, not a stream.`
-            );
-          }
-          if (bytes > MAX_ATTACHMENT_BYTES) {
-            throw new Error(
-              `Attachment '${att.filename ?? "unnamed"}' is too large: ` +
-              `${Math.round(bytes / 1024 / 1024)}MB exceeds the ${MAX_ATTACHMENT_BYTES / 1024 / 1024}MB per-file limit.`
-            );
-          }
-          totalBytes += bytes;
-          if (totalBytes > MAX_TOTAL_ATT_BYTES) {
-            throw new Error(
-              `Total attachment size exceeds the ${MAX_TOTAL_ATT_BYTES / 1024 / 1024}MB limit.`
-            );
-          }
-        }
+        // Count + per-file + total size caps (shared with the IMAP saveDraft
+        // path via validateAttachmentLimits — Readable streams are rejected
+        // because they aren't trivially sizable).
+        const limitErr = validateAttachmentLimits(options.attachments);
+        if (limitErr) throw new Error(limitErr);
 
         mailOptions.attachments = options.attachments.map((att) => {
           // Strip CRLF and NUL from filename — a value like

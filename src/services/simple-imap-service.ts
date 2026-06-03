@@ -2,22 +2,21 @@
  * IMAP Service for reading emails via Proton Bridge
  */
 
-import { ImapFlow, type SearchObject } from 'imapflow';
-import { readFileSync, statSync } from 'fs';
-import { join as pathJoin } from 'path';
-import type { ParsedMail, Attachment, AddressObject } from 'mailparser';
+import { ImapFlow } from 'imapflow';
+import type { Attachment } from 'mailparser';
 import { simpleParser } from 'mailparser';
+import { buildEmailMessage, verifyRelocatedMessages, buildSearchCriteria, truncateBody, stripHtml, normalizeAddressList } from './imap-helpers.js';
+// Re-export the pure helpers from their original home so existing importers
+// (index.ts, tests) keep working after the move to imap-helpers.ts.
+export { stripHtml, normalizeAddressList };
 import nodemailer, { type SendMailOptions } from 'nodemailer';
 import { EmailMessage, EmailFolder, SearchEmailOptions, SaveDraftOptions } from '../types/index.js';
 import { logger } from '../utils/logger.js';
 import {
   validateImapPath,
-  attachmentByteSize,
-  MAX_ATTACHMENT_COUNT,
-  MAX_ATTACHMENT_BYTES,
-  MAX_TOTAL_ATTACHMENT_BYTES,
+  validateAttachmentLimits,
 } from '../utils/helpers.js';
-import { buildBridgeTlsOptions, readPinnedBridgeCert } from './bridge-tls.js';
+import { buildBridgeTlsConfig } from './bridge-tls.js';
 import { classifyError, ConnectionStateError } from '../utils/error-classify.js';
 import { tracer, type SpanTags } from '../utils/tracer.js';
 import { BRIDGE_MIN_VERSION } from '../config/schema.js';
@@ -73,85 +72,6 @@ interface ImapBodyNode {
 }
 
 // ImapSearchCriteria is provided by imapflow as SearchObject (imported above).
-
-/**
- * Truncate email body to a reasonable length for list views
- * @param body The full email body
- * @param maxLength Maximum length (default: 300 characters)
- * @returns Truncated body with ellipsis if needed
- */
-export function stripHtml(html: string): string {
-  if (!html) return '';
-  // Decode entities BEFORE stripping tags (PARSE-008). The old order stripped
-  // tags first then decoded, so an encoded `&lt;script&gt;...&lt;/script&gt;`
-  // emerged as a literal `<script>...</script>` in the FTS body / bodyPreview —
-  // stored-XSS if any consumer rendered those fields as HTML. Decoding first
-  // turns the encoded markup into real tags that the tag-strip then removes.
-  // HTML comments are dropped up front (PARSE-009) so their inner text (e.g.
-  // `<!-- secret: pw123 -->`) doesn't survive as tag-stripped prose.
-  const decodeEntities = (s: string): string =>
-    s
-      .replace(/&nbsp;/g, ' ')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&quot;/g, '"')
-      .replace(/&#39;/g, "'")
-      .replace(/&#x27;/gi, "'")
-      // Numeric entities (decimal &#60; and hex &#x3c;) for parity, so
-      // `&#60;script&#62;` is also neutralised by the subsequent tag-strip.
-      .replace(/&#(\d{1,7});/g, (_m, d) => String.fromCodePoint(Number(d)))
-      .replace(/&#x([0-9a-f]{1,6});/gi, (_m, h) => String.fromCodePoint(parseInt(h, 16)))
-      .replace(/&amp;/g, '&');
-
-  return decodeEntities(html.replace(/<!--[\s\S]*?-->/g, ' '))
-    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function truncateBody(body: string, maxLength: number = 300): string {
-  if (!body) return '';
-
-  // Remove excessive whitespace and newlines
-  const cleaned = body.replace(/\s+/g, ' ').trim();
-
-  if (cleaned.length <= maxLength) {
-    return cleaned;
-  }
-
-  // Truncate at the last space before maxLength to avoid cutting words
-  const truncated = cleaned.substring(0, maxLength);
-  const lastSpace = truncated.lastIndexOf(' ');
-
-  if (lastSpace > maxLength * 0.8) {
-    return truncated.substring(0, lastSpace) + '...';
-  }
-
-  return truncated + '...';
-}
-
-/**
- * Normalise a mailparser address field into a flat array of display strings.
- *
- * IMAP-007: `ParsedMail.to` / `.cc` are typed `AddressObject | AddressObject[]
- * | undefined`. When a message carries multiple separate `To:` header lines
- * (legal per RFC 5322 §3.6.3, and emitted by Proton on bridged forwards) the
- * field becomes an array; the old `parsed.to?.text ? [parsed.to.text] : []`
- * shape then collapsed to `[]` and the recipient list silently disappeared.
- */
-export function normalizeAddressList(
-  field: AddressObject | AddressObject[] | undefined,
-): string[] {
-  if (!field) return [];
-  const objs = Array.isArray(field) ? field : [field];
-  const result: string[] = [];
-  for (const obj of objs) {
-    if (obj?.text) result.push(obj.text);
-  }
-  return result;
-}
 
 /**
  * Split a list of UID strings into wire-bounded chunks suitable for a single
@@ -475,16 +395,23 @@ export class SimpleIMAPService {
    * instead of N serial EXPUNGE round-trips that hold the mailbox lock (and
    * block IDLE) for minutes on Bridge.
    */
-  private async chunkedBatchOp(
-    present: string[],
-    perChunk: (uidSet: string) => Promise<unknown>,
-    perUid: (uid: string) => Promise<unknown>,
-    onSuccess: (uid: string) => void,
-    onFailure: (uid: string, msg: string) => void,
-    opName: string,
-    folder: string,
-    finalize?: () => Promise<unknown>,
-  ): Promise<void> {
+  private async chunkedBatchOp(opts: {
+    /** UIDs known to exist in the locked folder. */
+    present: string[];
+    /** Run the op on a whole comma-joined UID chunk (the fast path). */
+    perChunk: (uidSet: string) => Promise<unknown>;
+    /** Run the op on a single UID (per-UID fallback when a chunk throws). */
+    perUid: (uid: string) => Promise<unknown>;
+    onSuccess: (uid: string) => void;
+    onFailure: (uid: string, msg: string) => void;
+    /** Label for logs (e.g. "Bulk move"). */
+    opName: string;
+    folder: string;
+    /** Optional single trailing step run once, only if a per-UID fallback was
+     *  used (IMAP-016: e.g. one EXPUNGE for all \Deleted-flagged UIDs). */
+    finalize?: () => Promise<unknown>;
+  }): Promise<void> {
+    const { present, perChunk, perUid, onSuccess, onFailure, opName, folder, finalize } = opts;
     const chunks = chunkUidsForWire(present);
     let fallbackUsed = false;
     for (const uidSet of chunks) {
@@ -681,66 +608,20 @@ export class SimpleIMAPService {
       // Store connection config for reconnection
       this.connectionConfig = { host, port, username, password, bridgeCertPath, secure, allowInsecureBridge };
 
-      // Check if using localhost (Proton Bridge)
-      const isLocalhost = host === 'localhost' || host === '127.0.0.1';
+      // Check if using localhost (Proton Bridge). Must match buildBridgeTlsConfig's
+      // localhost set (incl. IPv6 loopback ::1) — otherwise host="::1" would get a
+      // localhost TLS config but a non-localhost `secure` default (implicit TLS),
+      // breaking the STARTTLS-on-1143 Bridge connection.
+      const isLocalhost = host === 'localhost' || host === '127.0.0.1' || host === '::1';
       const allowInsecure = allowInsecureBridge
         || process.env.MAILPOUCH_INSECURE_BRIDGE === '1';
 
-      // Build TLS options
-      let tlsOptions: Record<string, unknown> | undefined;
-      if (isLocalhost) {
-        if (bridgeCertPath) {
-          // If a directory was given, look for cert.pem inside it
-          let resolvedCertPath = bridgeCertPath;
-          try {
-            if (statSync(bridgeCertPath).isDirectory()) {
-              resolvedCertPath = pathJoin(bridgeCertPath, 'cert.pem');
-              logger.info(`IMAP: Directory given for cert path — resolved to ${resolvedCertPath}`, 'IMAPService');
-            }
-          } catch { /* stat failed — let readFileSync produce the real error below */ }
-          try {
-            const bridgeCert = readPinnedBridgeCert(resolvedCertPath);
-            tlsOptions = buildBridgeTlsOptions(bridgeCert);
-            logger.info(`IMAP: Using exported Bridge certificate for TLS trust (${resolvedCertPath})`, 'IMAPService');
-          } catch (err) {
-            if (!allowInsecure) {
-              throw new Error(
-                `IMAP: Bridge cert at "${resolvedCertPath}" could not be loaded and allowInsecureBridge is not set. ` +
-                `Fix the cert path in Settings → Connection, or set allowInsecureBridge: true ` +
-                `(or MAILPOUCH_INSECURE_BRIDGE=1) to opt into the legacy insecure behavior. ` +
-                `Underlying error: ${(err as Error).message}`
-              );
-            }
-            logger.warn(
-              `IMAP: Failed to load Bridge cert at "${resolvedCertPath}" — running with TLS validation DISABLED (allowInsecureBridge is set). ` +
-              `Export a fresh cert from Bridge → Help → Export TLS Certificate and update Settings → Connection to re-secure.`,
-              'IMAPService',
-              err
-            );
-            tlsOptions = { rejectUnauthorized: false, minVersion: 'TLSv1.2' };
-            this.insecureTls = true;
-          }
-        } else {
-          if (!allowInsecure) {
-            throw new Error(
-              'IMAP: No Bridge certificate configured. Export the cert from Bridge → Help → Export TLS Certificate ' +
-              "and set 'bridgeCertPath' in Settings → Connection. To opt into the legacy behavior (TLS validation " +
-              'disabled for localhost), set allowInsecureBridge: true or launch with MAILPOUCH_INSECURE_BRIDGE=1.'
-            );
-          }
-          logger.warn(
-            'IMAP: No Bridge certificate configured and allowInsecureBridge is set — ' +
-            'TLS certificate validation DISABLED for localhost. Export the cert from Bridge → Help → ' +
-            'Export TLS Certificate and clear the insecure flag to re-secure.',
-            'IMAPService'
-          );
-          tlsOptions = { rejectUnauthorized: false, minVersion: 'TLSv1.2' };
-          this.insecureTls = true;
-        }
-      } else {
-        // Non-localhost: full certificate validation required
-        tlsOptions = { minVersion: 'TLSv1.2' };
-      }
+      // TLS options (cert pinning + insecure fallback) — the same decision the
+      // settings connection-check uses, shared via bridge-tls.ts.
+      const tls = buildBridgeTlsConfig(host, bridgeCertPath, allowInsecure);
+      for (const l of tls.logs) logger[l.level](`IMAP: ${l.msg}`, 'IMAPService');
+      this.insecureTls = tls.insecure;
+      const tlsOptions: Record<string, unknown> | undefined = tls.tlsOptions;
 
       // Use caller-supplied secure flag if provided; otherwise default to false for
       // localhost (Bridge uses STARTTLS on 1143) and true for non-localhost connections.
@@ -1253,58 +1134,7 @@ export class SimpleIMAPService {
             if (!message.source) continue;
             const parsed = await simpleParser(message.source);
 
-            const fullBody = parsed.text || parsed.html || '';
-            const plainBody = parsed.text || stripHtml(parsed.html || '');
-
-            // Extract content-type for PGP detection
-            const contentType = parsed.headers?.get('content-type');
-            const ctStr = typeof contentType === 'string' ? contentType : ((contentType as unknown as { value?: string } | null)?.value ?? '');
-
-            // Extract X-Pm-Internal-Id for stable Proton message ID
-            const pmId = parsed.headers?.get('x-pm-internal-id');
-
-            const emailMessage: EmailMessage = {
-              id: message.uid.toString(),
-              from: parsed.from?.text || '',
-              to: normalizeAddressList(parsed.to),
-              cc: normalizeAddressList(parsed.cc),
-              subject: parsed.subject || '(No Subject)',
-              body: fullBody, // Full body for individual email view
-              bodyPreview: truncateBody(plainBody),
-              isHtml: !!parsed.html,
-              date: parsed.date || new Date(),
-              folder: folder.path,
-              isRead: message.flags?.has('\\Seen') || false,
-              isStarred: message.flags?.has('\\Flagged') || false,
-              hasAttachment: (parsed.attachments?.length || 0) > 0,
-              attachments: parsed.attachments?.map((att: Attachment) => ({
-                filename: att.filename || 'unnamed',
-                contentType: att.contentType,
-                size: att.size,
-                content: att.content,
-                contentId: att.cid
-              })),
-              headers: parsed.headers
-                ? Object.fromEntries(
-                    Array.from(parsed.headers.entries()).map(([k, v]) => [
-                      k,
-                      Array.isArray(v) ? v.join(', ') : String(v),
-                    ])
-                  )
-                : undefined,
-              inReplyTo: parsed.inReplyTo,
-              references: parsed.references,
-              // IMAP flags
-              isAnswered: message.flags?.has('\\Answered') ?? false,
-              isForwarded: message.flags?.has('\\Forward') ?? false,
-              // MIME-level PGP detection
-              isSignedPGP: ctStr.includes('multipart/signed') && ctStr.includes('application/pgp-signature'),
-              isEncryptedPGP: ctStr.includes('multipart/encrypted') && ctStr.includes('application/pgp-encrypted'),
-              // Proton-specific stable ID
-              protonId: typeof pmId === 'string' ? pmId.trim() : undefined,
-              // RFC Message-ID — stable identity across folders (#9).
-              messageId: parsed.messageId || undefined,
-            };
+            const emailMessage = buildEmailMessage(message, parsed, folder.path);
 
             // GAP 7.5: setCacheEntry strips attachment binary content before storing
             this.setCacheEntry(emailMessage.id, emailMessage);
@@ -1346,63 +1176,7 @@ export class SimpleIMAPService {
     const lock = await this.client.getMailboxLock(folder);
 
     try {
-      const searchCriteria: SearchObject = {};
-
-      // Strip IMAP search-unsafe characters (quote and backslash) to prevent
-      // search criteria injection.  imapflow passes these as quoted strings
-      // in the IMAP SEARCH command, so an unescaped '"' would close the
-      // quoted string early, and '\' could escape the closing quote.
-      // VALID-002: also strip CR/LF/NUL — a value like "x\r\nA002 LOGOUT" would
-      // otherwise smuggle a command line into the IMAP stream.
-      const sanitizeImapStr = (s: string) => s.replace(/["\\\r\n\x00]/g, "");
-      if (options.from) searchCriteria.from = sanitizeImapStr(options.from);
-      if (options.to) searchCriteria.to = sanitizeImapStr(options.to);
-      if (options.subject) searchCriteria.subject = sanitizeImapStr(options.subject);
-      if (options.dateFrom) {
-        const d = new Date(options.dateFrom);
-        if (!isNaN(d.getTime())) searchCriteria.since = d;
-      }
-      if (options.dateTo) {
-        const d = new Date(options.dateTo);
-        if (!isNaN(d.getTime())) searchCriteria.before = d;
-      }
-
-      // imapflow SearchObject uses a single boolean for seen/unseen, answered/unanswered,
-      // and draft/undraft — `seen: false` means "unseen", etc.
-      if (options.isRead    !== undefined) searchCriteria.seen     = options.isRead;
-      if (options.isStarred !== undefined) searchCriteria.flagged  = options.isStarred;
-
-      // Body/text search
-      if (options.body) searchCriteria.body = sanitizeImapStr(options.body);
-      if (options.text) searchCriteria.text = sanitizeImapStr(options.text);
-
-      // Additional header fields
-      if (options.bcc) searchCriteria.bcc = sanitizeImapStr(options.bcc);
-      // header is { [field]: value } in the SearchObject API (not a tuple).
-      // IMAP-004: the field+value here were the only SEARCH inputs not passed
-      // through sanitizeImapStr. A raw '"' in the value closes imapflow's
-      // quoted string early; a malformed field name breaks the
-      // `SEARCH HEADER <field-name> <value>` grammar. Sanitise the value and
-      // enforce the RFC 5322 field-name grammar on the field.
-      if (options.header) {
-        const field = options.header.field;
-        if (!/^[A-Za-z][A-Za-z0-9-]*$/.test(field)) {
-          throw new Error(`Invalid header field name: ${JSON.stringify(field)}`);
-        }
-        searchCriteria.header = { [field]: sanitizeImapStr(options.header.value) };
-      }
-
-      // Flag criteria — imapflow uses boolean: true = flag set, false = flag not set
-      if (options.answered !== undefined) searchCriteria.answered = options.answered;
-      if (options.isDraft  !== undefined) searchCriteria.draft    = options.isDraft;
-
-      // Size criteria
-      if (options.larger !== undefined)  searchCriteria.larger = options.larger;
-      if (options.smaller !== undefined) searchCriteria.smaller = options.smaller;
-
-      // Sent-date criteria (Date: header vs INTERNALDATE)
-      if (options.sentBefore) searchCriteria.sentBefore = options.sentBefore;
-      if (options.sentSince)  searchCriteria.sentSince  = options.sentSince;
+      const searchCriteria = buildSearchCriteria(options);
 
       // Request ESEARCH PARTIAL so the server returns only the first `limit` UIDs
       // rather than the full result set. Falls back transparently to a plain number[]
@@ -1455,49 +1229,7 @@ export class SimpleIMAPService {
           if (!message.source) continue;
           const parsed = await simpleParser(message.source);
 
-          const fullBody = parsed.text || parsed.html || '';
-          const plainBody = parsed.text || stripHtml(parsed.html || '');
-          const contentType = parsed.headers?.get('content-type');
-          const ctStr = typeof contentType === 'string' ? contentType : ((contentType as unknown as { value?: string } | null)?.value ?? '');
-          const pmId = parsed.headers?.get('x-pm-internal-id');
-
-          const emailMessage: EmailMessage = {
-            id: message.uid.toString(),
-            from: parsed.from?.text || '',
-            to: normalizeAddressList(parsed.to),
-            cc: normalizeAddressList(parsed.cc),
-            subject: parsed.subject || '(No Subject)',
-            body: fullBody,
-            bodyPreview: truncateBody(plainBody),
-            isHtml: !!parsed.html,
-            date: parsed.date || new Date(),
-            folder,
-            isRead: message.flags?.has('\\Seen') || false,
-            isStarred: message.flags?.has('\\Flagged') || false,
-            hasAttachment: (parsed.attachments?.length || 0) > 0,
-            attachments: parsed.attachments?.map((att: Attachment) => ({
-              filename: att.filename || 'unnamed',
-              contentType: att.contentType,
-              size: att.size,
-              content: att.content,
-              contentId: att.cid
-            })),
-            headers: parsed.headers
-              ? Object.fromEntries(
-                  Array.from(parsed.headers.entries()).map(([k, v]) => [
-                    k,
-                    Array.isArray(v) ? v.join(', ') : String(v),
-                  ])
-                )
-              : undefined,
-            inReplyTo: parsed.inReplyTo,
-            references: parsed.references,
-            isAnswered: message.flags?.has('\\Answered') ?? false,
-            isForwarded: message.flags?.has('\\Forward') ?? false,
-            isSignedPGP: ctStr.includes('multipart/signed') && ctStr.includes('application/pgp-signature'),
-            isEncryptedPGP: ctStr.includes('multipart/encrypted') && ctStr.includes('application/pgp-encrypted'),
-            protonId: typeof pmId === 'string' ? pmId.trim() : undefined,
-          };
+          const emailMessage = buildEmailMessage(message, parsed, folder);
 
           this.setCacheEntry(emailMessage.id, emailMessage);
 
@@ -1845,26 +1577,11 @@ export class SimpleIMAPService {
       };
 
       if (options.attachments && options.attachments.length > 0) {
-        // VALID-005: enforce the SAME count/size caps as the SMTP send path
-        // (smtp-service.ts). saveDraft previously mirrored only the sanitisation,
-        // so an unbounded base64 payload could OOM the process before append.
-        if (options.attachments.length > MAX_ATTACHMENT_COUNT) {
-          return { success: false, error: `Too many attachments: ${options.attachments.length} supplied, max ${MAX_ATTACHMENT_COUNT} allowed.` };
-        }
-        let totalBytes = 0;
-        for (const att of options.attachments) {
-          const bytes = attachmentByteSize(att.content);
-          if (bytes === null) {
-            return { success: false, error: `Attachment '${att.filename ?? "unnamed"}': content must be a Buffer or base64 string.` };
-          }
-          if (bytes > MAX_ATTACHMENT_BYTES) {
-            return { success: false, error: `Attachment '${att.filename ?? "unnamed"}' is too large: ${Math.round(bytes / 1024 / 1024)}MB exceeds the ${MAX_ATTACHMENT_BYTES / 1024 / 1024}MB per-file limit.` };
-          }
-          totalBytes += bytes;
-          if (totalBytes > MAX_TOTAL_ATTACHMENT_BYTES) {
-            return { success: false, error: `Total attachment size exceeds the ${MAX_TOTAL_ATTACHMENT_BYTES / 1024 / 1024}MB limit.` };
-          }
-        }
+        // VALID-005/006: enforce the SAME count/size caps as the SMTP send path
+        // (shared validateAttachmentLimits) — an unbounded base64 payload could
+        // otherwise OOM the process before append.
+        const limitErr = validateAttachmentLimits(options.attachments);
+        if (limitErr) return { success: false, error: limitErr };
 
         // Mirror the sanitization performed in smtp-service.ts sendEmail() to prevent
         // MIME header injection via crafted attachment filenames or content-type values.
@@ -2358,6 +2075,61 @@ export class SimpleIMAPService {
    * determine which UIDs actually exist in the folder. UIDs that don't exist
    * are reported in `results.failed` rather than silently counted as success.
    */
+  /**
+   * Group email UIDs by their source folder for a bulk operation. With
+   * `sourceFolder`, all UIDs are assumed to live there (no discovery). Otherwise
+   * each UID's folder is resolved from the cache, else via getEmailById —
+   * IMAP-003: an unresolved UID is an explicit failure, NEVER a silent fall-back
+   * to INBOX (which recreated the v3.0.41 false-success class). Invalid and
+   * not-found UIDs are recorded in `results`. Was duplicated in all five bulk
+   * methods (move/copy/delete/markRead/star).
+   */
+  private async groupEmailsByFolder(
+    emailIds: string[],
+    sourceFolder: string | undefined,
+    results: { failed: number; errors: string[] },
+  ): Promise<Map<string, string[]>> {
+    const grouped = new Map<string, string[]>();
+    if (sourceFolder) {
+      const validIds: string[] = [];
+      for (const id of emailIds) {
+        try { this.validateEmailId(id); validIds.push(id); }
+        catch (e: unknown) { results.failed++; results.errors.push(`Invalid email ID ${id}: ${e instanceof Error ? e.message : String(e)}`); }
+      }
+      if (validIds.length > 0) grouped.set(sourceFolder, validIds);
+      return grouped;
+    }
+    for (const id of emailIds) {
+      // Keep ID-format validation distinct from discovery/transport failure so the
+      // error message names the real cause: a malformed ID the caller must fix vs.
+      // an IMAP discovery error the caller may retry.
+      try {
+        this.validateEmailId(id);
+      } catch (e: unknown) {
+        results.failed++;
+        results.errors.push(`Invalid email ID ${id}: ${e instanceof Error ? e.message : String(e)}`);
+        continue;
+      }
+      try {
+        const cached = this.findCacheEntryByUid(id);
+        let folder: string;
+        if (cached) {
+          folder = cached.folder;
+        } else {
+          const discovered = await this.getEmailById(id);
+          if (!discovered) { results.failed++; results.errors.push(`Email ${id} not found in any folder`); continue; }
+          folder = discovered.folder;
+        }
+        if (!grouped.has(folder)) grouped.set(folder, []);
+        grouped.get(folder)!.push(id);
+      } catch (e: unknown) {
+        results.failed++;
+        results.errors.push(`Failed to locate email ${id}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    return grouped;
+  }
+
   async bulkMoveEmails(emailIds: string[], targetFolder: string, sourceFolder?: string): Promise<{ success: number; failed: number; errors: string[] }> {
     this.validateFolderName(targetFolder);
     if (sourceFolder !== undefined) this.validateFolderName(sourceFolder);
@@ -2376,45 +2148,7 @@ export class SimpleIMAPService {
       errors: [] as string[]
     };
 
-    const emailsByFolder = new Map<string, string[]>();
-
-    if (sourceFolder) {
-      const validIds: string[] = [];
-      for (const emailId of emailIds) {
-        try {
-          this.validateEmailId(emailId);
-          validIds.push(emailId);
-        } catch (error: unknown) {
-          results.failed++;
-          results.errors.push(`Invalid email ID ${emailId}: ${error instanceof Error ? error.message : String(error)}`);
-        }
-      }
-      if (validIds.length > 0) emailsByFolder.set(sourceFolder, validIds);
-    } else {
-      for (const emailId of emailIds) {
-        try {
-          this.validateEmailId(emailId);
-          const cachedEmail = this.findCacheEntryByUid(emailId);
-          let folder: string;
-          if (cachedEmail) {
-            folder = cachedEmail.folder;
-          } else {
-            const discovered = await this.getEmailById(emailId);
-            if (!discovered) {
-              results.failed++;
-              results.errors.push(`Email ${emailId} not found in any folder`);
-              continue;
-            }
-            folder = discovered.folder;
-          }
-          if (!emailsByFolder.has(folder)) emailsByFolder.set(folder, []);
-          emailsByFolder.get(folder)!.push(emailId);
-        } catch (error: unknown) {
-          results.failed++;
-          results.errors.push(`Invalid email ID ${emailId}: ${error instanceof Error ? error.message : String(error)}`);
-        }
-      }
-    }
+    const emailsByFolder = await this.groupEmailsByFolder(emailIds, sourceFolder, results);
 
     // Capture Message-IDs + which UIDs the MOVE verb accepted per source folder,
     // then verify (below) the messages actually landed in the target. A move the
@@ -2472,15 +2206,15 @@ export class SimpleIMAPService {
         const accepted: string[] = [];
         const relocated = new Set<string>(); // source uids the server (UIDPLUS) confirmed moved
         let uidplus = false;
-        await this.chunkedBatchOp(
+        await this.chunkedBatchOp({
           present,
-          async (uidSet) => { uidplus = this.recordRelocatedUids(await this.client!.messageMove(uidSet, targetFolder, { uid: true }), relocated) || uidplus; },
-          async (id) => { uidplus = this.recordRelocatedUids(await this.client!.messageMove(id, targetFolder, { uid: true }), relocated) || uidplus; },
-          (id) => { this.evictCacheEntry(`${folder}:${id}`); accepted.push(id); },
-          (id, msg) => { results.failed++; results.errors.push(`Failed to move email ${id}: ${msg}`); },
-          'Bulk move',
+          perChunk: async (uidSet) => { uidplus = this.recordRelocatedUids(await this.client!.messageMove(uidSet, targetFolder, { uid: true }), relocated) || uidplus; },
+          perUid: async (id) => { uidplus = this.recordRelocatedUids(await this.client!.messageMove(id, targetFolder, { uid: true }), relocated) || uidplus; },
+          onSuccess: (id) => { this.evictCacheEntry(`${folder}:${id}`); accepted.push(id); },
+          onFailure: (id, msg) => { results.failed++; results.errors.push(`Failed to move email ${id}: ${msg}`); },
+          opName: 'Bulk move',
           folder,
-        );
+        });
         verifyJobs.push({ folder, accepted, midMap, relocated, uidplus });
       } finally {
         lock.release();
@@ -2490,25 +2224,14 @@ export class SimpleIMAPService {
     // Verify each move actually landed in the target. Primary signal: the
     // server's UIDPLUS COPYUID map; Message-ID search only as a no-UIDPLUS
     // fallback. Unverifiable → failure, never an assumed success.
-    for (const job of verifyJobs) {
-      if (job.accepted.length === 0) continue;
-      let found = new Set<string>();
-      if (!job.uidplus) {
-        const mids = job.accepted.filter(u => !job.relocated.has(u)).map(u => job.midMap.get(u)).filter((m): m is string => !!m);
-        if (mids.length > 0) {
-          try { found = await this.findMessageIdsInFolder(targetFolder, mids); } catch { /* unverifiable → failure below */ }
-        }
-      }
-      for (const uid of job.accepted) {
-        const mid = job.midMap.get(uid);
-        if (job.relocated.has(uid) || (!job.uidplus && mid && found.has(mid))) {
-          results.success++;
-        } else {
-          results.failed++;
-          results.errors.push(`Move of UID ${uid} from ${job.folder} to ${targetFolder} was accepted but could not be verified present in the target — likely a no-op from a union mailbox (e.g. All Mail). Pass the message's real source folder.`);
-        }
-      }
-    }
+    const verified = await verifyRelocatedMessages(
+      verifyJobs, targetFolder,
+      (f, mids) => this.findMessageIdsInFolder(f, mids),
+      (uid, src) => `Move of UID ${uid} from ${src} to ${targetFolder} was accepted but could not be verified present in the target — likely a no-op from a union mailbox (e.g. All Mail). Pass the message's real source folder.`,
+    );
+    results.success += verified.success;
+    results.failed += verified.failed;
+    results.errors.push(...verified.errors);
 
     tags.successCount = results.success;
     tags.failCount = results.failed;
@@ -2625,45 +2348,7 @@ export class SimpleIMAPService {
       errors: [] as string[]
     };
 
-    const emailsByFolder2 = new Map<string, string[]>();
-
-    if (sourceFolder) {
-      const validIds: string[] = [];
-      for (const emailId of emailIds) {
-        try {
-          this.validateEmailId(emailId);
-          validIds.push(emailId);
-        } catch (error: unknown) {
-          results.failed++;
-          results.errors.push(`Invalid email ID ${emailId}: ${error instanceof Error ? error.message : String(error)}`);
-        }
-      }
-      if (validIds.length > 0) emailsByFolder2.set(sourceFolder, validIds);
-    } else {
-      for (const emailId of emailIds) {
-        try {
-          this.validateEmailId(emailId);
-          const cachedEmail = this.findCacheEntryByUid(emailId);
-          let folder: string;
-          if (cachedEmail) {
-            folder = cachedEmail.folder;
-          } else {
-            const discovered = await this.getEmailById(emailId);
-            if (!discovered) {
-              results.failed++;
-              results.errors.push(`Email ${emailId} not found in any folder`);
-              continue;
-            }
-            folder = discovered.folder;
-          }
-          if (!emailsByFolder2.has(folder)) emailsByFolder2.set(folder, []);
-          emailsByFolder2.get(folder)!.push(emailId);
-        } catch (error: unknown) {
-          results.failed++;
-          results.errors.push(`Invalid email ID ${emailId}: ${error instanceof Error ? error.message : String(error)}`);
-        }
-      }
-    }
+    const emailsByFolder2 = await this.groupEmailsByFolder(emailIds, sourceFolder, results);
 
     const trash = await this.resolveTrashPath();
 
@@ -2703,49 +2388,7 @@ export class SimpleIMAPService {
     if (!this.client || !this.isConnected) throw new Error('IMAP client not connected');
 
     const results = { success: 0, failed: 0, errors: [] as string[] };
-    const grouped = new Map<string, string[]>();
-    if (sourceFolder) {
-      const validIds: string[] = [];
-      for (const id of emailIds) {
-        try {
-          this.validateEmailId(id);
-          validIds.push(id);
-        } catch (e: unknown) {
-          results.failed++;
-          results.errors.push(`Invalid email ID ${id}: ${e instanceof Error ? e.message : String(e)}`);
-        }
-      }
-      if (validIds.length > 0) grouped.set(sourceFolder, validIds);
-    } else {
-      // No explicit sourceFolder — discover per UID. IMAP-003 from the
-      // 2026-05-28 audit: this used to fall back to 'INBOX' on cache miss,
-      // recreating the v3.0.41 false-success class. Now mirrors the
-      // bulkMoveEmails pattern: cache lookup, then full discovery via
-      // getEmailById, then explicit failure if still not found.
-      for (const id of emailIds) {
-        try {
-          this.validateEmailId(id);
-          const cached = this.findCacheEntryByUid(id);
-          let folder: string;
-          if (cached) {
-            folder = cached.folder;
-          } else {
-            const discovered = await this.getEmailById(id);
-            if (!discovered) {
-              results.failed++;
-              results.errors.push(`Email ${id} not found in any folder`);
-              continue;
-            }
-            folder = discovered.folder;
-          }
-          if (!grouped.has(folder)) grouped.set(folder, []);
-          grouped.get(folder)!.push(id);
-        } catch (e: unknown) {
-          results.failed++;
-          results.errors.push(`Invalid email ID ${id}: ${e instanceof Error ? e.message : String(e)}`);
-        }
-      }
-    }
+    const grouped = await this.groupEmailsByFolder(emailIds, sourceFolder, results);
 
     for (const [folder, ids] of grouped.entries()) {
       const lock = await this.client.getMailboxLock(folder);
@@ -2776,22 +2419,22 @@ export class SimpleIMAPService {
         }
         if (present.length === 0) continue;
 
-        await this.chunkedBatchOp(
+        await this.chunkedBatchOp({
           present,
-          (uidSet) => isRead
+          perChunk: (uidSet) => isRead
             ? this.client!.messageFlagsAdd(uidSet, ['\\Seen'], { uid: true })
             : this.client!.messageFlagsRemove(uidSet, ['\\Seen'], { uid: true }),
-          (id) => isRead
+          perUid: (id) => isRead
             ? this.client!.messageFlagsAdd(id, ['\\Seen'], { uid: true })
             : this.client!.messageFlagsRemove(id, ['\\Seen'], { uid: true }),
-          (id) => {
+          onSuccess: (id) => {
             const c = this.getCacheEntry(id, folder); if (c) c.isRead = isRead;
             results.success++;
           },
-          (id, msg) => { results.failed++; results.errors.push(`Failed to mark ${id}: ${msg}`); },
-          'Bulk mark-read',
+          onFailure: (id, msg) => { results.failed++; results.errors.push(`Failed to mark ${id}: ${msg}`); },
+          opName: 'Bulk mark-read',
           folder,
-        );
+        });
       } finally { lock.release(); }
     }
     tags.successCount = results.success; tags.failCount = results.failed;
@@ -2810,45 +2453,7 @@ export class SimpleIMAPService {
     if (!this.client || !this.isConnected) throw new Error('IMAP client not connected');
 
     const results = { success: 0, failed: 0, errors: [] as string[] };
-    const grouped = new Map<string, string[]>();
-    if (sourceFolder) {
-      const validIds: string[] = [];
-      for (const id of emailIds) {
-        try {
-          this.validateEmailId(id);
-          validIds.push(id);
-        } catch (e: unknown) {
-          results.failed++;
-          results.errors.push(`Invalid email ID ${id}: ${e instanceof Error ? e.message : String(e)}`);
-        }
-      }
-      if (validIds.length > 0) grouped.set(sourceFolder, validIds);
-    } else {
-      // No sourceFolder — discover per UID (IMAP-003 from 2026-05-28 audit).
-      for (const id of emailIds) {
-        try {
-          this.validateEmailId(id);
-          const cached = this.findCacheEntryByUid(id);
-          let folder: string;
-          if (cached) {
-            folder = cached.folder;
-          } else {
-            const discovered = await this.getEmailById(id);
-            if (!discovered) {
-              results.failed++;
-              results.errors.push(`Email ${id} not found in any folder`);
-              continue;
-            }
-            folder = discovered.folder;
-          }
-          if (!grouped.has(folder)) grouped.set(folder, []);
-          grouped.get(folder)!.push(id);
-        } catch (e: unknown) {
-          results.failed++;
-          results.errors.push(`Invalid email ID ${id}: ${e instanceof Error ? e.message : String(e)}`);
-        }
-      }
-    }
+    const grouped = await this.groupEmailsByFolder(emailIds, sourceFolder, results);
 
     for (const [folder, ids] of grouped.entries()) {
       const lock = await this.client.getMailboxLock(folder);
@@ -2879,22 +2484,22 @@ export class SimpleIMAPService {
         }
         if (present.length === 0) continue;
 
-        await this.chunkedBatchOp(
+        await this.chunkedBatchOp({
           present,
-          (uidSet) => isStarred
+          perChunk: (uidSet) => isStarred
             ? this.client!.messageFlagsAdd(uidSet, ['\\Flagged'], { uid: true })
             : this.client!.messageFlagsRemove(uidSet, ['\\Flagged'], { uid: true }),
-          (id) => isStarred
+          perUid: (id) => isStarred
             ? this.client!.messageFlagsAdd(id, ['\\Flagged'], { uid: true })
             : this.client!.messageFlagsRemove(id, ['\\Flagged'], { uid: true }),
-          (id) => {
+          onSuccess: (id) => {
             const c = this.getCacheEntry(id, folder); if (c) c.isStarred = isStarred;
             results.success++;
           },
-          (id, msg) => { results.failed++; results.errors.push(`Failed to star ${id}: ${msg}`); },
-          'Bulk star',
+          onFailure: (id, msg) => { results.failed++; results.errors.push(`Failed to star ${id}: ${msg}`); },
+          opName: 'Bulk star',
           folder,
-        );
+        });
       } finally { lock.release(); }
     }
     tags.successCount = results.success; tags.failCount = results.failed;
@@ -2914,45 +2519,7 @@ export class SimpleIMAPService {
     if (!this.client || !this.isConnected) throw new Error('IMAP client not connected');
 
     const results = { success: 0, failed: 0, errors: [] as string[] };
-    const grouped = new Map<string, string[]>();
-    if (sourceFolder) {
-      const validIds: string[] = [];
-      for (const id of emailIds) {
-        try {
-          this.validateEmailId(id);
-          validIds.push(id);
-        } catch (e: unknown) {
-          results.failed++;
-          results.errors.push(`Invalid email ID ${id}: ${e instanceof Error ? e.message : String(e)}`);
-        }
-      }
-      if (validIds.length > 0) grouped.set(sourceFolder, validIds);
-    } else {
-      // No sourceFolder — discover per UID (IMAP-003 from 2026-05-28 audit).
-      for (const id of emailIds) {
-        try {
-          this.validateEmailId(id);
-          const cached = this.findCacheEntryByUid(id);
-          let folder: string;
-          if (cached) {
-            folder = cached.folder;
-          } else {
-            const discovered = await this.getEmailById(id);
-            if (!discovered) {
-              results.failed++;
-              results.errors.push(`Email ${id} not found in any folder`);
-              continue;
-            }
-            folder = discovered.folder;
-          }
-          if (!grouped.has(folder)) grouped.set(folder, []);
-          grouped.get(folder)!.push(id);
-        } catch (e: unknown) {
-          results.failed++;
-          results.errors.push(`Invalid email ID ${id}: ${e instanceof Error ? e.message : String(e)}`);
-        }
-      }
-    }
+    const grouped = await this.groupEmailsByFolder(emailIds, sourceFolder, results);
 
     // Per source folder: pre-flight, capture Message-IDs, issue the copy. We do
     // NOT count success here — only which UIDs the COPY verb accepted. Whether
@@ -2994,15 +2561,15 @@ export class SimpleIMAPService {
         const accepted: string[] = [];
         const relocated = new Set<string>(); // source uids the server (UIDPLUS) confirmed copied
         let uidplus = false;
-        await this.chunkedBatchOp(
+        await this.chunkedBatchOp({
           present,
-          async (uidSet) => { uidplus = this.recordRelocatedUids(await this.client!.messageCopy(uidSet, targetFolder, { uid: true }), relocated) || uidplus; },
-          async (id) => { uidplus = this.recordRelocatedUids(await this.client!.messageCopy(id, targetFolder, { uid: true }), relocated) || uidplus; },
-          (id) => { accepted.push(id); },
-          (id, msg) => { results.failed++; results.errors.push(`Failed to copy ${id} to ${targetFolder}: ${msg}`); },
-          `Bulk copy →${targetFolder}`,
+          perChunk: async (uidSet) => { uidplus = this.recordRelocatedUids(await this.client!.messageCopy(uidSet, targetFolder, { uid: true }), relocated) || uidplus; },
+          perUid: async (id) => { uidplus = this.recordRelocatedUids(await this.client!.messageCopy(id, targetFolder, { uid: true }), relocated) || uidplus; },
+          onSuccess: (id) => { accepted.push(id); },
+          onFailure: (id, msg) => { results.failed++; results.errors.push(`Failed to copy ${id} to ${targetFolder}: ${msg}`); },
+          opName: `Bulk copy →${targetFolder}`,
           folder,
-        );
+        });
         verifyJobs.push({ accepted, midMap, relocated, uidplus });
       } finally { lock.release(); }
     }
@@ -3013,25 +2580,14 @@ export class SimpleIMAPService {
     // search. A copy the server "accepted" but didn't perform (the silent
     // All-Mail no-op) is an honest failure, never a false success — and a
     // message we simply cannot verify is also a failure, not an assumed success.
-    for (const job of verifyJobs) {
-      if (job.accepted.length === 0) continue;
-      let found = new Set<string>();
-      if (!job.uidplus) {
-        const mids = job.accepted.filter(u => !job.relocated.has(u)).map(u => job.midMap.get(u)).filter((m): m is string => !!m);
-        if (mids.length > 0) {
-          try { found = await this.findMessageIdsInFolder(targetFolder, mids); } catch { /* unverifiable → failure below */ }
-        }
-      }
-      for (const uid of job.accepted) {
-        const mid = job.midMap.get(uid);
-        if (job.relocated.has(uid) || (!job.uidplus && mid && found.has(mid))) {
-          results.success++;
-        } else {
-          results.failed++;
-          results.errors.push(`Copy of UID ${uid} to ${targetFolder} was accepted but could not be verified present there — likely a no-op from a union mailbox (e.g. All Mail). Pass the message's real source folder, or verify the target label exists.`);
-        }
-      }
-    }
+    const verified = await verifyRelocatedMessages(
+      verifyJobs, targetFolder,
+      (f, mids) => this.findMessageIdsInFolder(f, mids),
+      (uid) => `Copy of UID ${uid} to ${targetFolder} was accepted but could not be verified present there — likely a no-op from a union mailbox (e.g. All Mail). Pass the message's real source folder, or verify the target label exists.`,
+    );
+    results.success += verified.success;
+    results.failed += verified.failed;
+    results.errors.push(...verified.errors);
     tags.successCount = results.success; tags.failCount = results.failed;
     if (results.success > 0) this.clearFolderCache(); // target counts changed → next get_folders refetches
     logger.info(`Bulk copy completed: ${results.success}/${results.failed}`, 'IMAPService');
@@ -3091,22 +2647,22 @@ export class SimpleIMAPService {
       if (present.length > 0) {
         // IMAP-016: see bulkDeleteEmails — flag \Deleted per UID then one EXPUNGE.
         const flaggedForExpunge: string[] = [];
-        await this.chunkedBatchOp(
+        await this.chunkedBatchOp({
           present,
-          (uidSet) => this.client!.messageDelete(uidSet, { uid: true }),
-          async (id) => { await this.client!.messageFlagsAdd(id, ['\\Deleted'], { uid: true }); flaggedForExpunge.push(id); },
-          (id) => { this.evictCacheEntry(`${folder}:${id}`); results.success++; },
-          (id, msg) => { results.failed++; results.errors.push(`Failed to delete ${id} from ${folder}: ${msg}`); },
-          'Bulk delete-from-folder',
+          perChunk: (uidSet) => this.client!.messageDelete(uidSet, { uid: true }),
+          perUid: async (id) => { await this.client!.messageFlagsAdd(id, ['\\Deleted'], { uid: true }); flaggedForExpunge.push(id); },
+          onSuccess: (id) => { this.evictCacheEntry(`${folder}:${id}`); results.success++; },
+          onFailure: (id, msg) => { results.failed++; results.errors.push(`Failed to delete ${id} from ${folder}: ${msg}`); },
+          opName: 'Bulk delete-from-folder',
           folder,
           // Chunk the trailing EXPUNGE (Copilot review on #154) — see
           // bulkDeleteEmails. Bounds the command line; O(N/chunk) round-trips.
-          async () => {
+          finalize: async () => {
             for (const uidSet of chunkUidsForWire(flaggedForExpunge)) {
               await this.client!.messageDelete(uidSet, { uid: true });
             }
           },
-        );
+        });
       }
     } finally { lock.release(); }
 
@@ -3344,51 +2900,20 @@ export class SimpleIMAPService {
     const isLocalhost = cfg.host === 'localhost' || cfg.host === '127.0.0.1';
     const allowInsecure = cfg.allowInsecureBridge
       || process.env.MAILPOUCH_INSECURE_BRIDGE === '1';
+    // Same TLS decision as connect(), but IDLE ABORTS (rather than throwing)
+    // when a secure config can't be built — it must never silently downgrade.
     let tlsOptions: Record<string, unknown> | undefined;
-
-    if (isLocalhost) {
-      if (cfg.bridgeCertPath) {
-        try {
-          let certPath = cfg.bridgeCertPath;
-          try { if (statSync(certPath).isDirectory()) certPath = pathJoin(certPath, 'cert.pem'); } catch {}
-          const cert = readPinnedBridgeCert(certPath);
-          tlsOptions = buildBridgeTlsOptions(cert);
-        } catch (err) {
-          if (!allowInsecure) {
-            logger.error(
-              `IDLE: Bridge cert at "${cfg.bridgeCertPath}" could not be loaded and allowInsecureBridge is not set. ` +
-              `Refusing to start IDLE with TLS validation disabled. Fix the cert path or set allowInsecureBridge: true.`,
-              'IMAPService',
-              err
-            );
-            this.idleActive = false;
-            return;
-          }
-          logger.warn(
-            `IDLE: Failed to load Bridge cert at "${cfg.bridgeCertPath}" — running with TLS validation DISABLED (allowInsecureBridge is set).`,
-            'IMAPService',
-            err
-          );
-          tlsOptions = { rejectUnauthorized: false, minVersion: 'TLSv1.2' };
-        }
-      } else {
-        if (!allowInsecure) {
-          logger.error(
-            'IDLE: No Bridge certificate configured. Refusing to start IDLE with TLS validation disabled. ' +
-            "Set 'bridgeCertPath' or set allowInsecureBridge: true to opt into the legacy behavior.",
-            'IMAPService'
-          );
-          this.idleActive = false;
-          return;
-        }
-        logger.warn(
-          'IDLE: No Bridge certificate configured and allowInsecureBridge is set — TLS certificate validation DISABLED for localhost.',
-          'IMAPService'
-        );
-        tlsOptions = { rejectUnauthorized: false, minVersion: 'TLSv1.2' };
-      }
-    } else {
-      tlsOptions = { minVersion: 'TLSv1.2' };
+    try {
+      const tls = buildBridgeTlsConfig(cfg.host, cfg.bridgeCertPath, allowInsecure);
+      for (const l of tls.logs) logger[l.level](`IDLE: ${l.msg}`, 'IMAPService');
+      tlsOptions = tls.tlsOptions;
+    } catch (err) {
+      logger.error(
+        `IDLE: ${(err as Error).message} Refusing to start IDLE with TLS validation disabled.`,
+        'IMAPService', err,
+      );
+      this.idleActive = false;
+      return;
     }
 
     // Cluster-2 connection leak: a failed connect()/idle() must NOT leave its
