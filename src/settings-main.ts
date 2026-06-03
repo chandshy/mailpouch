@@ -14,7 +14,7 @@
  *              (piped/CI environments, non-TTY contexts)
  *
  * CLI flags:
- *   --port <n>      HTTP server port (default 8765)
+ *   --port <n>      HTTP server port (default 8766)
  *   --browser       Force browser mode (starts HTTP server + opens browser)
  *   --tui           Force interactive TUI (skips browser even if display available)
  *   --plain         Force plain readline menus (no ANSI escape codes)
@@ -58,7 +58,7 @@ if (hasFlag("--help") || hasFlag("-h")) {
   process.stdout.write(
     "Usage: mailpouch-settings [options]\n\n" +
     "Options:\n" +
-    "  --port <n>    HTTP server port (default: 8765)\n" +
+    "  --port <n>    HTTP server port (default: 8766)\n" +
     "  --browser     Force browser mode\n" +
     "  --tui         Force interactive TUI\n" +
     "  --plain       Force plain readline menus (no ANSI)\n" +
@@ -77,7 +77,7 @@ if (hasFlag("--version") || hasFlag("-v")) {
 }
 
 // Read settingsPort from config file (lowest priority — CLI and env override it)
-let configPort = 8765;
+let configPort = 8766;
 try {
   const cfg = loadConfig();
   if (cfg?.settingsPort && cfg.settingsPort >= 1 && cfg.settingsPort <= 65535) {

@@ -41,7 +41,7 @@ export const defs: ToolDef[] = [
     name: "delete_email",
     title: "Delete Email",
     description:
-      "Permanently delete an email. This action cannot be undone. Consider move_email to Trash first. Destructive: requires { confirmed: true }. Pass sourceFolder whenever the UID came from a folder other than INBOX.",
+      "Delete an email by MOVING it to Trash — mail is never permanently deleted and stays recoverable from Trash. An email already in Trash is left in place. Requires { confirmed: true }. Pass sourceFolder whenever the UID came from a folder other than INBOX.",
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
     inputSchema: {
       type: "object",
@@ -58,7 +58,7 @@ export const defs: ToolDef[] = [
     name: "bulk_delete_emails",
     title: "Bulk Delete Emails",
     description:
-      "Permanently delete multiple emails. Irreversible. Emits progress notifications if a progressToken is provided in _meta. Returns success/failed counts. Destructive: requires { confirmed: true }. Pass sourceFolder whenever the UIDs came from a folder other than INBOX.",
+      "Delete multiple emails by MOVING them to Trash — mail is never permanently deleted and stays recoverable from Trash. Emits progress notifications if a progressToken is provided in _meta. Returns success/failed counts. Requires { confirmed: true }. Pass sourceFolder whenever the UIDs came from a folder other than INBOX.",
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
     inputSchema: {
       type: "object",
@@ -75,7 +75,7 @@ export const defs: ToolDef[] = [
     name: "bulk_delete",
     title: "Bulk Delete Emails",
     description:
-      "Alias for bulk_delete_emails. Permanently delete multiple emails. Irreversible. Destructive: requires { confirmed: true }. Pass sourceFolder whenever the UIDs came from a folder other than INBOX.",
+      "Alias for bulk_delete_emails. Delete multiple emails by MOVING them to Trash — mail is never permanently deleted and stays recoverable from Trash. Requires { confirmed: true }. Pass sourceFolder whenever the UIDs came from a folder other than INBOX.",
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
     inputSchema: {
       type: "object",

@@ -7,19 +7,17 @@
  *   GET  /.well-known/oauth-authorization-server  — RFC 8414 metadata
  *   GET  /.well-known/oauth-protected-resource    — RFC 9728 metadata
  *   POST /oauth/register                          — RFC 7591 DCR
- *   GET  /oauth/authorize                         — consent page
- *   POST /oauth/authorize                         — consent submission
+ *   GET  /oauth/authorize                         — auto-consent → 302 with code
  *   POST /oauth/token                             — code exchange (PKCE)
  *   POST /oauth/revoke                            — token revocation
  *
- * The "consent page" is a single minimal HTML form that asks the user to
- * paste the admin password — a value distinct from remoteBearerToken,
- * configured separately as remoteOauthAdminPassword. The intent is to
- * prove physical presence, not to model a full user base. Do NOT reuse
- * the bearer token here: a single shared secret across both auth modes
- * means compromise of one path compromises both.
- *
- * Rate-limited through the shared TokenBucketLimiter (per client IP).
+ * Authorize is fully automatic (no admin password, no consent form): a valid
+ * request — known client_id, allowlisted redirect_uri, PKCE S256 challenge —
+ * immediately issues a code and 302-redirects. The human gate is NOT here; it
+ * is the per-agent grant Approve/Deny in the Agents tab. The issued token is
+ * inert until that grant is approved, and a pending request self-expires after
+ * 5 minutes if not approved. PKCE binds the code to the agent's verifier, the
+ * redirect_uri is allowlisted, and every endpoint is rate-limited (per IP).
  */
 
 import type { IncomingMessage, ServerResponse } from "http";
@@ -110,8 +108,6 @@ export interface OAuthEndpointsConfig {
   issuer: string;
   /** Absolute URL for the /mcp endpoint — used in oauth-protected-resource. */
   resource: string;
-  /** Admin password that gates the consent screen. */
-  adminPassword: string;
 }
 
 /** Read entire request body as a string, parse as JSON or form-urlencoded. */
@@ -172,6 +168,37 @@ function verifyPkceS256(verifier: string, challenge: string): boolean {
 // Constant-time string compare imported from ../utils/crypto.
 const safeEqual = constantTimeEqual;
 
+/**
+ * Extract client_id + client_secret for the client_credentials grant. Supports
+ * both RFC 6749 §2.3.1 transports: HTTP Basic (`Authorization: Basic
+ * base64(client_id:client_secret)`, each component form-urlencoded) and form
+ * body params. Basic takes precedence. Returns null when neither yields a
+ * complete pair.
+ */
+function extractClientCredentials(
+  req: IncomingMessage,
+  body: Record<string, string>,
+): { clientId: string; clientSecret: string } | null {
+  const auth = req.headers["authorization"];
+  if (typeof auth === "string" && /^basic\s/i.test(auth)) {
+    try {
+      const decoded = Buffer.from(auth.replace(/^basic\s+/i, ""), "base64").toString("utf-8");
+      const idx = decoded.indexOf(":");
+      if (idx >= 0) {
+        const clientId = decodeURIComponent(decoded.slice(0, idx));
+        const clientSecret = decodeURIComponent(decoded.slice(idx + 1));
+        if (clientId && clientSecret) return { clientId, clientSecret };
+      }
+    } catch {
+      // malformed Basic header → fall through to body params
+    }
+  }
+  const clientId = body.client_id ?? "";
+  const clientSecret = body.client_secret ?? "";
+  if (clientId && clientSecret) return { clientId, clientSecret };
+  return null;
+}
+
 export interface OAuthHandlerResult {
   /** True when the handler has already written a response. */
   handled: boolean;
@@ -181,38 +208,35 @@ export class OAuthHandlers {
   private readonly store: OAuthStore;
   private readonly cfg: OAuthEndpointsConfig;
   private readonly limiter: TokenBucketLimiter;
-  private readonly onClientRegistered?: (c: { client_id: string; client_name?: string }) => void;
-  /**
-   * XPORT-008: per-process secret used to HMAC the consent CSRF token. The
-   * token has no server-side state — it is `HMAC(client_id)` minted by the GET
-   * consent page and required (constant-time compared) on the POST. A
-   * cross-site form on attacker.local cannot read the GET response to learn the
-   * token, so it cannot forge a valid submission even if it knows the password.
-   */
-  private readonly csrfSecret = randomBytes(32);
+  private readonly onClientRegistered?: (c: { client_id: string; client_name?: string; ip?: string }) => void;
+  /** Extracts the caller IP from a request (injected to avoid importing http.ts
+   *  here, which would create an import cycle). */
+  private readonly ipExtractor?: (req: IncomingMessage) => string;
+  /** Verifies a service-account client_id + client_secret for the
+   *  client_credentials grant. Returns true when the pair is valid. Injected so
+   *  this module stays free of the agents-layer import. When absent, the
+   *  client_credentials grant is rejected (deployment issued no service accounts). */
+  private readonly verifyClientCredentials?: (clientId: string, secret: string) => boolean;
 
   constructor(
     store: OAuthStore,
     cfg: OAuthEndpointsConfig,
     limiter: TokenBucketLimiter,
-    onClientRegistered?: (c: { client_id: string; client_name?: string }) => void,
+    onClientRegistered?: (c: { client_id: string; client_name?: string; ip?: string }) => void,
+    ipExtractor?: (req: IncomingMessage) => string,
+    verifyClientCredentials?: (clientId: string, secret: string) => boolean,
   ) {
     this.store = store;
     this.cfg = cfg;
     this.limiter = limiter;
     this.onClientRegistered = onClientRegistered;
-    if (!cfg.adminPassword) throw new Error("OAuth admin password is required");
+    this.ipExtractor = ipExtractor;
+    this.verifyClientCredentials = verifyClientCredentials;
+    // Authorize is always automatic-consent (there is no admin password): the
+    // per-agent grant Approve/Deny is the only human gate (see handleAuthorizeGet).
   }
 
-  /** XPORT-008: mint a CSRF token bound to the client_id of this consent flow. */
-  private mintCsrfToken(clientId: string): string {
-    return createHmac("sha256", this.csrfSecret).update(clientId).digest("base64url");
-  }
 
-  /** XPORT-008: constant-time verify a CSRF token against the expected client_id. */
-  private verifyCsrfToken(token: string, clientId: string): boolean {
-    return constantTimeEqual(token, this.mintCsrfToken(clientId));
-  }
 
   /**
    * XPORT-008: reject state-changing POSTs whose Origin is cross-site. The
@@ -247,7 +271,6 @@ export class OAuthHandlers {
       if (req.method === "GET"  && path === "/.well-known/oauth-protected-resource")  return await this.serveProtectedResourceMetadata(res);
       if (req.method === "POST" && path === "/oauth/register")   return await this.handleRegister(req, res);
       if (req.method === "GET"  && path === "/oauth/authorize")  return await this.handleAuthorizeGet(req, res, url);
-      if (req.method === "POST" && path === "/oauth/authorize")  return await this.handleAuthorizePost(req, res);
       if (req.method === "POST" && path === "/oauth/token")      return await this.handleToken(req, res);
       if (req.method === "POST" && path === "/oauth/revoke")     return await this.handleRevoke(req, res);
     } catch (err: unknown) {
@@ -267,9 +290,11 @@ export class OAuthHandlers {
       registration_endpoint: `${this.cfg.issuer}/oauth/register`,
       revocation_endpoint: `${this.cfg.issuer}/oauth/revoke`,
       response_types_supported: ["code"],
-      grant_types_supported: ["authorization_code"],
+      grant_types_supported: ["authorization_code", "client_credentials"],
       code_challenge_methods_supported: ["S256"],
-      token_endpoint_auth_methods_supported: ["none"],
+      // "none" for the public authorization_code (PKCE) flow; basic/post for
+      // service-account client_credentials login.
+      token_endpoint_auth_methods_supported: ["none", "client_secret_basic", "client_secret_post"],
       scopes_supported: SCOPES,
     });
     return { handled: true };
@@ -333,7 +358,10 @@ export class OAuthHandlers {
     // Fire-and-forget: let the transport create the pending AgentGrant so
     // the user can approve in the settings UI. Handler errors are swallowed
     // — DCR itself succeeded and the caller should still get their client_id.
-    try { this.onClientRegistered?.({ client_id: client.client_id, client_name: client.client_name }); }
+    try {
+      const ip = this.ipExtractor?.(req);
+      this.onClientRegistered?.({ client_id: client.client_id, client_name: client.client_name, ip });
+    }
     catch (hookErr) { logger.warn("onClientRegistered hook threw (non-fatal)", "OAuth", hookErr); }
 
     json(res, 201, client);
@@ -371,110 +399,31 @@ export class OAuthHandlers {
       return { handled: true };
     }
 
-    // XPORT-002: every DCR-registered client is, by definition, untrusted
-    // until an admin has reviewed it. Mark on the consent payload so the
-    // page can render a visible badge. Token-endpoint-auth-method "none"
-    // is the canonical signal — pre-trusted clients (none today, but
-    // future-proofing) would auth differently.
-    const isUntrustedDcrClient = client.token_endpoint_auth_method === "none";
-    const html = this.consentPage({
-      clientId,
-      clientName: client.client_name ?? "(unnamed client)",
-      redirectUri,
-      codeChallenge,
-      state,
-      resource,
-      scope,
-      isUntrustedDcrClient,
-      csrfToken: this.mintCsrfToken(clientId),
-    });
-    res.statusCode = 200;
-    res.setHeader("Content-Type", "text/html; charset=utf-8");
-    res.setHeader("Cache-Control", "no-store");
-    // XPORT-003: clickjacking protection on the consent screen. `frame-ancestors`
-    // is honoured only when CSP arrives as an HTTP header (it is ignored in a
-    // `<meta http-equiv>` tag), so we send the policy as a real response header
-    // here; X-Frame-Options: DENY covers legacy browsers that predate CSP2.
-    res.setHeader(
-      "Content-Security-Policy",
-      "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
-    );
-    res.setHeader("X-Frame-Options", "DENY");
-    res.setHeader("X-Content-Type-Options", "nosniff");
-    res.setHeader("Referrer-Policy", "no-referrer");
-    res.end(html);
-    return { handled: true };
-  }
-
-  /** Consent form POST — validates admin password, mints code, 302s back to redirect_uri. */
-  private async handleAuthorizePost(req: IncomingMessage, res: ServerResponse): Promise<OAuthHandlerResult> {
-    let body: Record<string, string>;
-    try { body = await readBody(req); }
-    catch (err) {
-      const msg = (err as Error).message;
-      if (msg === "unsupported_media_type") { error(res, 415, "invalid_request", "Content-Type must be application/x-www-form-urlencoded."); return { handled: true }; }
-      error(res, 400, "invalid_request", "Could not parse form body."); return { handled: true };
-    }
-
-    // XPORT-008: reject cross-site submissions and forged posts before the
-    // password is even examined. The CSRF token is bound to client_id and was
-    // minted by the GET consent page; a cross-site context cannot read it.
-    const clientId = body.client_id ?? "";
-    if (!this.originAllowed(req)) {
-      error(res, 403, "access_denied", "Cross-site form submission rejected.");
-      return { handled: true };
-    }
-    if (!this.verifyCsrfToken(body.csrf_token ?? "", clientId)) {
-      error(res, 403, "access_denied", "Missing or invalid CSRF token. Reload the consent page.");
-      return { handled: true };
-    }
-
-    if (!safeEqual(body.admin_password ?? "", this.cfg.adminPassword)) {
-      error(res, 403, "access_denied", "Incorrect admin password.");
-      return { handled: true };
-    }
-
-    const client = this.store.getClient(clientId);
-    if (!client) { error(res, 400, "invalid_client", "Unknown client_id."); return { handled: true }; }
-    const redirectUri = body.redirect_uri ?? "";
-    if (!client.redirect_uris.includes(redirectUri)) { error(res, 400, "invalid_redirect_uri"); return { handled: true }; }
-
-    // XPORT-007: re-run the same format checks the GET handler enforced. A
-    // direct POST (bypassing the consent GET) must not be able to mint a code
-    // with an empty/malformed/plain challenge or an oversized state.
-    const method = body.code_challenge_method ?? "S256";
-    if (method !== "S256") { error(res, 400, "invalid_request", "PKCE S256 is required."); return { handled: true }; }
-    const codeChallenge = body.code_challenge ?? "";
-    if (!CODE_CHALLENGE_RE.test(codeChallenge)) {
-      error(res, 400, "invalid_request", "code_challenge must be 43–128 chars of base64url alphabet.");
-      return { handled: true };
-    }
-    if (body.state && body.state.length > 500) { error(res, 400, "invalid_request", "state parameter exceeds 500 chars."); return { handled: true }; }
-    if (body.state && !STATE_PRINTABLE_RE.test(body.state)) { error(res, 400, "invalid_request", "state contains non-printable characters."); return { handled: true }; }
-
-    // XPORT-017: bind every issued code to a resource. A caller-supplied
-    // `resource` must be a valid absolute http(s) URI; an absent / malformed
-    // one defaults to this server's canonical resource so the per-token check
-    // is never silently skipped.
-    let resource: string;
-    if (body.resource) {
-      const parsed = normalizeResource(body.resource);
+    // AUTO-CONSENT (only mode): agent↔server auth is fully automatic — issue the
+    // code immediately and redirect, with NO human password step. The human gate
+    // is NOT removed, it is the per-agent grant Approve/Deny in the Agents tab:
+    // the issued token is inert until the operator approves the agent, and the
+    // pending request self-expires after 5 minutes if not approved. PKCE binds
+    // the code to the agent's verifier, the redirect_uri is allowlisted, and the
+    // endpoints are rate-limited, so a code issued here is useless to anyone but
+    // the agent and grants no tool access until approved.
+    let resourceBind: string;
+    if (resource) {
+      const parsed = normalizeResource(resource);
       if (!parsed) { error(res, 400, "invalid_target", "resource must be an absolute http(s) URI."); return { handled: true }; }
-      resource = parsed;
+      resourceBind = parsed;
     } else {
-      resource = this.cfg.resource;
+      resourceBind = this.cfg.resource;
     }
-
     const rec = this.store.issueAuthCode({
       clientId: client.client_id,
       redirectUri,
       codeChallenge,
       codeChallengeMethod: "S256",
-      scopes: (body.scope ?? SCOPES.join(" ")).split(/\s+/).filter(Boolean),
-      resource,
-      state: body.state,
+      scopes: scope.split(/\s+/).filter(Boolean),
+      resource: resourceBind,
+      state,
     });
-
     const redirect = new URL(redirectUri);
     redirect.searchParams.set("code", rec.code);
     if (rec.state) redirect.searchParams.set("state", rec.state);
@@ -484,6 +433,7 @@ export class OAuthHandlers {
     res.end();
     return { handled: true };
   }
+
 
   /** Token endpoint — exchanges auth code for access token under PKCE. */
   private async handleToken(req: IncomingMessage, res: ServerResponse): Promise<OAuthHandlerResult> {
@@ -496,8 +446,11 @@ export class OAuthHandlers {
     }
 
     const grantType = body.grant_type ?? "";
+    if (grantType === "client_credentials") {
+      return this.handleClientCredentials(req, res, body);
+    }
     if (grantType !== "authorization_code") {
-      error(res, 400, "unsupported_grant_type", `Only authorization_code is supported; got ${grantType}.`);
+      error(res, 400, "unsupported_grant_type", `Supported grant types: authorization_code, client_credentials; got ${grantType}.`);
       return { handled: true };
     }
 
@@ -553,6 +506,41 @@ export class OAuthHandlers {
     return { handled: true };
   }
 
+  /**
+   * RFC 6749 §4.4 client_credentials grant — the non-interactive login path for
+   * service accounts (cron/headless agents). The client authenticates with its
+   * own client_id + client_secret (HTTP Basic per §2.3.1, or form body); on a
+   * verified pair we issue an access token bound to that client_id. No PKCE, no
+   * authorization code, no interactive consent — the agent was pre-approved at
+   * issuance (an active grant already exists), so GrantManager still gates every
+   * tool call exactly as for an interactively-approved agent.
+   */
+  private async handleClientCredentials(
+    req: IncomingMessage,
+    res: ServerResponse,
+    body: Record<string, string>,
+  ): Promise<OAuthHandlerResult> {
+    const creds = extractClientCredentials(req, body);
+    // Collapse unknown-client and wrong-secret into one opaque error so the
+    // endpoint isn't a client-id enumeration oracle.
+    if (!creds || !this.verifyClientCredentials?.(creds.clientId, creds.clientSecret)) {
+      error(res, 401, "invalid_client", "Invalid client credentials.");
+      return { handled: true };
+    }
+    const issued = this.store.issueToken({
+      clientId: creds.clientId,
+      scopes: [...SCOPES],
+      issuedFromIp: clientIp(req),
+    });
+    json(res, 200, {
+      access_token: issued.token,
+      token_type: "Bearer",
+      expires_in: Math.floor((issued.expiresAt - Date.now()) / 1000),
+      scope: issued.scopes.join(" "),
+    });
+    return { handled: true };
+  }
+
   private async handleRevoke(req: IncomingMessage, res: ServerResponse): Promise<OAuthHandlerResult> {
     let body: Record<string, string>;
     try { body = await readBody(req); }
@@ -569,81 +557,4 @@ export class OAuthHandlers {
     return { handled: true };
   }
 
-  /** Simple consent HTML with CSP to block script injection via reflected params. */
-  private consentPage(ctx: {
-    clientId: string;
-    clientName: string;
-    redirectUri: string;
-    codeChallenge: string;
-    state: string;
-    resource: string;
-    scope: string;
-    isUntrustedDcrClient?: boolean;
-    csrfToken: string;
-  }): string {
-    // Strict 5-replacement HTML escape — handles both attribute-context
-    // and body-text contexts safely. The previous 3-replacement form
-    // missed `>` and `'` which is fine for attribute values quoted with
-    // `"`, but our DD/DT body cells render text directly. Audit-aligned
-    // with `escHtml` used in src/settings/shell.ts.
-    const esc = (s: string) => s
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;")
-      .replace(/'/g, "&#39;");
-    return `<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'">
-    <title>mailpouch — authorize</title>
-    <style>
-      body { font-family: system-ui, sans-serif; background: #111; color: #eee; margin: 0; padding: 40px; }
-      .card { max-width: 480px; margin: 0 auto; background: #1b1b1e; padding: 24px; border-radius: 12px; }
-      h1 { font-size: 18px; margin: 0 0 12px; }
-      p { font-size: 14px; line-height: 1.45; color: #bbb; }
-      dl { font-size: 13px; color: #888; }
-      dt { margin-top: 10px; }
-      dd { margin: 0 0 0 0; color: #ccc; font-family: ui-monospace, monospace; word-break: break-all; }
-      label { display: block; font-size: 13px; margin-top: 16px; }
-      input[type=password] { width: 100%; padding: 8px 10px; margin-top: 6px; background: #222; color: #eee; border: 1px solid #444; border-radius: 6px; box-sizing: border-box; }
-      button { margin-top: 16px; background: #6D4AFF; color: white; border: 0; padding: 10px 18px; border-radius: 6px; cursor: pointer; font-size: 14px; }
-      button.ghost { background: transparent; color: #888; margin-left: 8px; }
-    </style>
-  </head>
-  <body>
-    <div class="card">
-      <h1>Authorize mailpouch</h1>
-      <p>An MCP client is requesting access to your Proton Mail via this server.</p>${ctx.isUntrustedDcrClient ? `
-      <p style="background:#5a1d1d; color:#ffd8d8; padding:10px 12px; border-radius:6px; font-size:13px; line-height:1.4;">
-        <strong>⚠ Untrusted client.</strong> This client registered itself via the public
-        <code>/oauth/register</code> endpoint and chose its own display name. Treat the
-        name shown below as attacker-controlled. Verify the redirect URI matches a host
-        you trust before entering the admin password.
-      </p>` : ""}
-      <dl>
-        <dt>Client</dt><dd>${esc(ctx.clientName)} (${esc(ctx.clientId)})</dd>
-        <dt>Will redirect to</dt><dd>${esc(ctx.redirectUri)}</dd>
-        <dt>Scopes</dt><dd>${esc(ctx.scope)}</dd>
-        ${ctx.resource ? `<dt>Resource</dt><dd>${esc(ctx.resource)}</dd>` : ""}
-      </dl>
-      <form method="POST" action="/oauth/authorize">
-        <input type="hidden" name="csrf_token" value="${esc(ctx.csrfToken)}">
-        <input type="hidden" name="client_id" value="${esc(ctx.clientId)}">
-        <input type="hidden" name="redirect_uri" value="${esc(ctx.redirectUri)}">
-        <input type="hidden" name="code_challenge" value="${esc(ctx.codeChallenge)}">
-        <input type="hidden" name="state" value="${esc(ctx.state)}">
-        <input type="hidden" name="resource" value="${esc(ctx.resource)}">
-        <input type="hidden" name="scope" value="${esc(ctx.scope)}">
-        <label>
-          Admin password
-          <input type="password" name="admin_password" autofocus required>
-        </label>
-        <button type="submit">Approve</button>
-      </form>
-    </div>
-  </body>
-</html>`;
-  }
 }

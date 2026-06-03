@@ -22,14 +22,21 @@ export interface TrayMenuState {
   activeCount: number;
   settingsEnabled: boolean;
   settingsUrl: string;
+  /** Why the settings UI is unavailable (e.g. "port 8766 in use"), shown in
+   *  the tray when settingsEnabled is false so the missing "Open Settings"
+   *  entry isn't silent. Omitted when the UI is up or was disabled on purpose. */
+  settingsUnavailableReason?: string;
 }
 
 export function buildSettingsTrayMenu(s: TrayMenuState): { items: TrayItem[]; tooltip: string } {
   const statusLabel = s.connected ? "\u25CF Connected" : "\u25CB Disconnected";
   const accountLabel = s.account || "Not configured";
-  const tooltip = s.pendingCount > 0
-    ? `mailpouch · ${s.pendingCount} agent(s) awaiting approval`
-    : "mailpouch";
+  const showUnavailable = !s.settingsEnabled && !!s.settingsUnavailableReason;
+  const tooltip = showUnavailable
+    ? `mailpouch · Settings UI off: ${s.settingsUnavailableReason}`
+    : s.pendingCount > 0
+      ? `mailpouch · ${s.pendingCount} agent(s) awaiting approval`
+      : "mailpouch";
 
   const items: TrayItem[] = [
     { id: "header",  label: "mailpouch", enabled: false },
@@ -47,6 +54,9 @@ export function buildSettingsTrayMenu(s: TrayMenuState): { items: TrayItem[]; to
     // UI-005/UI-007: only offer "Open Settings" when the UI is actually up.
     ...(s.settingsEnabled && s.settingsUrl
       ? [{ id: "open", label: "Open Settings" }]
+      : []),
+    ...(showUnavailable
+      ? [{ id: "settings-unavailable", label: `\u26A0 Settings UI off: ${s.settingsUnavailableReason}`, enabled: false }]
       : []),
     { id: "sep3",    label: "", separator: true },
     {

@@ -23,6 +23,7 @@ import { startSettingsServer } from "./settings/server.js";
 import { openBrowser } from "./settings/tui.js";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { chooseTransport, forceStdioFromEnv } from "./transports/select.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -46,17 +47,20 @@ import { PassService } from "./services/pass-service.js";
 import { FtsIndexService, FtsUnavailableError, openFtsIndex, type FtsRecord } from "./services/fts-service.js";
 import { AgentGrantStore } from "./agents/grant-store.js";
 import { GrantManager } from "./agents/grant-manager.js";
+import { ServiceAccountStore } from "./agents/service-account-store.js";
 import { AgentAuditLog, hashArgs } from "./agents/audit.js";
-import { currentCaller } from "./agents/caller-context.js";
+import { currentCaller, localAgentId, type CallerContext } from "./agents/caller-context.js";
 import { registerAgentServices } from "./agents/registry.js";
 import { notifications as agentNotifications } from "./agents/notifications.js";
+import { shouldAutoOpenApproval } from "./agents/auto-open-approval.js";
 import { AccountManager, registerAccountManager } from "./accounts/manager.js";
 import { DesktopNotifier } from "./notifications/desktop.js";
+import { DesktopPrompt } from "./notifications/desktop-prompt.js";
 import { WebhookDispatcher } from "./notifications/webhooks.js";
 import { logger, getLogFilePath } from "./utils/logger.js";
 import { acquireSingletonLock, releaseSingletonLock } from "./utils/singleton-lock.js";
 import { isValidEmail, validateTargetFolder, requireNumericEmailId } from "./utils/helpers.js";
-import { classifyError } from "./utils/error-classify.js";
+import { classifyError, ConnectionStateError } from "./utils/error-classify.js";
 import { permissions } from "./permissions/manager.js";
 import { loadConfig, defaultConfig, migrateCredentials, loadCredentialsFromKeychain, loadAuxiliaryCredentialsFromKeychain } from "./config/loader.js";
 import type { ToolName } from "./config/schema.js";
@@ -213,21 +217,92 @@ function recordFromEmail(m: EmailMessage): FtsRecord {
 // preserves the single-user Claude Desktop default.
 const AGENT_GRANTS_PATH = _homeFile("MAILPOUCH_AGENTS", ".mailpouch-agents.json");
 const AGENT_AUDIT_PATH = _homeFile("MAILPOUCH_AGENT_AUDIT", ".mailpouch-agent-audit.jsonl");
+const SERVICE_ACCOUNTS_PATH = _homeFile("MAILPOUCH_SERVICE_ACCOUNTS", ".mailpouch-service-accounts.json");
 const agentGrants = new AgentGrantStore(AGENT_GRANTS_PATH);
 const grantManager = new GrantManager(agentGrants);
 const agentAudit = new AgentAuditLog({ path: AGENT_AUDIT_PATH });
-registerAgentServices(agentGrants, agentAudit);
+const serviceAccounts = new ServiceAccountStore(SERVICE_ACCOUNTS_PATH);
+// Each persisted service account is born with an active grant (pre-approved at
+// issuance) so its client_credentials login flows through GrantManager like any
+// approved agent. Converge on startup so an account edited/re-issued while the
+// server was down takes effect.
+for (const acct of serviceAccounts.list()) {
+  agentGrants.ensureActiveServiceGrant({
+    clientId: acct.clientId,
+    clientName: acct.clientName,
+    preset: acct.preset,
+    conditions: acct.conditions,
+  });
+}
+registerAgentServices(agentGrants, agentAudit, serviceAccounts);
 
 // ─── Notification channels (B2) ──────────────────────────────────────────────
 // Subscribe an OS desktop notifier and an outbound webhook dispatcher to the
 // agent-notification bus. Both read their settings from the ServerConfig on
 // every event (no restart needed when toggling / adding endpoints).
 const desktopNotifier = new DesktopNotifier();
+const desktopPrompt = new DesktopPrompt();
 const webhookDispatcher = new WebhookDispatcher();
+// Epoch ms the approval window was last auto-opened — throttles a burst of
+// registrations so we open at most one tab (it lists all pending agents).
+let _lastApprovalOpenAtMs = 0;
+
+/** Fallback path: open the Settings UI Agents tab in the browser for a new
+ *  agent (used when the on-screen dialog isn't available / is disabled). */
+function _autoOpenApprovalWindow(): void {
+  const open = shouldAutoOpenApproval({
+    enabled: loadConfig()?.autoOpenApprovalWindow !== false,
+    hasDisplay: trayPreconditionSkip() === null,
+    settingsEnabled: _settingsEnabled,
+    settingsUrl: _settingsUrl,
+    nowMs: Date.now(),
+    lastOpenedAtMs: _lastApprovalOpenAtMs,
+  });
+  if (open) {
+    _lastApprovalOpenAtMs = Date.now();
+    try { openBrowser(`${_settingsUrl}#agents`); }
+    catch (err: unknown) { logger.debug("auto-open approval window failed", "MCPServer", err); }
+  }
+}
+
 agentNotifications.subscribe((ev) => {
   const cfg = loadConfig();
-  // Desktop: default ON; only skip when explicitly disabled.
-  if (cfg?.desktopNotificationsEnabled !== false) {
+  // A new agent registered → surface a NATIVE on-screen Approve/Deny dialog on
+  // the machine where mailpouch runs, so the operator can decide right there
+  // (not in a browser tab). On approve/deny we resolve the grant immediately;
+  // if no dialog tool is available (headless) or it times out, fall back to the
+  // browser approval window (and the pending grant's 5-min TTL still applies).
+  let dialogHandlingCreated = false;
+  if (ev.kind === "grant-created") {
+    const dialogEnabled = cfg?.nativeApprovalDialog !== false && trayPreconditionSkip() === null;
+    if (dialogEnabled) {
+      dialogHandlingCreated = true;
+      const grant = ev.grant;
+      const where = String(grant.clientId).startsWith("stdio:")
+        ? "local"
+        : (grant.registeredFromIp ? `from ${grant.registeredFromIp}` : "remote");
+      void desktopPrompt.prompt({
+        title: "mailpouch — approve agent?",
+        message: `Agent "${grant.clientName}" (${where}) is requesting access to your mailbox.\n\nApprove this connection?`,
+      }).then((choice) => {
+        if (choice === "approve") {
+          const preset = loadConfig()?.permissions?.preset ?? "read_only";
+          agentGrants.approve({ clientId: grant.clientId, preset });
+          logger.info(`Agent "${grant.clientName}" approved at the on-screen prompt (preset ${preset})`, "MCPServer");
+        } else if (choice === "deny") {
+          agentGrants.deny(grant.clientId, "Denied at the on-screen prompt");
+          logger.info(`Agent "${grant.clientName}" denied at the on-screen prompt`, "MCPServer");
+        } else {
+          _autoOpenApprovalWindow(); // no dialog tool / timed out → browser fallback
+        }
+      }).catch(() => { _autoOpenApprovalWindow(); });
+    } else {
+      _autoOpenApprovalWindow();
+    }
+  }
+  // Desktop notification heads-up. Skip the new-registration toast when the
+  // on-screen dialog is already handling it (avoid a redundant double-prompt).
+  if (cfg?.desktopNotificationsEnabled !== false && !dialogHandlingCreated) {
     const titleByKind: Record<string, string> = {
       "grant-created":  "mailpouch — agent awaiting approval",
       "grant-approved": "mailpouch — agent approved",
@@ -359,6 +434,10 @@ function safeErrorMessage(error: unknown): string {
   // McpError instances originate from our own validated handlers — their
   // messages are already safe to surface directly to the caller.
   if (error instanceof McpError) return error.message;
+  // ConnectionStateError carries operator-actionable guidance (fix the Bridge
+  // password / start Bridge) written for a human — surface it verbatim so the
+  // agent can relay exactly what the user needs to go fix.
+  if (error instanceof ConnectionStateError) return error.message;
   const msg = error.message.toLowerCase();
   if (
     msg.includes("invalid email") ||
@@ -454,6 +533,7 @@ function activeToolTier(): ReturnType<typeof parseToolTier> {
   return parseToolTier(cfg?.toolTier);
 }
 
+function registerHandlers(server: Server): void {
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   const tier = activeToolTier();
   const visible = toolsForTier(tier);
@@ -466,7 +546,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
   // config snapshot — everything else is static.
   const defs = allToolDefs().map(def =>
     def.name === "request_permission_escalation"
-      ? { ...def, description: describeRequestEscalation(config.settingsPort ?? 8765) }
+      ? { ...def, description: describeRequestEscalation(config.settingsPort ?? 8766) }
       : def,
   );
   return { tools: defs.filter(t => visible.has(t.name)) };
@@ -500,8 +580,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // record so the approval card can surface it. Stdio (no OAuth client)
     // becomes the literal string "stdio" — distinguishable from a real
     // client id so the UI can flag which approval flow this is.
-    const earlyCaller = currentCaller();
-    const escalationCaller = earlyCaller && !earlyCaller.staticBearer
+    const earlyCaller = currentCaller() ?? _stdioCaller ?? undefined;
+    const escalationCaller = earlyCaller
       ? { clientId: earlyCaller.clientId, clientName: earlyCaller.clientName }
       : { clientId: "stdio", clientName: undefined };
     // PERM-001: escalation meta-tools bypass the grant/permission/destructive
@@ -512,7 +592,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const escStartedAt = Date.now();
     try {
       const res = await _escalationHandlers[name]({ args, config, caller: escalationCaller });
-      if (earlyCaller && !earlyCaller.staticBearer) {
+      if (earlyCaller) {
         agentAudit.write({
           ts: new Date(escStartedAt).toISOString(),
           clientId: earlyCaller.clientId,
@@ -527,7 +607,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
       return res;
     } catch (err: unknown) {
-      if (earlyCaller && !earlyCaller.staticBearer) {
+      if (earlyCaller) {
         agentAudit.write({
           ts: new Date(escStartedAt).toISOString(),
           clientId: earlyCaller.clientId,
@@ -566,12 +646,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 
   // ── Agent-grant gate ──────────────────────────────────────────────────────
-  // Runs BEFORE the global permission gate. Only takes effect when the call
-  // carries caller context (i.e. came in through the HTTP transport with an
-  // OAuth client_id). Stdio callers — the Claude Desktop default — fall
-  // through and are gated only by the global preset, preserving single-user
-  // behavior for anyone who hasn't opted into multi-agent mode.
-  const caller = currentCaller();
+  // Runs BEFORE the global permission gate. The caller is the HTTP request's
+  // OAuth identity (AsyncLocalStorage) when present, else the LOCAL stdio
+  // client's identity resolved at the handshake (_stdioCaller) when local
+  // gating is on. So every agent — local or remote — is routed through the
+  // per-agent grant: an unapproved one is blocked "pending user approval".
+  // When local gating is disabled, _stdioCaller is null and stdio bypasses
+  // (legacy auto-trust).
+  const caller = currentCaller() ?? _stdioCaller ?? undefined;
   const callStartedAt = Date.now();
   // Flipped true in the catch so the finally success path is skipped.
   let auditFailureRecorded = false;
@@ -582,7 +664,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   // between them produced a TOCTOU window where the two gates judged the
   // same call against different snapshots. One snapshot closes that gap.
   const configSnapshot = loadConfig() ?? defaultConfig();
-  if (caller && !caller.staticBearer) {
+  if (caller) {
     const callerGrant = agentGrants.get(caller.clientId);
     const boundAccountId = callerGrant?.conditions?.accountId;
     if (boundAccountId && boundAccountId !== requestedAccountId) {
@@ -641,7 +723,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const permResult = permissions.check(name as ToolName);
   if (!permResult.allowed) {
     logger.warn(`Tool blocked by permission policy: ${name}`, "MCPServer", { reason: permResult.reason });
-    if (caller && !caller.staticBearer) {
+    if (caller) {
       agentAudit.write({
         ts: new Date(callStartedAt).toISOString(),
         clientId: caller.clientId,
@@ -806,7 +888,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // restriction), preserving existing behavior. OAuth callers with a
       // folder-restricted grant return their allowlist for content-scoping.
       getCallerAllowedFolders: () => {
-        if (!caller || caller.staticBearer) return undefined;
+        if (!caller) return undefined;
         return grantManager.resolveAllowedFolders(caller.clientId);
       },
       config,
@@ -834,7 +916,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     logger.error(`Tool failed: ${name}`, "MCPServer", error);
     const msg = safeErrorMessage(error);
     auditFailureRecorded = true;
-    if (caller && !caller.staticBearer) {
+    if (caller) {
       agentAudit.write({
         ts: new Date(callStartedAt).toISOString(),
         clientId: caller.clientId,
@@ -857,7 +939,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // response contents from here (each case returns directly), but the
     // agent-audit channel intentionally avoids logging response bodies —
     // we just need the fact of the call and its duration.
-    if (!auditFailureRecorded && caller && !caller.staticBearer) {
+    if (!auditFailureRecorded && caller) {
       agentAudit.write({
         ts: new Date(callStartedAt).toISOString(),
         clientId: caller.clientId,
@@ -1343,6 +1425,89 @@ Then, if the user approves, use send_email with to="${recipient}" to send it.`,
       throw new McpError(ErrorCode.InvalidRequest, `Unknown prompt: ${name}`);
   }
 });
+}
+
+// Build a fresh MCP server instance with all handlers registered. The HTTP
+// transport calls this per client session so each session gets its own Server
+// (the MCP SDK binds one Server to one transport). Without it, a single shared
+// stateless transport 500s after the first initialize. (2026-06-01)
+export function createSessionServer(): Server {
+  const s = new Server(
+    { name: "mailpouch", version: _pkgVersion },
+    {
+      capabilities: {
+        tools: { listChanged: false },
+        resources: { listChanged: false, subscribe: false },
+        prompts: { listChanged: false },
+      },
+    },
+  );
+  // Capture the MCP handshake's connection info onto this agent's grant for
+  // display in the Agents tab. The `initialize` request runs inside
+  // runWithCaller(), so currentCaller() yields the session's OAuth clientId
+  // here. Identity is the server-issued clientId; the client's self-reported
+  // name/version are display-only. Bearer/stdio callers have no per-agent grant
+  // (trusted), so this is a no-op for them.
+  s.oninitialized = () => {
+    try {
+      const caller = currentCaller();
+      if (!caller || !caller.clientId) return;
+      const info = s.getClientVersion(); // { name, version? } | undefined
+      agentGrants.recordConnection(caller.clientId, {
+        mcpClientName: info?.name,
+        mcpClientVersion: info?.version,
+        transport: "http",
+        registeredFromIp: caller.ip,
+      });
+    } catch (err: unknown) {
+      logger.debug("Failed to record agent handshake connection info", "MCPServer", err);
+    }
+  };
+  registerHandlers(s);
+  return s;
+}
+
+// Register handlers on the module-level server (used by the stdio transport).
+registerHandlers(server);
+
+// ── Local (stdio) agent gating ───────────────────────────────────────────────
+// Stdio has no per-request caller context (AsyncLocalStorage doesn't cross from
+// the initialize handshake to the tool handler), and a stdio process serves
+// exactly ONE local client, so we resolve that client's identity once at the
+// handshake and stash it module-side. The tool gate falls back to this when
+// there's no HTTP caller — routing the local agent through the same
+// register → approve → access flow as remote agents.
+let _stdioCaller: CallerContext | null = null;
+
+/** True when local (stdio) agents must register + be approved (default true). */
+function localAgentsGated(): boolean {
+  if (process.env.MAILPOUCH_TRUST_LOCAL === "1") return false;
+  return (loadConfig()?.gateLocalAgents ?? true) !== false;
+}
+
+// Capture the local client's identity at the MCP handshake, register a pending
+// grant (which surfaces the approval notice), and arm the gate. No-op when
+// local gating is disabled (legacy auto-trust) — _stdioCaller stays null, so
+// the gate keeps bypassing stdio.
+server.oninitialized = () => {
+  try {
+    if (!localAgentsGated()) return;
+    const info = server.getClientVersion(); // { name, version? } | undefined
+    const name = info?.name || "(unnamed local client)";
+    const clientId = localAgentId(name);
+    if (!agentGrants.get(clientId)) {
+      agentGrants.createPending({ clientId, clientName: name });
+    }
+    agentGrants.recordConnection(clientId, {
+      mcpClientName: info?.name,
+      mcpClientVersion: info?.version,
+      transport: "stdio",
+    });
+    _stdioCaller = { clientId, clientName: name };
+  } catch (err: unknown) {
+    logger.debug("Failed to register local stdio agent", "MCPServer", err);
+  }
+};
 
 // ═════════════════════════════════════════════════════════════════════════════
 // STARTUP & LIFECYCLE
@@ -1534,6 +1699,7 @@ async function killProtonBridge(): Promise<void> {
 function startBridgeWatchdog(): void {
   if (bridgeWatchdogTimer) return;
   bridgeWatchdogTimer = setInterval(async () => {
+   try {
     const [smtpOk, imapOk] = await Promise.all([
       isBridgeReachable(config.smtp.host, config.smtp.port),
       isBridgeReachable(config.imap.host, config.imap.port),
@@ -1589,6 +1755,11 @@ function startBridgeWatchdog(): void {
       );
       if (bridgeWatchdogTimer) { clearInterval(bridgeWatchdogTimer); bridgeWatchdogTimer = null; }
     }
+   } catch (e: unknown) {
+     // An async error here (Promise.all reject, launchProtonBridge throw) would
+     // otherwise become an unhandledRejection → gracefulShutdown → process exit.
+     logger.warn("Bridge watchdog tick failed — will retry next interval", "MCPServer", e);
+   }
   }, 30_000).unref();
 }
 
@@ -1609,7 +1780,7 @@ function trimForAnalytics(emails: EmailMessage[]): EmailMessage[] {
 // rounded-square gradient envelope (64×64 base, multi-resolution ICO on
 // Windows). Lazy-computed at module load so tests that import index.ts for
 // non-tray reasons don't pay the raster cost when they never touch it.
-import { makeIconPng, makeTrayIconBytes } from "./utils/icon.js";
+import { makeIconPng, makeTrayIconBytes, makeWarningIconPng, makeWarningTrayIconBytes } from "./utils/icon.js";
 import { createTray, preflightTrayBinary, trayPreconditionSkip, inheritDisplayFromParent, type TrayHandle, type TrayItem } from "./utils/tray.js";
 import { buildSettingsTrayMenu } from "./utils/tray-menu.js";
 
@@ -1618,6 +1789,10 @@ import { buildSettingsTrayMenu } from "./utils/tray-menu.js";
 let _settingsStop:    (() => Promise<void>) | null = null;
 let _settingsEnabled: boolean = false;
 let _settingsUrl:     string  = "";
+// When the settings UI can't bind, this records why (e.g. "ports 8766–8776 all
+// in use") so the tray can surface it instead of the "Open Settings" entry
+// silently vanishing. Cleared whenever the UI comes up.
+let _settingsUnavailableReason: string | undefined;
 /**
  * True when `_settingsUrl` points at a standalone `mailpouch-settings`
  * daemon we did NOT spawn — the port was already owned by another
@@ -1628,6 +1803,44 @@ let _settingsUrl:     string  = "";
 let _settingsExternal: boolean = false;
 let _trayInstance:    TrayHandle | null = null;
 let _trayTooltip:     string = "mailpouch";
+// ── Health blink: while the mail connection is failing (IMAP login failure or
+// an ongoing connection problem), the tray icon alternates between the normal
+// envelope and a red ⚠ triangle every 5s so the operator can't miss it. ─────
+let _trayHealthTimer: ReturnType<typeof setInterval> | null = null;
+let _trayDegraded:    boolean = false; // currently in the blink regime
+let _trayBlinkWarn:   boolean = false; // which icon is showing this tick
+let _normalTrayBytes: Buffer | null = null;
+let _warnTrayBytes:   Buffer | null = null;
+
+/** True while mailpouch can't maintain its mail connection — drives the blink. */
+function _mailConnectionFailing(): boolean {
+  return !!(imapService.idleAuthFailure || imapService.idleLastIssue);
+}
+
+/** Runs every 5s. Blinks the icon while failing; restores it once recovered. */
+function _tickTrayHealth(): void {
+  if (!_trayInstance || !_normalTrayBytes || !_warnTrayBytes) return;
+  try {
+    if (_mailConnectionFailing()) {
+      _trayDegraded = true;
+      _trayBlinkWarn = !_trayBlinkWarn;
+      _trayInstance.setIcon(_trayBlinkWarn ? _warnTrayBytes : _normalTrayBytes);
+      const reason = imapService.idleAuthFailure?.message
+        ?? imapService.idleLastIssue?.message
+        ?? "mail connection problem";
+      const tip = `mailpouch · ⚠ ${reason}`;
+      if (tip !== _trayTooltip) { _trayInstance.setTooltip(tip); _trayTooltip = tip; }
+    } else if (_trayDegraded) {
+      // Recovered — stop blinking, restore the normal icon + tooltip/menu.
+      _trayDegraded = false;
+      _trayBlinkWarn = false;
+      _trayInstance.setIcon(_normalTrayBytes);
+      _rebuildTray();
+    }
+  } catch (err: unknown) {
+    logger.debug("Tray health tick failed", "MCPServer", err);
+  }
+}
 
 /**
  * Probe whether a mailpouch settings UI is already serving on `port`.
@@ -1684,62 +1897,83 @@ async function _probeExistingMailpouchUi(port: number): Promise<string | null> {
 }
 
 async function _startSettingsServerDaemon(): Promise<void> {
-  const port = config.settingsPort ?? 8765;
+  const basePort = config.settingsPort ?? 8766;
 
-  // If a user-run `mailpouch-settings` instance is already serving on this
-  // port, reuse it silently rather than retry-and-warn. Probes with a short
-  // GET /api/status — any non-mailpouch listener (e.g. `python3 -m http.server`
-  // on the same port) responds with a different shape and falls through to
-  // the normal startup-then-EADDRINUSE path where the warning is accurate.
-  const existing = await _probeExistingMailpouchUi(port);
+  // If a user-run `mailpouch-settings` instance is already serving on the
+  // configured port, reuse it silently rather than retry-and-warn. Probes with
+  // a short GET /api/status — any non-mailpouch listener (e.g. a stray
+  // `python3 -m http.server`) responds with a different shape and falls through
+  // to the bind-then-fallback path below.
+  const existing = await _probeExistingMailpouchUi(basePort);
   if (existing) {
     _settingsUrl      = existing;
     _settingsEnabled  = true;
     _settingsExternal = true;
+    _settingsUnavailableReason = undefined;
     logger.info(`Reusing existing Settings UI at ${existing}`, "MCPServer");
     return;
   }
 
-  const maxAttempts = 5;
-  const retryMs     = 1000;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      const { scheme, stop } = await startSettingsServer(port, false, true /* quiet */, {
-        onRestartRequested: () => setImmediate(() => gracefulShutdown("update_restart")),
-        onShutdownRequested: () => setImmediate(() => gracefulShutdown("ui-shutdown").catch(() => process.exit(1))),
-      });
-      _settingsStop    = stop;
-      _settingsUrl     = `${scheme}://localhost:${port}`;
-      _settingsEnabled = true;
-      logger.info(`Settings UI started at ${_settingsUrl}`, "MCPServer");
-      return;
-    } catch (err: unknown) {
-      const isInUse = (err as NodeJS.ErrnoException).code === "EADDRINUSE";
-      if (isInUse && attempt < maxAttempts) {
-        logger.debug(`Settings UI port ${port} in use, retrying (${attempt}/${maxAttempts})…`, "MCPServer");
-        await new Promise(r => setTimeout(r, retryMs));
-      } else if (isInUse) {
-        // Exhausted retries. The probe didn't confirm a reusable mailpouch UI
-        // on this port, but that's not proof it ISN'T mailpouch — the
-        // standalone daemon in LAN mode gates /api/status on an access token
-        // (401s without it), and that's indistinguishable from "random
-        // listener". Phrase the warning honestly.
-        logger.warn(
-          `Settings UI could not bind port ${port} — another process is listening there and did not identify itself as mailpouch. ` +
-          `If it's a mailpouch-settings instance in LAN mode, this MCP will share it silently once you supply the access token. ` +
-          `Otherwise change settingsPort in ~/.mailpouch.json (or set the PORT env var) and restart to pick a free port.`,
-          "MCPServer",
-          err,
-        );
-        _markSettingsUnavailable();
+  // Bind the configured port; if it's held by a FOREIGN process (not a
+  // reusable mailpouch UI — the probe above already ruled that out), retrying
+  // the same port forever is pointless, so fall back to the next ports. The
+  // configured port still gets a couple of quick retries first to cover the
+  // transient "a mailpouch is restarting on it" window.
+  const PORT_FALLBACK_SPAN = 10;     // try basePort … basePort+10
+  const BASE_PORT_RETRIES  = 3;      // transient EADDRINUSE on the configured port
+  const retryMs            = 1000;
+  for (let offset = 0; offset <= PORT_FALLBACK_SPAN; offset++) {
+    const port = basePort + offset;
+    if (port > 65535) break; // never try an out-of-range port (Node rejects >65535)
+    const retries = offset === 0 ? BASE_PORT_RETRIES : 1; // only the base port waits
+    for (let attempt = 1; attempt <= retries; attempt++) {
+      try {
+        const { scheme, stop } = await startSettingsServer(port, false, true /* quiet */, {
+          onRestartRequested: () => setImmediate(() => gracefulShutdown("update_restart")),
+          onShutdownRequested: () => setImmediate(() => gracefulShutdown("ui-shutdown").catch(() => process.exit(1))),
+        });
+        _settingsStop    = stop;
+        _settingsUrl     = `${scheme}://localhost:${port}`;
+        _settingsEnabled = true;
+        _settingsUnavailableReason = undefined;
+        if (offset === 0) {
+          logger.info(`Settings UI started at ${_settingsUrl}`, "MCPServer");
+        } else {
+          logger.warn(
+            `Settings UI: configured port ${basePort} was occupied by another process — bound to ${port} instead. ` +
+            `Open ${_settingsUrl}. To pin a port, set settingsPort in ~/.mailpouch.json.`,
+            "MCPServer",
+          );
+        }
         return;
-      } else {
+      } catch (err: unknown) {
+        const isInUse = (err as NodeJS.ErrnoException).code === "EADDRINUSE";
+        if (isInUse && attempt < retries) {
+          logger.debug(`Settings UI port ${port} in use, retrying (${attempt}/${retries})…`, "MCPServer");
+          await new Promise(r => setTimeout(r, retryMs));
+          continue;
+        }
+        if (isInUse) {
+          // This candidate port is taken; move on to the next one.
+          logger.debug(`Settings UI port ${port} in use; trying ${port + 1}.`, "MCPServer");
+          break;
+        }
+        // Non-EADDRINUSE failure (e.g. bad bind address) — don't keep trying.
         logger.warn("Settings UI failed to start", "MCPServer", err);
-        _markSettingsUnavailable();
+        _markSettingsUnavailable("settings server failed to start");
         return;
       }
     }
   }
+
+  // Every candidate port was occupied.
+  const span = `${basePort}–${basePort + PORT_FALLBACK_SPAN}`;
+  logger.warn(
+    `Settings UI could not bind any port in ${span} — all are in use by other processes. ` +
+    `Free one, or set settingsPort in ~/.mailpouch.json (or the PORT env var) to a free port, and restart.`,
+    "MCPServer",
+  );
+  _markSettingsUnavailable(`ports ${span} all in use`);
 }
 
 async function _stopSettingsServerDaemon(): Promise<void> {
@@ -1780,6 +2014,7 @@ function _buildTrayItems(): { items: TrayItem[]; tooltip: string } {
     activeCount:     agentGrants.list({ status: "active" }).length,
     settingsEnabled: _settingsEnabled,
     settingsUrl:     _settingsUrl,
+    settingsUnavailableReason: _settingsUnavailableReason,
   });
 }
 
@@ -1789,9 +2024,10 @@ function _buildTrayItems(): { items: TrayItem[]; tooltip: string } {
  * empty `_settingsUrl`. The `_settingsEnabled === !!_settingsUrl` invariant must
  * hold after every state change.
  */
-function _markSettingsUnavailable(): void {
+function _markSettingsUnavailable(reason?: string): void {
   _settingsEnabled = false;
   _settingsUrl     = "";
+  _settingsUnavailableReason = reason;
   _rebuildTray();
 }
 
@@ -1855,6 +2091,15 @@ async function _initTray(): Promise<void> {
     _trayInstance = tray;
     logger.info(`System tray icon active (${tray.backend} backend)`, "MCPServer");
 
+    // Precompute the normal + warning icon bytes once, in the format this
+    // backend's setIcon() expects (native takes PNG; systray2 the platform
+    // bytes — ICO on Windows), then start the 5s health-blink timer.
+    const usePng = tray.backend !== "systray2";
+    _normalTrayBytes = usePng ? makeIconPng(64) : makeTrayIconBytes();
+    _warnTrayBytes   = usePng ? makeWarningIconPng(64) : makeWarningTrayIconBytes();
+    _trayHealthTimer = setInterval(_tickTrayHealth, 5000);
+    _trayHealthTimer.unref();
+
     // Keep the tray menu in sync with grant changes (new pending → badge,
     // approved/revoked → count update).
     agentNotifications.subscribe(() => {
@@ -1874,8 +2119,47 @@ async function main() {
     process.exit(0);
   }
 
+  // `mailpouch agent <issue|list|revoke>` — provision/manage service accounts,
+  // then exit. Runs before any server side effects (no Bridge connect, no
+  // transport) so it's a quick offline admin command. Uses the module-scope
+  // grant + service-account stores already constructed above.
+  if (process.argv[2] === "agent") {
+    const { runAgentCli } = await import("./cli/agent-cli.js");
+    const code = await runAgentCli(process.argv.slice(3), { serviceAccounts, agentGrants });
+    process.exit(code);
+  }
+
+  // `mailpouch daemon [--host H] [--port P]` runs the shared HTTP daemon
+  // explicitly — forces the HTTP transport regardless of `remoteMode` so many
+  // clients (Claude Code over HTTP, cowork, headless service accounts) share
+  // one IMAP connection. It is a deliberate, user-started process (run it in a
+  // tmux / login session) — NOT an autostart.
+  const argVal = (flag: string): string | undefined => {
+    const i = process.argv.indexOf(flag);
+    return i >= 0 ? process.argv[i + 1] : undefined;
+  };
+  const daemonMode = process.argv[2] === "daemon";
+  const daemonHostOverride = daemonMode ? argVal("--host") : undefined;
+  const daemonPortOverride = daemonMode ? argVal("--port") : undefined;
+
   const noTray       = process.argv.includes("--no-tray");
   const noSettingsUi = process.argv.includes("--no-settings-ui");
+  // `--settings-only` runs JUST the settings UI + tray: no MCP transport, no
+  // Bridge backends. Historically this flag was UNRECOGNISED, so the process
+  // fell through to the stdio MCP server whose lifetime is bound to stdin —
+  // launched without a live MCP client holding stdin open (autostart, nohup, a
+  // wrapper), stdin hit EOF immediately and the process shut itself down within
+  // seconds. That self-termination read as "it keeps crashing." Treating it as
+  // a real mode keeps the process alive on the settings HTTP server instead.
+  const settingsOnly = process.argv.includes("--settings-only");
+  if (settingsOnly && noSettingsUi) {
+    logger.error(
+      "--settings-only and --no-settings-ui are contradictory (there would be nothing to run). " +
+      "Pass one or the other.",
+      "MCPServer",
+    );
+    process.exit(1);
+  }
 
   // Clear log file from previous run so each session starts fresh
   try { writeFileSync(getLogFilePath(), "", { encoding: "utf8", mode: 0o600 }); } catch { /* ignore */ }
@@ -1937,7 +2221,7 @@ async function main() {
       config.debug              = !!cn.debug;
       config.autoStartBridge    = !!cn.autoStartBridge;
       config.bridgePath         = cn.bridgePath || undefined;
-      config.settingsPort       = fileConfig.settingsPort ?? 8765;
+      config.settingsPort       = fileConfig.settingsPort ?? 8766;
 
       // CRED-001: Pass PAT + SimpleLogin API key now keychain-routable.
       // After migrateCredentials() runs, the disk fields are blank — read
@@ -2077,7 +2361,7 @@ async function main() {
     const bindWatchdog = setInterval(() => {
       if (!_settingsEnabled) {
         logger.warn(
-          `Settings UI not yet bound on port ${config.settingsPort ?? 8765} — still waiting on the HTTP server bind. ` +
+          `Settings UI not yet bound on port ${config.settingsPort ?? 8766} — still waiting on the HTTP server bind. ` +
           `The UI should be reachable independent of Bridge connectivity; if this repeats, the port may be occupied.`,
           "MCPServer",
         );
@@ -2095,6 +2379,32 @@ async function main() {
   // has the tray — skip to avoid duplicates.
   if (!noTray && !_settingsExternal) {
     _initTray().catch((err: unknown) => logger.warn("Tray init error", "MCPServer", err));
+  }
+
+  // ── Settings-only mode: stop here ─────────────────────────────────────────
+  // The settings UI + tray are up. We deliberately do NOT connect to Bridge,
+  // start the scheduler/IDLE loop, or attach an MCP transport — none of those
+  // belong to a standalone settings launcher, and the stdio transport's
+  // stdin-close handler is exactly what made `--settings-only` self-terminate.
+  // The settings HTTP server (and tray) keep the event loop alive; the process
+  // runs until the tray's Quit or a signal. If the settings server failed to
+  // bind there is nothing left to keep us alive, so fail loudly rather than
+  // exit silently looking like another "crash."
+  if (settingsOnly) {
+    if (!_settingsEnabled && !_settingsExternal) {
+      logger.error(
+        `Settings UI failed to bind (port ${config.settingsPort ?? 8766} may be occupied) and --settings-only was requested — ` +
+        "nothing left to run. Free the port, or set settingsPort in ~/.mailpouch.json (or the PORT env var), then retry.",
+        "MCPServer",
+      );
+      process.exit(1);
+    }
+    logger.info(
+      "Settings-only mode: settings UI + tray are running; MCP transport and Bridge backends are NOT started. " +
+      "Quit via the tray menu or Ctrl-C.",
+      "MCPServer",
+    );
+    return;
   }
 
   // ── Bridge reachability probe + optional auto-start ───────────────────────
@@ -2172,6 +2482,17 @@ async function main() {
       catch (err: unknown) { logger.debug("agent-grant counter flush failed", "MCPServer", err); }
     }, 5 * 60_000).unref();
 
+    // Expire pending agent approvals after 5 minutes: if the user doesn't
+    // Approve/Deny in time, the request is deleted (token revoked) and the
+    // agent must connect/auth again. Swept every 30s for promptness.
+    const PENDING_APPROVAL_TTL_MS = 5 * 60_000;
+    setInterval(() => {
+      try {
+        const n = agentGrants.expireStalePending(PENDING_APPROVAL_TTL_MS);
+        if (n > 0) logger.info(`Expired ${n} pending agent approval request(s) after ${PENDING_APPROVAL_TTL_MS / 60_000} min`, "MCPServer");
+      } catch (err: unknown) { logger.debug("pending-approval expiry sweep failed", "MCPServer", err); }
+    }, 30_000).unref();
+
     // ── Background auto-sync ────────────────────────────────────────────────
     if (config.autoSync && (config.syncInterval ?? 0) > 0) {
       const intervalMs = (config.syncInterval as number) * 60 * 1000;
@@ -2222,35 +2543,69 @@ async function main() {
     // the loadCredentialsFromKeychain priority chain for password/smtpToken.
     const { loadRemoteSecrets } = await import("./security/keychain.js");
     const remoteSecrets = await loadRemoteSecrets();
-    const effectiveBearer = remoteSecrets?.remoteBearerToken || remoteCn?.remoteBearerToken || "";
-    const effectiveAdminPassword = remoteSecrets?.remoteOauthAdminPassword || remoteCn?.remoteOauthAdminPassword || "";
-    const hasBearer = !!effectiveBearer;
-    const hasOAuth  = !!remoteCn?.remoteOauthEnabled && !!effectiveAdminPassword;
-    if (remoteCn?.remoteMode) {
-      if (!hasBearer && !hasOAuth) {
+    // OAuth is now the ONLY remote-auth mechanism: every agent authenticates as
+    // its own client (authorization_code for interactive, client_credentials for
+    // service accounts) so each is independently gated, audited, and revocable.
+    // The legacy shared static bearer was removed — a present remoteBearerToken
+    // is ignored with a migration warning. An admin password was already gone.
+    const hasOAuth  = !!remoteCn?.remoteOauthEnabled;
+    if (remoteSecrets?.remoteBearerToken || remoteCn?.remoteBearerToken) {
+      logger.warn(
+        "remoteBearerToken is configured but the static shared bearer was removed and will be ignored — " +
+        "it bypassed per-agent gating and audit. For programmatic/headless access, issue a service account: " +
+        "`mailpouch agent issue --name <name> --preset <preset>`. Remove remoteBearerToken from your config.",
+        "MCPServer",
+      );
+    }
+    if (remoteSecrets?.remoteOauthAdminPassword || remoteCn?.remoteOauthAdminPassword) {
+      logger.warn(
+        "remoteOauthAdminPassword is configured but is no longer supported and will be ignored — " +
+        "OAuth uses automatic consent; agents are gated solely by per-agent Approve/Deny in the Agents tab.",
+        "MCPServer",
+      );
+    }
+    // MAILPOUCH_FORCE_STDIO=1 forces stdio for this spawn even when the config
+    // has remoteMode:true — lets a stdio MCP-client entry (e.g. Claude Code)
+    // coexist with the shared HTTP daemon config without a duplicate file.
+    // `mailpouch daemon` forces HTTP regardless of remoteMode (and ignores
+    // FORCE_STDIO — running the daemon is an explicit HTTP intent).
+    const forceStdio = !daemonMode && forceStdioFromEnv(process.env.MAILPOUCH_FORCE_STDIO);
+    if (forceStdio && remoteCn?.remoteMode) {
+      logger.info("MAILPOUCH_FORCE_STDIO is set — using stdio transport despite remoteMode=true in config.", "MCPServer");
+    }
+    if (chooseTransport({ remoteMode: remoteCn?.remoteMode, forceStdio, forceHttp: daemonMode }) === "http") {
+      if (!hasOAuth) {
         logger.error(
-          "remoteMode is set but no authentication is configured. " +
-          "Set remoteBearerToken OR both remoteOauthEnabled and remoteOauthAdminPassword in ~/.mailpouch.json (or via keychain). " +
-          "Refusing to start without auth — edit the config or remove remoteMode to use stdio.",
+          (daemonMode
+            ? "`mailpouch daemon` runs the shared HTTP daemon, which requires OAuth. "
+            : "remoteMode is set but remoteOauthEnabled is not. ") +
+          "The static shared bearer was removed — OAuth is required so every agent authenticates as its own gated client. " +
+          "Set remoteOauthEnabled=true in ~/.mailpouch.json and issue a service account for headless clients " +
+          "(`mailpouch agent issue ...`). Refusing to start without OAuth.",
           "MCPServer"
         );
+        process.exit(1);
+      }
+      const daemonPort = daemonPortOverride ? Number(daemonPortOverride) : undefined;
+      if (daemonPortOverride && (!Number.isInteger(daemonPort) || daemonPort! < 1 || daemonPort! > 65535)) {
+        logger.error(`Invalid --port '${daemonPortOverride}'.`, "MCPServer");
         process.exit(1);
       }
       const { startHttpTransport } = await import("./transports/http.js");
       const handle = await startHttpTransport({
         server,
-        host: remoteCn.remoteHost || "127.0.0.1",
-        port: remoteCn.remotePort ?? 8788,
-        path: remoteCn.remotePath || "/mcp",
-        bearerToken: effectiveBearer,
-        tlsCertPath: remoteCn.remoteTlsCertPath || undefined,
-        tlsKeyPath:  remoteCn.remoteTlsKeyPath  || undefined,
-        oauthEnabled: !!remoteCn.remoteOauthEnabled,
-        oauthAdminPassword: effectiveAdminPassword || undefined,
-        oauthIssuer: remoteCn.remoteOauthIssuer || undefined,
-        rateLimitPerSecond: remoteCn.remoteRateLimitPerSecond ?? undefined,
-        rateLimitBurst: remoteCn.remoteRateLimitBurst ?? undefined,
+        createServer: createSessionServer,
+        host: daemonHostOverride || remoteCn?.remoteHost || "127.0.0.1",
+        port: daemonPort ?? remoteCn?.remotePort ?? 8788,
+        path: remoteCn?.remotePath || "/mcp",
+        tlsCertPath: remoteCn?.remoteTlsCertPath || undefined,
+        tlsKeyPath:  remoteCn?.remoteTlsKeyPath  || undefined,
+        oauthEnabled: !!remoteCn?.remoteOauthEnabled,
+        oauthIssuer: remoteCn?.remoteOauthIssuer || undefined,
+        rateLimitPerSecond: remoteCn?.remoteRateLimitPerSecond ?? undefined,
+        rateLimitBurst: remoteCn?.remoteRateLimitBurst ?? undefined,
         agentGrants,
+        serviceAccounts,
       });
       logger.info(`mailpouch started on HTTP transport at ${handle.url}${handle.issuer ? ` (OAuth issuer ${handle.issuer})` : ""}`, "MCPServer");
       (globalThis as unknown as { __mailpouchHttpHandle?: { close(): Promise<void> } }).__mailpouchHttpHandle = handle;
@@ -2301,6 +2656,7 @@ async function gracefulShutdown(signal: string): Promise<void> {
 
   try {
     // 0. Destroy tray first so the icon vanishes immediately on click.
+    if (_trayHealthTimer) { clearInterval(_trayHealthTimer); _trayHealthTimer = null; }
     if (_trayInstance) {
       try { _trayInstance.destroy(); } catch { /* ignore */ }
       _trayInstance = null;

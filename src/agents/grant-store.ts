@@ -28,6 +28,8 @@ interface StoreFile {
 export interface CreatePendingArgs {
   clientId: string;
   clientName: string;
+  /** IP the agent registered from (for display on the approval card). */
+  registeredFromIp?: string;
 }
 
 export interface ApproveArgs {
@@ -166,11 +168,71 @@ export class AgentGrantStore {
         preset: "read_only", // placeholder — replaced on approve
         createdAt: new Date().toISOString(),
         totalCalls: 0,
+        ...(args.registeredFromIp ? { registeredFromIp: args.registeredFromIp } : {}),
       };
       this.grants.set(args.clientId, grant);
       this.persist();
       notifications.emitGrantChanged("grant-created", grant);
       return grant;
+    });
+  }
+
+  /**
+   * Ensure an *active* grant exists for a service account (client_credentials).
+   * Unlike the interactive flow (createPending → approve), a service account is
+   * pre-approved out-of-band at issuance, so its grant is born active. Called at
+   * startup for each persisted service account; idempotent — refreshes the
+   * preset/conditions/name on an existing grant and (re-)activates it, so an
+   * operator re-issuing or editing an account converges the grant.
+   */
+  ensureActiveServiceGrant(args: {
+    clientId: string;
+    clientName: string;
+    preset: PermissionPreset;
+    conditions?: GrantConditions;
+  }): AgentGrant {
+    return this.mutate(() => {
+      const now = new Date().toISOString();
+      const existing = this.grants.get(args.clientId);
+      const grant: AgentGrant = {
+        clientId: args.clientId,
+        clientName: args.clientName || "(service account)",
+        status: "active",
+        preset: args.preset,
+        conditions: args.conditions,
+        createdAt: existing?.createdAt ?? now,
+        approvedAt: existing?.approvedAt ?? now,
+        totalCalls: existing?.totalCalls ?? 0,
+        transport: "http",
+        note: "service account (client_credentials)",
+      };
+      this.grants.set(args.clientId, grant);
+      this.persist();
+      notifications.emitGrantChanged(existing ? "grant-approved" : "grant-created", grant);
+      return grant;
+    });
+  }
+
+  /**
+   * Record live connection info captured at the MCP `initialize` handshake onto
+   * an existing grant (display-only; does NOT change status or identity). No-op
+   * if the clientId has no grant — an unregistered caller is handled by the
+   * grant gate, not here.
+   */
+  recordConnection(
+    clientId: string,
+    info: { mcpClientName?: string; mcpClientVersion?: string; transport?: "http" | "stdio"; registeredFromIp?: string },
+  ): AgentGrant | null {
+    return this.mutate(() => {
+      const g = this.grants.get(clientId);
+      if (!g) return null;
+      if (info.mcpClientName) g.mcpClientName = info.mcpClientName;
+      if (info.mcpClientVersion) g.mcpClientVersion = info.mcpClientVersion;
+      if (info.transport) g.transport = info.transport;
+      if (info.registeredFromIp && !g.registeredFromIp) g.registeredFromIp = info.registeredFromIp;
+      g.lastConnectedAt = new Date().toISOString();
+      this.persist();
+      return g;
     });
   }
 
@@ -224,6 +286,28 @@ export class AgentGrantStore {
       this.persist();
       notifications.emitGrantChanged("grant-expired", g);
       return g;
+    });
+  }
+
+  /**
+   * Delete pending grants whose approval window (`maxAgeMs` since createdAt) has
+   * elapsed — the auth request expires if the user doesn't approve in time, so
+   * the agent must connect/auth again. Emits `grant-expired` for each (which
+   * revokes any issued token) and removes the record. Returns the count expired.
+   */
+  expireStalePending(maxAgeMs: number): number {
+    return this.mutate(() => {
+      const now = Date.now();
+      const stale = [...this.grants.values()].filter(
+        (g) => g.status === "pending" && now - Date.parse(g.createdAt) > maxAgeMs,
+      );
+      if (stale.length === 0) return 0;
+      for (const g of stale) this.grants.delete(g.clientId);
+      this.persist();
+      // Emit after the delete + persist so token revocation (the grant-expired
+      // subscriber) acts on the now-removed grant's clientId.
+      for (const g of stale) notifications.emitGrantChanged("grant-expired", g);
+      return stale.length;
     });
   }
 

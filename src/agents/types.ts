@@ -62,6 +62,24 @@ export interface AgentGrant {
   totalCalls: number;
   /** Optional note the user attached on approval. */
   note?: string;
+  /**
+   * IP the agent registered (DCR'd) from, captured at registration time and
+   * shown on the approval card so the user has context to approve/deny the
+   * connection. Optional — older stored grants won't have it.
+   */
+  registeredFromIp?: string;
+  /**
+   * Live connection info captured at the MCP `initialize` handshake (distinct
+   * from the DCR-supplied `clientName`): the MCP client's self-reported name +
+   * version, the transport it connected over, and when it last connected.
+   * Display-only context for the Agents tab — NOT identity (identity is the
+   * server-issued `clientId`). Optional; populated on connect.
+   */
+  mcpClientName?: string;
+  mcpClientVersion?: string;
+  transport?: "http" | "stdio";
+  /** ISO-8601 timestamp of the most recent MCP handshake (connect). */
+  lastConnectedAt?: string;
 }
 
 /** Result returned by the permission check when gating a tool call. */

@@ -49,6 +49,7 @@ import {
   buildPermissions,
   configExists,
 } from "../config/loader.js";
+import { checkConnections } from "./connection-check.js";
 import {
   ALL_TOOLS,
   PERMISSION_PRESETS,
@@ -66,7 +67,7 @@ import {
   type AuditEntry,
 } from "../permissions/escalation.js";
 import { getLogFilePath, logger } from "../utils/logger.js";
-import { getAgentGrantStore, getAgentAuditLog } from "../agents/registry.js";
+import { getAgentGrantStore, getAgentAuditLog, getServiceAccountStore } from "../agents/registry.js";
 import type { GrantConditions } from "../agents/types.js";
 import { notifications as agentNotifications } from "../agents/notifications.js";
 import {
@@ -119,6 +120,51 @@ function claudeDesktopConfigPath(): string | null {
     return nodePath.join(os.homedir(), "Library", "Application Support", "Claude", "claude_desktop_config.json");
   }
   return nodePath.join(os.homedir(), ".config", "Claude", "claude_desktop_config.json");
+}
+
+/** Claude Code stores its MCP servers in `~/.claude.json` (same on every
+ *  platform). */
+function claudeCodeConfigPath(): string {
+  return nodePath.join(os.homedir(), ".claude.json");
+}
+
+/**
+ * Build the `mcpServers.mailpouch` entry an MCP host should use for the given
+ * transport. http points at the daemon's /mcp endpoint; stdio spawns a local
+ * instance (MAILPOUCH_FORCE_STDIO).
+ *
+ * Daemon-aware: when `remoteMode` is on, a stdio entry would collide with the
+ * shared daemon's per-account singleton (the spawn exits → the host shows
+ * mailpouch as dead). So a stdio request is **coerced to http** — we never emit
+ * a config the user's host can't actually run.
+ */
+function buildClaudeCodeEntry(transport: "stdio" | "http"): { entry: Record<string, unknown>; transport: "stdio" | "http"; coercedToHttp?: boolean; warning?: string } {
+  const cn = (loadConfig() ?? defaultConfig()).connection;
+  const daemonMode = !!cn?.remoteMode;
+  const coercedToHttp = transport === "stdio" && daemonMode;
+  const effective = coercedToHttp ? "http" : transport;
+
+  if (effective === "http") {
+    const scheme = cn?.remoteTlsCertPath && cn?.remoteTlsKeyPath ? "https" : "http";
+    const host = cn?.remoteHost || "127.0.0.1";
+    const port = cn?.remotePort ?? 8788;
+    const mcpPath = cn?.remotePath || "/mcp";
+    const entry = { type: "http", url: `${scheme}://${host}:${port}${mcpPath}` };
+    const warning = coercedToHttp
+      ? "A shared mailpouch daemon is configured (remoteMode), so the app connects over HTTP — a per-computer (stdio) entry would conflict with the daemon and fail to start."
+      : (!cn?.remoteMode || !cn?.remoteOauthEnabled)
+      ? "HTTP transport needs the mailpouch daemon running with remoteMode + remoteOauthEnabled. Enable remote mode and start the daemon, then approve the agent in the Agents tab."
+      : undefined;
+    return { entry, transport: "http", ...(coercedToHttp ? { coercedToHttp } : {}), ...(warning ? { warning } : {}) };
+  }
+  const distIndexPath = nodePath.resolve(_moduleDir, "../index.js");
+  const entry = {
+    type: "stdio",
+    command: "node",
+    args: [distIndexPath],
+    env: { MAILPOUCH_FORCE_STDIO: "1" },
+  };
+  return { entry, transport: "stdio" };
 }
 
 function json(res: http.ServerResponse, status: number, body: unknown): void {
@@ -205,7 +251,7 @@ const _agentSetupPkgVersion = (() => {
   } catch { return "unknown"; }
 })();
 
-function buildAgentSetupJson(settingsPort = 8765) {
+function buildAgentSetupJson(settingsPort = 8766) {
   return {
     product: "mailpouch",
     version: _agentSetupPkgVersion,
@@ -245,20 +291,28 @@ function buildAgentSetupJson(settingsPort = 8765) {
         contentType: "application/json",
         framing: "Standard JSON-RPC 2.0 over HTTP. One request body = one JSON-RPC message. The server uses the StreamableHTTPServerTransport from the MCP SDK.",
         auth: {
-          modes: ["none (not allowed — operator must pick one of the below)", "static-bearer", "oauth-2.1"],
-          staticBearer: {
-            when: "Simplest — a pre-shared token in the mailpouch config's `remoteBearerToken` field. The client sends it on every request.",
-            header: "Authorization: Bearer <token>",
-          },
+          modes: [
+            "oauth-2.1 authorization_code — interactive agents (per-agent Approve/Deny)",
+            "oauth-2.1 client_credentials — headless agents (pre-approved service accounts)",
+          ],
+          summary: "Every HTTP client authenticates as its OWN OAuth client. There is no shared bearer token — a token always resolves to a specific, gated, revocable agent identity.",
           oauth21: {
-            when: "Required for multi-client / unattended agents. Full RFC 7591 DCR + RFC 8414/9728 metadata + PKCE S256 + RFC 8707 resource indicators.",
+            when: "Interactive agents: RFC 7591 DCR + RFC 8414/9728 metadata + PKCE S256 + RFC 8707 resource indicators. Consent is automatic; the only human gate is Approve/Deny in the Agents tab (no admin password).",
             flow: [
               "1. GET /.well-known/oauth-authorization-server → discover /register, /authorize, /token URLs.",
               "2. POST /register with your { redirect_uris, client_name } → get back { client_id }.",
-              "3. Redirect the operator (or open a browser) to /authorize?response_type=code&client_id=…&code_challenge=…&code_challenge_method=S256&resource=http://<host>:<port>/mcp&redirect_uri=…",
-              "4. Operator types the admin password into the consent page; consent redirects back with ?code=…",
-              "5. POST /token { grant_type=authorization_code, code, code_verifier, client_id, redirect_uri, resource=http://<host>:<port>/mcp } → access_token (24h TTL).",
+              "3. Open /authorize?response_type=code&client_id=…&code_challenge=…&code_challenge_method=S256&resource=http://<host>:<port>/mcp&redirect_uri=… → auth code is issued automatically (302 back to redirect_uri).",
+              "4. POST /token { grant_type=authorization_code, code, code_verifier, client_id, redirect_uri, resource=http://<host>:<port>/mcp } → access_token (24h TTL).",
+              "5. The operator Approves the agent in the Agents tab. Until then every tool call is denied (token is valid but inert).",
               "6. Send MCP requests with Authorization: Bearer <access_token>. The server validates the `resource` binding on every call.",
+            ],
+          },
+          clientCredentials: {
+            when: "Headless / unattended agents (cron, CI, scheduled) that cannot do interactive consent. The operator issues a service account out-of-band — `mailpouch agent issue --name <n> --preset <preset>` or the Agents tab — which prints a client_id + client_secret and pre-approves its grant.",
+            flow: [
+              "1. POST /token with Authorization: Basic base64(client_id:client_secret) and form body grant_type=client_credentials (or send client_id & client_secret as form fields).",
+              "2. → access_token (24h TTL). No PKCE, no interactive consent — the service account was approved at issuance.",
+              "3. Send MCP requests with Authorization: Bearer <access_token>. The grant's preset/conditions gate every call exactly like an interactively-approved agent.",
             ],
           },
         },
@@ -273,9 +327,14 @@ function buildAgentSetupJson(settingsPort = 8765) {
         },
       },
       claudeCode: {
-        path: "Project-level: .mcp.json in the repo root, or ~/.claude.json for user-scoped.",
+        path: "Project-level: .mcp.json in the repo root, or ~/.claude.json for user-scoped. The Settings UI / wizard can write this for you (Connect a client → Write to Claude Code).",
         snippet: {
-          mcpServers: { mailpouch: { command: "mailpouch" } },
+          // stdio: forces stdio even when the server config has remoteMode:true.
+          mcpServers: { mailpouch: { type: "stdio", command: "mailpouch", env: { MAILPOUCH_FORCE_STDIO: "1" } } },
+        },
+        snippetHttp: {
+          // http: connect to the shared daemon (needs remoteMode + remoteOauthEnabled + a running daemon; Claude Code handles OAuth, then Approve in the Agents tab).
+          mcpServers: { mailpouch: { type: "http", url: "http://127.0.0.1:8788/mcp" } },
         },
       },
       cline: {
@@ -340,7 +399,7 @@ function buildAgentSetupJson(settingsPort = 8765) {
   };
 }
 
-function buildAgentSetupHtml(settingsPort = 8765): string {
+function buildAgentSetupHtml(settingsPort = 8766): string {
   const data = buildAgentSetupJson(settingsPort);
   const jsonPretty = JSON.stringify(data, null, 2);
   const clients = data.clientConfig;
@@ -411,14 +470,18 @@ ${data.quickstart.map(s => `  <li>${escapeHtml(s)}</li>`).join("\n")}
 <p><strong>Endpoint:</strong> <code>${escapeHtml(data.transports.http.endpoint)}</code></p>
 <p><strong>Content-Type:</strong> <code>${escapeHtml(data.transports.http.contentType)}</code> · <strong>Framing:</strong> ${escapeHtml(data.transports.http.framing)}</p>
 
-<h3>Auth: static bearer</h3>
-<p>${escapeHtml(data.transports.http.auth.staticBearer.when)}</p>
-<p><strong>Header:</strong> <code>${escapeHtml(data.transports.http.auth.staticBearer.header)}</code></p>
+<p class="note">${escapeHtml(data.transports.http.auth.summary)}</p>
 
-<h3>Auth: OAuth 2.1</h3>
+<h3>Auth: OAuth 2.1 — authorization_code (interactive agents)</h3>
 <p>${escapeHtml(data.transports.http.auth.oauth21.when)}</p>
 <ol>
 ${data.transports.http.auth.oauth21.flow.map(s => `  <li>${escapeHtml(s)}</li>`).join("\n")}
+</ol>
+
+<h3>Auth: OAuth 2.1 — client_credentials (headless / service accounts)</h3>
+<p>${escapeHtml(data.transports.http.auth.clientCredentials.when)}</p>
+<ol>
+${data.transports.http.auth.clientCredentials.flow.map(s => `  <li>${escapeHtml(s)}</li>`).join("\n")}
 </ol>
 <p><strong>Rate limits:</strong> ${escapeHtml(data.transports.http.rateLimits)}</p>
 
@@ -832,6 +895,9 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
         if (typeof body.desktopNotificationsEnabled === "boolean") {
           current.desktopNotificationsEnabled = body.desktopNotificationsEnabled;
         }
+        if (typeof body.autoOpenApprovalWindow === "boolean") {
+          current.autoOpenApprovalWindow = body.autoOpenApprovalWindow;
+        }
         if (body.tosAcknowledged && typeof body.tosAcknowledged === "object") {
           const t = body.tosAcknowledged as Record<string, unknown>;
           if (typeof t.accepted === "boolean" && typeof t.timestamp === "string") {
@@ -906,7 +972,16 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
         try {
           const mgr = getAccountManager();
           if (mgr && (postedPassword || postedSmtpToken)) {
+            // SMTP is refreshed synchronously here (transporter rebuilt).
             mgr.applyKeychainCredentials(postedPassword, postedSmtpToken);
+            // IMAP: flush the stale clients and reconnect with the new password
+            // so it takes effect WITHOUT a restart. Fire-and-forget — the
+            // reconnect can take seconds (or back off if Bridge is throttling),
+            // and we don't want to stall the save response on it; the UI's
+            // "Check Now" surfaces the result.
+            if (postedPassword) {
+              void mgr.reloadImapCredentials(postedPassword);
+            }
           }
         } catch (e: unknown) {
           // Non-fatal — save already succeeded; a restart will pick creds up.
@@ -956,7 +1031,7 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
         // This prevents SSRF probing of cloud-metadata endpoints (169.254.169.254),
         // internal services, or arbitrary internet hosts.
         const ALLOWED_HOST_RE =
-          /^(?:localhost|127\.0\.0\.1|::1|(?:192\.168|10)\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})$/;
+          /^(?:localhost|127\.0\.0\.1|::1|192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})$/;
         if (typeof smtpHost !== "string" || !ALLOWED_HOST_RE.test(smtpHost)) {
           json(res, 400, { error: "smtpHost must be localhost or a private LAN address." }); return;
         }
@@ -964,11 +1039,18 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
           json(res, 400, { error: "imapHost must be localhost or a private LAN address." }); return;
         }
 
-        const [smtp, imap] = await Promise.all([
-          tcpCheck(smtpHost, smtpPort),
-          tcpCheck(imapHost, imapPort),
-        ]);
-        json(res, 200, { smtp, imap });
+        // Real check: TCP reachability AND a STARTTLS+AUTH probe with the saved
+        // credentials, so a port that's open but failing auth (e.g. a 454
+        // throttle / wrong Bridge password) is NOT reported as a green
+        // "reachable". `smtp`/`imap` stay as the reachability booleans for
+        // backward compatibility; `smtpAuth`/`imapAuth` carry the auth verdict.
+        const checked = await checkConnections({ smtpHost, smtpPort, imapHost, imapPort });
+        json(res, 200, {
+          smtp: checked.smtp.reachable,
+          imap: checked.imap.reachable,
+          smtpAuth: { authenticated: checked.smtp.authenticated, error: checked.smtp.error },
+          imapAuth: { authenticated: checked.imap.authenticated, error: checked.imap.error },
+        });
         return;
       }
 
@@ -1475,7 +1557,12 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
           const list = statusFilter
             ? grants.list({ status: statusFilter })
             : grants.list();
-          json(res, 200, { grants: list });
+          // Tag grants backed by a service account so the UI routes revoke to
+          // the service-account endpoint (which also deletes the credential —
+          // a grant-only revoke would be re-activated on the next restart).
+          const sa = getServiceAccountStore();
+          const tagged = list.map(g => ({ ...g, isServiceAccount: !!sa?.get(g.clientId) }));
+          json(res, 200, { grants: tagged });
           return;
         }
 
@@ -1483,6 +1570,101 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
         if (method === "GET" && path === "/api/agents/audit") {
           const limit = Math.min(Math.max(1, parseInt(url.searchParams.get("limit") ?? "200", 10)), 1000);
           json(res, 200, { rows: audit.readTail(limit) });
+          return;
+        }
+
+        // GET /api/agents/service-account — list service accounts (no secrets).
+        if (method === "GET" && path === "/api/agents/service-account") {
+          const sa = getServiceAccountStore();
+          if (!sa) { json(res, 503, { error: "Service accounts not initialized." }); return; }
+          json(res, 200, {
+            accounts: sa.list().map(a => ({
+              clientId: a.clientId,
+              clientName: a.clientName,
+              preset: a.preset,
+              conditions: a.conditions,
+              createdAt: a.createdAt,
+              status: grants.get(a.clientId)?.status ?? "active",
+            })),
+          });
+          return;
+        }
+
+        // POST /api/agents/service-account — issue a service account
+        // (client_credentials). Returns the plaintext secret ONCE. The matching
+        // grant is born active (pre-approved), like `mailpouch agent issue`.
+        if (method === "POST" && path === "/api/agents/service-account") {
+          const sa = getServiceAccountStore();
+          if (!sa) { json(res, 503, { error: "Service accounts not initialized." }); return; }
+          // Issuing a credential widens privilege — share the escalation limiter.
+          if (!escalationLimiter.check(`${ip}:service-account-issue`)) {
+            json(res, 429, { error: "Too many service-account changes." }); return;
+          }
+          if (!requireCsrf(req, res)) return;
+          let body: Record<string, unknown>;
+          try { body = JSON.parse(await readBodySafe(req)) as Record<string, unknown>; }
+          catch { json(res, 400, { error: "Request body must be valid JSON." }); return; }
+
+          const name = typeof body.name === "string" ? body.name.trim() : "";
+          if (!name) { json(res, 400, { error: "name is required." }); return; }
+          const presets = new Set(["full", "read_only", "supervised", "send_only", "custom"]);
+          const preset = String(body.preset ?? "read_only");
+          if (!presets.has(preset)) {
+            json(res, 400, { error: `Invalid preset '${preset}'. Must be one of: ${[...presets].join(", ")}.` });
+            return;
+          }
+          // Reuse the same conditions whitelist shape the approve route applies.
+          let conditions: GrantConditions | undefined;
+          if (body.conditions && typeof body.conditions === "object" && !Array.isArray(body.conditions)) {
+            const c = body.conditions as Record<string, unknown>;
+            const out: GrantConditions = {};
+            if (typeof c.expiresAt === "string") out.expiresAt = c.expiresAt;
+            if (typeof c.accountId === "string") out.accountId = c.accountId;
+            if (Array.isArray(c.folderAllowlist)) {
+              out.folderAllowlist = c.folderAllowlist.filter((x): x is string => typeof x === "string");
+            }
+            if (Array.isArray(c.ipPins)) {
+              out.ipPins = c.ipPins.filter((x): x is string => typeof x === "string");
+            }
+            if (Object.keys(out).length > 0) conditions = out;
+          }
+
+          const { account, clientSecret } = sa.issue({
+            name,
+            preset: preset as "full" | "read_only" | "supervised" | "send_only" | "custom",
+            conditions,
+          });
+          grants.ensureActiveServiceGrant({
+            clientId: account.clientId,
+            clientName: account.clientName,
+            preset: account.preset,
+            conditions: account.conditions,
+          });
+          // clientSecret is returned ONCE here and never persisted in plaintext.
+          json(res, 201, {
+            clientId: account.clientId,
+            clientSecret,
+            clientName: account.clientName,
+            preset: account.preset,
+          });
+          return;
+        }
+
+        // POST /api/agents/service-account/:id/revoke — remove the account +
+        // revoke its grant (immediate in-process token invalidation).
+        const saRevokeMatch = /^\/api\/agents\/service-account\/([A-Za-z0-9_]+)\/revoke$/.exec(path);
+        if (method === "POST" && saRevokeMatch) {
+          const sa = getServiceAccountStore();
+          if (!sa) { json(res, 503, { error: "Service accounts not initialized." }); return; }
+          if (!escalationLimiter.check(`${ip}:service-account-revoke`)) {
+            json(res, 429, { error: "Too many service-account changes." }); return;
+          }
+          if (!requireCsrf(req, res)) return;
+          const clientId = saRevokeMatch[1];
+          const existed = sa.revoke(clientId);
+          const grant = grants.revoke(clientId);
+          if (!existed && !grant) { json(res, 404, { error: "No service account for that clientId." }); return; }
+          json(res, 200, { revoked: clientId });
           return;
         }
 
@@ -1580,9 +1762,14 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
           }
           if (!requireCsrf(req, res)) return;
           const clientId = revokeMatch[1];
+          // If this grant is backed by a service account, also delete the
+          // credential — otherwise revoke isn't durable (startup re-activates
+          // the grant from the credential, and a client_credentials login would
+          // re-activate it live). Presence of the credential = enabled.
+          const saDeleted = getServiceAccountStore()?.revoke(clientId) ?? false;
           const grant = grants.revoke(clientId);
-          if (!grant) { json(res, 404, { error: "No grant record for that clientId." }); return; }
-          json(res, 200, { grant });
+          if (!grant && !saDeleted) { json(res, 404, { error: "No grant record for that clientId." }); return; }
+          json(res, 200, { grant, serviceAccountRemoved: saDeleted });
           return;
         }
 
@@ -1776,23 +1963,91 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
             }
           }
 
-          const distIndexPath = nodePath.resolve(_moduleDir, "../index.js");
-          const entry = {
-            command: "node",
-            args: [distIndexPath],
-          };
+          // Daemon-aware: when remoteMode is on, this writes the HTTP entry (a
+          // stdio entry would collide with the shared daemon's singleton and
+          // fail to start); otherwise a stdio entry with MAILPOUCH_FORCE_STDIO.
+          const built = buildClaudeCodeEntry("stdio");
 
           if (!existing.mcpServers || typeof existing.mcpServers !== "object") {
             existing.mcpServers = {};
           }
-          (existing.mcpServers as Record<string, unknown>)["mailpouch"] = entry;
+          (existing.mcpServers as Record<string, unknown>)["mailpouch"] = built.entry;
 
           // Write atomically via temp file + rename
           const tmpPath = claudeConfigPath + ".tmp." + randomBytes(6).toString("hex");
           writeFileSync(tmpPath, JSON.stringify(existing, null, 2), "utf8");
           renameSync(tmpPath, claudeConfigPath);
 
-          json(res, 200, { ok: true, configPath: claudeConfigPath, entry });
+          json(res, 200, { ok: true, configPath: claudeConfigPath, transport: built.transport, entry: built.entry, ...(built.coercedToHttp ? { coercedToHttp: true } : {}), ...(built.warning ? { warning: built.warning } : {}) });
+        } catch (e: unknown) {
+          json(res, 200, { ok: false, error: e instanceof Error ? e.message : String(e) });
+        }
+        return;
+      }
+
+      // ── GET /api/claude-code-status ───────────────────────────────────────
+      if (method === "GET" && path === "/api/claude-code-status") {
+        const ccPath = claudeCodeConfigPath();
+        json(res, 200, { found: existsSync(ccPath), configPath: ccPath });
+        return;
+      }
+
+      // ── POST /api/write-claude-code ───────────────────────────────────────
+      // Merge a mailpouch entry into Claude Code's ~/.claude.json mcpServers,
+      // for the requested transport (stdio | http). Mirrors write-claude-desktop.
+      if (method === "POST" && path === "/api/write-claude-code") {
+        if (!requireCsrf(req, res)) return;
+        if (lan && accessToken && !hasValidAccessToken(req, url, accessToken)) {
+          json(res, 401, { error: "Access denied." }); return;
+        }
+        try {
+          let body: Record<string, unknown> = {};
+          try { body = JSON.parse(await readBodySafe(req)) as Record<string, unknown>; } catch { /* default stdio */ }
+          const transport = body.transport === "http" ? "http" : "stdio";
+
+          const claudeConfigPath = claudeCodeConfigPath();
+          let existing: Record<string, unknown> = {};
+          let raw: string | null = null;
+          try {
+            raw = readFileSync(claudeConfigPath, "utf8");
+          } catch (readErr: unknown) {
+            if ((readErr as NodeJS.ErrnoException).code !== "ENOENT") {
+              json(res, 200, {
+                ok: false,
+                error: "Existing ~/.claude.json could not be read; not overwriting. Resolve the file permissions and retry.",
+              });
+              return;
+            }
+          }
+          if (raw !== null) {
+            try {
+              const parsed = JSON.parse(raw) as unknown;
+              if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+                throw new Error("not a JSON object");
+              }
+              existing = parsed as Record<string, unknown>;
+            } catch {
+              json(res, 200, {
+                ok: false,
+                error: "Existing ~/.claude.json could not be parsed as JSON; not overwriting. Back up and fix the file, then retry.",
+              });
+              return;
+            }
+          }
+
+          const built = buildClaudeCodeEntry(transport);
+          if (!existing.mcpServers || typeof existing.mcpServers !== "object" || Array.isArray(existing.mcpServers)) {
+            existing.mcpServers = {};
+          }
+          (existing.mcpServers as Record<string, unknown>)["mailpouch"] = built.entry;
+
+          // Atomic write via temp file + rename. ~/.claude.json holds no secrets
+          // beyond MCP config, but match the project's 0600 hygiene anyway.
+          const tmpPath = claudeConfigPath + ".tmp." + randomBytes(6).toString("hex");
+          writeFileSync(tmpPath, JSON.stringify(existing, null, 2), { encoding: "utf8", mode: 0o600 });
+          renameSync(tmpPath, claudeConfigPath);
+
+          json(res, 200, { ok: true, configPath: claudeConfigPath, transport: built.transport, entry: built.entry, ...(built.coercedToHttp ? { coercedToHttp: true } : {}), ...(built.warning ? { warning: built.warning } : {}) });
         } catch (e: unknown) {
           json(res, 200, { ok: false, error: e instanceof Error ? e.message : String(e) });
         }
@@ -1949,11 +2204,11 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
  *             • Falls back to plain HTTP + token if openssl is absent.
  *             Use only on trusted local networks.
  *
- * @param port  TCP port to listen on (default 8765)
+ * @param port  TCP port to listen on (default 8766)
  * @param lan   Enable LAN mode (bind 0.0.0.0 + token + optional TLS)
  */
 export async function startSettingsServer(
-  port  = 8765,
+  port  = 8766,
   lan   = false,
   quiet = false,
   opts: { onRestartRequested?: () => void; onShutdownRequested?: () => void } = {},

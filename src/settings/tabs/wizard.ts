@@ -390,10 +390,18 @@ export function buildWizardHtml(p: WizardParams): string {
           <div class="done-step-row">
             <div class="done-step-num">1</div>
             <div class="done-step-body">
-              <div class="done-step-title">Add to your MCP host</div>
-              <div class="done-step-desc">Copy this snippet into your MCP host's config under <code>mcpServers</code>.</div>
+              <div class="done-step-title">Connect your app</div>
+              <div class="done-step-desc">Choose how the app should connect, then set it up below (or copy the text into your app's settings).</div>
+              <div style="margin:8px 0">
+                <label style="display:block;margin-bottom:6px"><input type="radio" name="wiz-cc-transport" value="stdio" checked data-change="wizSetTransport"> <strong>Just this computer</strong> <span style="color:var(--muted)">(recommended — simplest)</span></label>
+                <label style="display:block"><input type="radio" name="wiz-cc-transport" value="http" data-change="wizSetTransport"> <strong>Share one connection</strong> <span style="color:var(--muted)">(for several apps or devices; needs remote access on)</span></label>
+              </div>
               <pre class="code-block" id="done-snippet" style="margin-top:10px;font-size:12px">Loading…</pre>
-              <button class="btn btn-ghost btn-sm" style="margin-top:6px" data-action="wizCopySnippet" aria-label="Copy MCP config snippet">Copy</button>
+              <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px">
+                <button class="btn btn-primary btn-sm" data-action="wizWriteClaudeCode" aria-label="Set up Claude Code">Set up Claude Code</button>
+                <button class="btn btn-ghost btn-sm" data-action="wizCopySnippet" aria-label="Copy setup text">Copy</button>
+              </div>
+              <div id="wiz-cc-result" style="display:none"></div>
               <div id="copy-result" style="display:none"></div>
             </div>
           </div>

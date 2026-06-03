@@ -147,7 +147,7 @@ export const handlers: Record<string, EscalationHandler> = {
     if (!result.ok) {
       return { content: [{ type: "text" as const, text: result.error }], isError: true };
     }
-    const settingsUrl = `http://localhost:${config.settingsPort ?? 8765}`;
+    const settingsUrl = `http://localhost:${config.settingsPort ?? 8766}`;
     const newToolList = result.newTools.length > 0
       ? `\n\nNew tools that would be granted:\n${result.newTools.map(t => `  • ${t}`).join("\n")}`
       : "";

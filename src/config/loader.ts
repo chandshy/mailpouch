@@ -288,13 +288,13 @@ export function loadConfig(): ServerConfig | null {
     // Preserve settingsPort when it's a sane port number — without this, the
     // field round-trips to disk via saveConfig but is stripped on the way
     // back out, so GET /api/config returns no settingsPort → the UI defaults
-    // the field to 8765 → the port-mismatch warning banner fires on every
+    // the field to 8766 → the port-mismatch warning banner fires on every
     // reload even though the user already saved the correct value.
     //
     // Validation mirrors the POST /api/config merge path
     // (settings/server.ts): Math.round + range check [1, 65535]. Keeping
-    // the two paths symmetric means a hand-edited `8765.5` on disk is
-    // accepted with the same semantics a browser-sent 8765.5 would be,
+    // the two paths symmetric means a hand-edited `8766.5` on disk is
+    // accepted with the same semantics a browser-sent 8766.5 would be,
     // rather than being silently dropped here and accepted on the next save.
     const parsedSettingsPort = parsed.settingsPort;
     let preservedSettingsPort: number | undefined = undefined;
@@ -348,6 +348,15 @@ export function loadConfig(): ServerConfig | null {
       activeAccountId: typeof parsed.activeAccountId === "string" ? parsed.activeAccountId : undefined,
       desktopNotificationsEnabled: typeof parsed.desktopNotificationsEnabled === "boolean"
         ? parsed.desktopNotificationsEnabled
+        : undefined,
+      autoOpenApprovalWindow: typeof parsed.autoOpenApprovalWindow === "boolean"
+        ? parsed.autoOpenApprovalWindow
+        : undefined,
+      nativeApprovalDialog: typeof parsed.nativeApprovalDialog === "boolean"
+        ? parsed.nativeApprovalDialog
+        : undefined,
+      gateLocalAgents: typeof parsed.gateLocalAgents === "boolean"
+        ? parsed.gateLocalAgents
         : undefined,
       webhooks: Array.isArray(parsed.webhooks) ? parsed.webhooks : undefined,
     };

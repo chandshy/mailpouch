@@ -209,6 +209,69 @@ export function makeIconPng(size = CANVAS): Buffer {
   return rgbaToPng(rgba, size, size);
 }
 
+// ── Warning icon (red ⚠ triangle) — shown blinking while the mail connection
+//    is failing (e.g. IMAP login failure). Transparent background so it reads
+//    as an alert state distinct from the normal branded envelope. ───────────
+const WARNING_RED = { r: 0xE5, g: 0x48, b: 0x4D } as const; // matches --danger
+
+/** Render a red warning triangle with a white exclamation mark as RGBA. */
+export function renderWarningRgba(size = CANVAS): Buffer {
+  const W = size, H = size;
+  const rgba = Buffer.alloc(W * H * 4);
+  const m = size * 0.07;                  // margin from the canvas edge
+  const ax = W / 2, ay = m;               // apex (top center)
+  const bx = m, by = H - m;               // bottom-left
+  const cx = W - m, cy = H - m;           // bottom-right
+  // Exclamation mark geometry (centered, lower half of the triangle).
+  const barX0 = W * 0.455, barX1 = W * 0.545, barY0 = H * 0.40, barY1 = H * 0.62;
+  const dotY0 = H * 0.69, dotY1 = H * 0.79;
+  const ss = 3;                           // 3×3 supersample for clean edges
+  const edge = (px: number, py: number, x0: number, y0: number, x1: number, y1: number): number =>
+    (px - x1) * (y0 - y1) - (x0 - x1) * (py - y1);
+
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      let hits = 0, exHits = 0;
+      for (let sy = 0; sy < ss; sy++) {
+        for (let sx = 0; sx < ss; sx++) {
+          const px = x + (sx + 0.5) / ss, py = y + (sy + 0.5) / ss;
+          const d1 = edge(px, py, ax, ay, bx, by);
+          const d2 = edge(px, py, bx, by, cx, cy);
+          const d3 = edge(px, py, cx, cy, ax, ay);
+          const inside = (d1 >= 0 && d2 >= 0 && d3 >= 0) || (d1 <= 0 && d2 <= 0 && d3 <= 0);
+          if (!inside) continue;
+          hits++;
+          const inBar = px >= barX0 && px <= barX1 && py >= barY0 && py <= barY1;
+          const inDot = px >= barX0 && px <= barX1 && py >= dotY0 && py <= dotY1;
+          if (inBar || inDot) exHits++;
+        }
+      }
+      const i = (y * W + x) * 4;
+      const cov = hits / (ss * ss);
+      if (cov <= 0) { rgba[i + 3] = 0; continue; }
+      const ex = exHits / (ss * ss);       // white exclamation coverage
+      rgba[i]     = Math.round(WARNING_RED.r + (255 - WARNING_RED.r) * ex);
+      rgba[i + 1] = Math.round(WARNING_RED.g + (255 - WARNING_RED.g) * ex);
+      rgba[i + 2] = Math.round(WARNING_RED.b + (255 - WARNING_RED.b) * ex);
+      rgba[i + 3] = Math.round(255 * cov);
+    }
+  }
+  return rgba;
+}
+
+/** Build a PNG of the red warning triangle at the requested size. */
+export function makeWarningIconPng(size = CANVAS): Buffer {
+  return rgbaToPng(renderWarningRgba(size), size, size);
+}
+
+/** Platform-appropriate warning-icon bytes (ICO on Windows, PNG elsewhere). */
+export function makeWarningTrayIconBytes(platform: NodeJS.Platform = process.platform): Buffer {
+  if (platform === "win32") {
+    return pngsToIco([16, 32, 48, 64].map((size) => ({ size, data: makeWarningIconPng(size) })));
+  }
+  return makeWarningIconPng(64);
+}
+
 /**
  * Wrap one or more PNGs into a multi-resolution ICO. Windows picks the
  * closest sub-size to the current DPI scale, so shipping 16/32/48/64 in

@@ -47,6 +47,32 @@ If `MAILPOUCH_E2E_BRIDGE_CONFIG` is unset or the file doesn't exist, every
 Bridge-only `it.skip` stays skipped — the suite still runs against Greenmail
 without errors.
 
+> ⚠️ **`test:e2e:bridge` is DESTRUCTIVE — never point it at a real account.**
+> Its per-test reset (`ImapFixtures.wipe()`) empties INBOX/Sent/Archive/Trash/
+> Spam/Drafts and deletes every other folder. Use a **dedicated throwaway**
+> Proton account, or use the safe gate below. `wipe()` now refuses to run
+> unless `MAILPOUCH_E2E_ALLOW_WIPE=1` explicitly confirms a disposable target.
+
+### Safe Bridge gate (non-destructive)
+
+`test:e2e:bridge:safe` runs the Bridge-unique validations — the All-Mail
+bulk-move "false-success" (Bug A) audit plus move/copy/label/flag/folder/search
+— **creating its own emails/folders and deleting only those.** Everything lives
+under a unique `mpE2E-<runid>` scratch namespace; a guard (`support/scratch.ts`,
+`assertScratch`) makes it provably impossible to create, write, or delete
+anything outside it, so it is safe against a **real** account.
+
+```bash
+export MAILPOUCH_E2E_BRIDGE_CONFIG=~/.mailpouch.bridge-test.json   # your Bridge config
+npm run test:e2e:bridge:safe
+```
+
+It never wipes, never touches INBOX/system folders, and removes its scratch
+folders on teardown. The only pre-existing folder it reads is "All Mail" (as a
+move source, acting solely on one self-seeded message). Coverage proven on
+Greenmail in the normal `test:e2e:local` run; the guard contract is unit-tested
+in `test/scratch-guard.test.ts`.
+
 ```bash
 # Clean up any orphan E2E folders/labels left behind by a crashed run.
 npm run test:e2e:bridge:cleanup

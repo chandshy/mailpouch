@@ -5,6 +5,120 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.72] — 2026-05-31
+
+### Changed — deletion moves to Trash; mail is never permanently deleted (BREAKING)
+
+- **`delete_email` / `bulk_delete_emails` / `bulk_delete` now MOVE mail to Trash instead of issuing `\Deleted` + EXPUNGE.** Deleted mail stays recoverable from Trash (Proton purges Trash on its own schedule); mailpouch no longer directly/permanently deletes a message. An email already in Trash is left in place (the delete is a no-op success). The move uses the verified-landing path (UIDPLUS `COPYUID` / Message-ID fallback), so a no-op from a union mailbox (e.g. All Mail) is reported as a failure rather than a silent success — pass the message's real `sourceFolder`.
+- **Unchanged:** `remove_label` / `bulk_remove_label` still detach a label by removing the message from its `Labels/<name>` folder (the message survives in All Mail / its other folders) — that is label removal, not deletion. The destructive-confirm gate (`{ confirmed: true }`) on the delete tools is retained.
+
+### Changed — global agent auth: every agent authenticates (BREAKING)
+
+- **The shared static bearer token was removed.** It authenticated as a single shared identity (`bearer:static`) that **bypassed the per-agent grant store and the audit log entirely** — if it leaked, every tool ran with zero per-agent attribution. Remote mode is now **OAuth-only**: every caller authenticates as its own client and is independently gated, audited, and revocable. A configured `remoteBearerToken` is ignored with a startup warning; `remoteMode` now **refuses to start** unless `remoteOauthEnabled` is set.
+- **New: OAuth 2.0 `client_credentials` grant for headless agents.** Interactive agents keep `authorization_code` + PKCE (gated by per-agent Approve/Deny). Non-interactive agents (cron, CI, scheduled) — which can't do interactive consent — now log in with their own `client_id` + `client_secret` (HTTP Basic or form body) and are pre-approved at issuance. The RFC 8414 metadata advertises both grant types and the `client_secret_basic`/`client_secret_post` auth methods.
+- **New: service accounts** — the credential behind `client_credentials`. Provisioned out-of-band, persisted to `~/.mailpouch-service-accounts.json` (mode 0600) with only a salted SHA-256 of the secret (plaintext shown once, never stored). Each is mirrored by an *active* grant so it flows through `GrantManager` exactly like an approved agent.
+  - **CLI:** `mailpouch agent issue --name <n> --preset <preset> [--expires <iso>] [--folder a,b]`, `mailpouch agent list`, `mailpouch agent revoke <client_id>`.
+  - **Settings UI:** a "+ Service account" control in the Agents tab issues a credential with a one-time secret reveal; service-account rows revoke via the credential-deleting endpoint.
+- **Migration:** any client that used `remoteBearerToken` must be re-provisioned as a service account (`mailpouch agent issue …`) and switched to the `client_credentials` login. Remove `remoteBearerToken` from your config and set `remoteOauthEnabled: true`.
+
+### Fixed — cross-platform (macOS / Windows / Linux) correctness audit
+
+- **Windows browser launch was broken:** `openBrowser` spawned `cmd /c start … ` with `shell:false`, so Windows looked for a non-existent `start.exe` and silently failed (the ENOENT was swallowed). `start` is a `cmd.exe` built-in — now spawned with `shell:true`. This is the path used by the agent-approval auto-open window and the tray "Open Settings", so it was a real Windows regression.
+- **Proton Pass CLI resolution on Windows:** `resolveCliPath` used `which` (which doesn't exist on Windows) → now uses `where` on win32 (first match), with **Windows-aware trusted PATH prefixes** (Program Files / per-user Programs / global npm) instead of POSIX `/usr/bin`; and the spawned `pass-cli` env now sets `HOME` **and** `USERPROFILE` to the home dir (`HOME` is unset on Windows) so it finds its config regardless of OS.
+- **`npm run clean` is now cross-platform** — replaced `rm -rf` (fails under Windows `cmd`) with a Node `fs.rmSync` one-liner.
+- Audit confirmed already-correct: per-platform notification + dialog escaping (osascript / notify-send / zenity-kdialog / PowerShell, all argv-passed or properly quoted), tray display detection (Linux `DISPLAY` only; macOS/Windows always have a tray), PNG-vs-ICO icon dispatch, `os.homedir()` + `path.join` paths, graceful `0o600` no-op on Windows, and CI coverage across ubuntu/macOS/windows × Node 20/22 with native tray prebuilts for 5 triples + clean systray2 fallback (incl. Intel-Mac darwin-x64 and musl Linux).
+
+### Added — native on-screen Approve/Deny dialog when an agent connects
+
+- A new agent now pops a **native dialog on the machine where mailpouch runs** — Approve/Deny right there, no need to open the Agents tab. `DesktopPrompt` (`src/notifications/desktop-prompt.ts`) shells out per-platform: **zenity → kdialog** (Linux), **osascript `display dialog`** (macOS), **PowerShell MessageBox** (Windows); the choice is read from the process exit code. **Approve** grants the operator's global preset (intersected as usual); **Deny** revokes it.
+- Falls back to the browser approval window when no dialog tool is present (headless) or the prompt times out (5-minute cap, matching the pending TTL) — and the pending grant still expires on its own. The redundant desktop-notification toast is suppressed when the dialog is handling the registration. Controlled by `nativeApprovalDialog` (default true). `desktop-prompt.test.ts` covers the exit-code mapping + the zenity→kdialog fallback.
+
+### Changed — local (stdio) agents must now register + be approved too (BREAKING)
+
+- **Every agent — local and remote — now goes through the same approval gate.** Previously a local stdio client (e.g. Claude Desktop) bypassed the per-agent grant entirely. Now mailpouch captures the local client's identity at the MCP handshake (`server.oninitialized` on the stdio server), registers a **pending** agent (which fires the existing approval notice — auto-open window + desktop notification + tray badge), and **blocks its tool calls until you Approve** it in the Agents tab — exactly like remote OAuth agents.
+- Local agents are identified by their **self-reported MCP client name** (`localAgentId` → `stdio:<sha256(name)>`); approve once and the same client is **remembered across relaunches**. This is a local-trust convenience, not a cryptographic identity (the name is self-reported). Local agents show a **🖥 local** marker on their Agents-tab card (transport `stdio`, no IP).
+- **Escape hatch:** set `gateLocalAgents: false` in `~/.mailpouch.json` (or `MAILPOUCH_TRUST_LOCAL=1`) to restore the legacy behavior where the local stdio client is auto-trusted. Default is **on** (gate local agents).
+- Escalation meta-tools now attribute local callers correctly. New `caller-context.test.ts` coverage for `localAgentId`. Unit suite 1996 green.
+
+### Changed — OAuth is now fully automatic; Approve/Deny is the only human gate (BREAKING for OAuth deployments)
+
+- The OAuth `/authorize` **admin-password consent has been removed entirely.** Agents now authenticate **fully automatically** (DCR → PKCE-S256 → token, no human-typed password): a valid `GET /oauth/authorize` immediately issues a code and 302-redirects. The **only** human interaction is the per-agent **Approve `<agent>`? / Deny** in the Agents tab (auto-surfaced approval window). The issued token is **inert until the grant is approved**, so this moves the human gate rather than removing it. The security envelope is unchanged otherwise: PKCE binds the code to the agent's verifier, `redirect_uri` is allowlisted, and endpoints are rate-limited.
+- **`remoteOauthAdminPassword` is deprecated and ignored** (a startup warning is logged if set). `remoteOauthEnabled: true` alone now enables OAuth in automatic-consent mode — no admin password to configure. The consent HTML page, the password `POST /oauth/authorize`, and the consent CSRF machinery were removed.
+- **Pending approvals expire after 5 minutes.** If you don't Approve/Deny within 5 minutes, the request is deleted (any issued token revoked) and the agent must connect/auth again. Swept every 30s (`AgentGrantStore.expireStalePending`).
+- `http.test.ts` OAuth suite rewritten to the auto-consent flow (GET → 302 with code → PKCE token exchange); password/CSRF/consent-page tests removed.
+
+### Added — agents' MCP handshake connection info captured + shown in the Agents tab
+
+- On the MCP `initialize` handshake, mailpouch now records the connecting agent's **self-reported MCP client name + version**, the **transport**, and a **last-connected** timestamp onto its grant, and shows them on the Agents-tab card (distinct from the DCR-supplied client name). Captured in the per-session `createSessionServer().oninitialized` hook via `server.getClientVersion()` + `currentCaller()`, persisted by a new no-mutation `AgentGrantStore.recordConnection()`. Display-only — **identity remains the stable server-issued OAuth `client_id`**, never the spoofable client name.
+- This makes the register → one-time approve → remembered-on-reconnect → revocable flow (OAuth Dynamic Client Registration) show real connection info per agent. **Non-local agents must use OAuth** to register/appear/approve: set `connection.remoteMode: true` + `remoteOauthEnabled: true` + an admin password (`remoteOauthAdminPassword`, keychain preferred) in `~/.mailpouch.json` and restart. A shared **static bearer token has no per-agent identity, so bearer agents bypass registration by design** and won't appear — switch to OAuth for per-agent visibility/approval. (Bearer/stdio remain trusted/bypassing.)
+- `grant-store` tests cover `recordConnection` (updates + persists handshake info; no-op for an unknown clientId).
+
+### Added — approval window pops up when a new remote agent connects
+
+- When a remote/HTTP (OAuth) agent registers (DCR), mailpouch now **auto-opens the Settings UI Agents tab in the browser** so the user can approve or deny the connection immediately — on top of the existing desktop notification + tray badge. The agent stays **blocked until approved** (the pending-grant gate already returns an actionable "pending user approval" error to the agent). Authentication between the agent and the server remains automatic (OAuth DCR + PKCE); the only human step is approve/deny.
+- The pending agent's **registering IP and time** are captured at DCR and shown on its approval card, so the user has context to decide. (`AgentGrant.registeredFromIp`, threaded from the registration request via the `onClientRegistered` hook.)
+- Auto-open is gated: only when a **display is present** (skipped on headless/remote hosts), the UI is up, and at most once per ~10s (a registration burst opens one tab, which lists all pending). Controlled by a new **`autoOpenApprovalWindow`** setting (default on) with a Setup-tab toggle. The settings UI gained `#agents` hash deep-linking (used by the auto-open and available for manual navigation).
+- New `auto-open-approval.ts` pure decision helper + tests; `grant-store` test covers the persisted IP. Local stdio clients are unaffected (still auto-trusted); static-bearer clients still bypass the grant gate by design.
+
+### Fixed — IMAP IDLE socket error crashed the whole process (primary "keeps crashing" cause)
+
+- **Bug:** the background IMAP IDLE client (`runIdleLoop`, `src/services/simple-imap-service.ts`) was constructed with `'exists'`/`'expunge'` listeners but **no `'error'` listener**. `imapflow` extends `EventEmitter`, and an `EventEmitter` that emits `'error'` with no listener **throws synchronously** — which became an `uncaughtException`, and `src/index.ts` routes `uncaughtException`/`unhandledRejection` straight into `gracefulShutdown` → `process.exit`. IDLE sockets to a local Proton Bridge reset routinely (Bridge sleep/restart/session caps), so a single mid-IDLE socket reset took the entire MCP server down — the recurring crash. The main `connect()` path already attached `'error'`/`'close'` listeners; the IDLE client did not.
+- **Fix:** attach `'error'` and `'close'` listeners to the IDLE client immediately after construction (before `connect()`). The existing reconnect loop (try/catch + exponential backoff) already recovers from the drop; the listeners only ensure the async socket error is *handled* instead of thrown.
+- **Also fixed:** the Bridge watchdog `setInterval` callback (`startBridgeWatchdog`, `src/index.ts`) ran `await Promise.all([isBridgeReachable…])` and `await launchProtonBridge()` with **no outer try/catch** — a rejection there became an `unhandledRejection` → the same `gracefulShutdown` → exit, firing every 30s precisely while Bridge was flapping. Wrapped the whole tick body in try/catch.
+- **Test:** `src/services/idle-error-listener.test.ts` asserts the IDLE client registers an `'error'` listener; verified to fail before the fix and pass after.
+
+### Changed — updating credentials now flushes the old ones and reconnects (no restart)
+
+- Saving a new Bridge password in Settings → Connection now takes effect **without a server restart**. Previously `applyKeychainCredentials` only refreshed SMTP and staged the IMAP password in the account spec — the live IMAP client kept using the old password until the process was restarted. Now the settings save also calls `AccountManager.reloadImapCredentials`, which for each affected account: tears down the main + IDLE clients (both still authed with the **old** password), loads the **new** password into the live connection config, clears the auth-failure stop (so tools stop fast-failing and the tray blink ends), and reconnects + restarts IDLE.
+- Added an IDLE-loop **generation guard** (`_idleGen`) so a stop-then-restart during the reload can never leave two loops racing on the IDLE socket.
+- The reconnect is fire-and-forget from the save handler (so the HTTP save response isn't blocked on a reconnect that may back off if Bridge is still throttling); the UI's "Check Now" surfaces the result. `idle-reconnect-policy.test.ts` covers the reload (new password loaded, auth-stop cleared, reconnected) and the generation bump.
+
+### Added — tools return an actionable error when the connection is broken
+
+- When an agent calls a mailbox tool while mailpouch can't connect, it now gets a clear, operator-actionable error instead of an opaque "IMAP operation failed" / hang — so the user knows exactly what to go fix. A new `ConnectionStateError` (`error-classify.ts`) is surfaced **verbatim** by `safeErrorMessage`.
+  - **Login failure recorded** → every IMAP tool fast-fails (via `ensureConnection`) with *"mailpouch can't sign in to your Proton mailbox — … Open the mailpouch Settings UI → Connection, update the Bridge password, then restart mailpouch."* and **does not re-attempt the login** (so tool calls can't re-trip Bridge's "too many login attempts" lockout).
+  - **Reconnect that fails on auth** records the failure (so later calls fast-fail and the tray blink kicks in) and returns the same guidance.
+  - **Bridge unreachable** → *"mailpouch couldn't reach Proton Bridge — … Make sure Proton Bridge is running and signed in, then try again."*
+  - **`send_email`** auth failures now return the same actionable message rather than a bare "Invalid login: 454 …".
+- `idle-reconnect-policy.test.ts` covers the fast-fail (no reconnect attempt), the reconnect-auth path (records failure), and the Bridge-unreachable path.
+
+### Added — tray icon blinks a red ⚠ triangle while the mail connection is failing
+
+- When mailpouch can't maintain its IMAP connection (a login/credential failure, or an ongoing connection problem), the system-tray icon now **alternates between the normal envelope and a red warning triangle every 5 seconds**, and the tray tooltip shows the reason (e.g. the login-failed message). It restores to the steady normal icon automatically once the connection recovers. Driven by the `idleAuthFailure` / `idleLastIssue` state from the IDLE reconnect policy; the warning icon is generated in-code (`makeWarningIconPng`, no new asset) to match the existing zero-asset icon pipeline. The 5s timer is `unref`'d and cleared on shutdown.
+
+### Changed — IDLE reconnect stops on a login failure; backs off on transient issues
+
+- The IMAP IDLE loop (`runIdleLoop`, `simple-imap-service.ts`) previously retried *every* failure on a fixed exponential backoff — including a rejected login, which just hammered Bridge until it returned "too many login attempts" and locked the account out. Now the loop **classifies the failure**:
+  - **Login/credential failure** (`classifyError` → `auth`, e.g. wrong Bridge password): logs a prominent `error` ("IMAP login failed — … Fix the Bridge password in Settings → Connection, then restart …") and **stops reconnecting** (`idleAuthFailure` is set for surfacing). It does not retry a bad password into a lockout. Restarting (or relaunching from the MCP client) clears the stop and retries with the new credentials.
+  - **Transient issue** (connection lost / timeout / `too many login attempts` throttle): logs a `warn` with the reason and the next retry time, and retries on a **1 → 5 → 15 → 30-minute** schedule (holding at 30), recording `idleLastIssue`. A throttle is treated as transient (it self-clears) rather than a permanent stop.
+- New `idle-reconnect-policy.test.ts` covers all three branches (auth-stop, connection-retry, throttle-retry).
+
+### Fixed — connection check showed "✅ Reachable" during an auth failure (454)
+
+- Both the browser "Check Now"/"Test Connections" (`/api/test-connection`) and the terminal-UI test only did a **TCP port probe** (`tcpCheck`), so a Bridge that accepts the socket but rejects AUTH — a 454 throttle or a stale Bridge password — was still shown as green "Reachable". A new shared module `src/settings/connection-check.ts` now does **TCP reachability AND a STARTTLS+AUTH probe** with the saved credentials, distinguishing `reachable` from `authenticated`. The UI renders three states: ✅ Connected / ⚠ Port open · auth failed (with the server's reason, e.g. the 454) / ❌ Unreachable — it can no longer show green while auth is broken.
+- **Hard timeout:** `imapflow`/`nodemailer` don't reliably honor their own connect/socket timeouts when a server accepts the socket then stalls mid-AUTH (observed against Bridge during a 454), so each probe is wrapped in a wall-clock cap — the check (and the "Check Now" spinner) always returns instead of hanging.
+- Both UIs (browser settings + `tui.ts`) now share one faithful probe; `connection-check.test.ts` covers reachable/authenticated/unreachable/no-creds/auth-stall verdicts.
+
+### Added — `npm run check:bulk:live`, a safe live-Bridge bulk audit
+
+- A self-scoped probe (`scripts/check-bulk-live.mjs`) that exercises the real `SimpleIMAPService` bulk tools against live Proton Bridge to confirm moves actually **land** (not just self-report success), including a move out of the real **"All Mail"** union — the Bridge-specific axis Greenmail can't reproduce. It **never calls `wipe()`** and only creates/deletes its own uniquely-named `Folders/BulkLive*-<ts>` folders and `[bulklive-<ts>] …` messages; existing mail is never touched. A bare run prints the plan; `--confirm` is required to execute. Verdicts: PASS / FALSE-SUCCESS (the bug) / HONEST-FAIL / SKIP.
+
+### Changed — default settings-UI port is now 8766 (was 8765)
+
+- The default `settingsPort` moved from **8765 → 8766** across every code site (loader, schema, `index.ts`, `settings-main`, settings server, setup UI) and the docs. Installs that pin `settingsPort` in `~/.mailpouch.json` are unaffected; only the unset-default changes. This also steps the default off 8765, a port commonly taken by ad-hoc local HTTP servers.
+
+### Improved — settings UI survives an occupied port and explains itself
+
+- **Port fallback:** if the configured `settingsPort` (default 8766) is held by a *foreign* process, `_startSettingsServerDaemon` now binds the next free port (`basePort … basePort+10`) instead of retrying the same dead port 5× and then giving up for the whole session. The configured port still gets a few quick retries first (covers a mailpouch restarting on it); a fallback bind logs a clear "configured port N was occupied — bound to M instead" warning. Real-world trigger: a respawning local HTTP server permanently squatting the configured port took the UI down every session.
+- **Tray surfaces the reason:** when the settings UI can't bind at all, the tray tooltip now reads "Settings UI off: <reason>" and a disabled menu item shows it, instead of the "Open Settings" entry silently vanishing (`buildSettingsTrayMenu` gains `settingsUnavailableReason`).
+- **Friendly unreachable message:** when the page's backing server dies (stopped/restarted while the tab stayed open), tab loading now shows "The settings server is no longer reachable — mailpouch may have stopped or restarted. Restart mailpouch and reload this page." instead of the raw `TypeError: Failed to fetch`.
+
+### Fixed — `--settings-only` self-terminated on stdin close (secondary "keeps crashing" cause)
+
+- **Bug:** `mailpouch --settings-only` was an **unrecognised flag** — it was parsed nowhere, so the process fell through to the full MCP server on the stdio transport. The stdio transport binds process lifetime to `process.stdin.on("close", → gracefulShutdown("stdin-closed"))`. When launched by a wrapper/autostart/`nohup` that opens a stdin **pipe** and then closes it (or exits), `close` fired and mailpouch shut itself down within seconds — which the operator experienced as the settings UI "crashing" (and the page's backing server dying → `Failed to fetch`). Empirically confirmed: a closed stdin **pipe** triggers the exit (`code=0`); `/dev/null` stdin does not, which is why it was intermittent.
+- **Fix:** `--settings-only` is now a real mode. It starts **just** the settings UI + tray and returns — no Bridge connect, no scheduler/IDLE loop, no `StdioServerTransport`, and crucially **no stdin-close handler**. The settings HTTP server (and tray) keep the process alive until the tray's Quit or a signal. `--settings-only --no-settings-ui` is rejected as contradictory; if the settings server fails to bind in this mode the process now fails loudly (port-occupied message) rather than exiting silently.
+- **Test:** `test/e2e/scenarios/settings-only-lifecycle.e2e.test.ts` spawns the built `dist/index.js --settings-only` with a real stdin pipe, closes it after boot, and asserts the process stays alive and keeps serving `GET /api/status`. Verified to fail against the pre-fix binary and pass after.
+
 ## [3.0.71] — 2026-05-31
 
 ### Verified — `search_emails` already issues a live IMAP SEARCH (consolidated report cluster 7 / Observation O1)

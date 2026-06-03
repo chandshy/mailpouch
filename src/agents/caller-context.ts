@@ -12,16 +12,30 @@
  */
 
 import { AsyncLocalStorage } from "async_hooks";
+import { createHash } from "crypto";
+
+/**
+ * Derive a stable per-agent id for a LOCAL (stdio) client from its self-reported
+ * MCP client name. Local agents have no OAuth client_id, so we key their grant
+ * on the name (lowercased) — this is a local-trust convenience ("remember this
+ * client across relaunches"), NOT a cryptographic identity (the name is
+ * self-reported and could be spoofed by another local process). The `stdio:`
+ * prefix namespaces it from OAuth ids (`pmc_…`) in the shared grant store.
+ */
+export function localAgentId(clientName: string): string {
+  const id = (clientName ?? "").trim().toLowerCase() || "(unnamed local client)";
+  return "stdio:" + createHash("sha256").update(id).digest("hex").slice(0, 16);
+}
 
 export interface CallerContext {
-  /** OAuth client_id of the caller, or "bearer:static" for the static-bearer path. */
+  /** OAuth client_id of the caller (DCR `pmc_…` for interactive agents and
+   *  service accounts, `stdio:…` for local stdio agents). Always a real,
+   *  per-agent identity — there is no shared-bearer pseudo-client. */
   clientId: string;
-  /** Human-readable display name (from DCR client_name or synthesized). */
+  /** Human-readable display name (from DCR/service-account client_name or synthesized). */
   clientName: string;
   /** Remote IP when known; undefined for stdio callers. */
   ip?: string;
-  /** True when the caller authenticated with the static bearer token (no OAuth). */
-  staticBearer?: boolean;
 }
 
 const storage = new AsyncLocalStorage<CallerContext>();

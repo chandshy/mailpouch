@@ -100,7 +100,7 @@ export const TOOL_CATEGORIES: Record<string, ToolCategory> = {
   },
   deletion: {
     label: "Deletion",
-    description: "Permanently delete emails — irreversible",
+    description: "Delete emails by moving them to Trash — recoverable, never permanently deleted",
     tools: ["delete_email", "bulk_delete_emails", "bulk_delete"],
     risk: "destructive",
   },
@@ -217,22 +217,31 @@ export interface ConnectionSettings {
   remotePort?: number;
   /** HTTP path for the MCP endpoint. Default /mcp. */
   remotePath?: string;
-  /** Required when remoteMode=true. Shared bearer token clients send in Authorization: Bearer ... */
+  /**
+   * @deprecated The shared static bearer was removed — it bypassed per-agent
+   * gating and audit. A present value is ignored with a startup warning. Every
+   * agent now authenticates as its own OAuth client: interactive via
+   * authorization_code, headless via a service account (`mailpouch agent issue`).
+   */
   remoteBearerToken?: string;
   /** Optional HTTPS cert path for the HTTP transport. Required for public exposure. */
   remoteTlsCertPath?: string;
   /** Optional HTTPS key path for the HTTP transport. Must be paired with remoteTlsCertPath. */
   remoteTlsKeyPath?: string;
   /**
-   * Enable OAuth 2.1 endpoints alongside the static bearer. MCP hosts can
-   * register themselves via /oauth/register and obtain tokens via a
-   * PKCE-guarded consent flow. Recommended when exposing beyond a trusted
-   * tunnel; still works with any static-bearer callers.
+   * REQUIRED when remoteMode=true. Enables the OAuth 2.1 endpoints — the only
+   * remote-auth mechanism. MCP hosts self-register via /oauth/register and
+   * obtain tokens via a PKCE-guarded automatic-consent flow (gated by per-agent
+   * Approve/Deny); headless service accounts use the client_credentials grant.
+   * Remote mode refuses to start without it.
    */
   remoteOauthEnabled?: boolean;
   /**
-   * Admin password required to approve OAuth consent. Required when
-   * remoteOauthEnabled=true. High-value secret — keychain storage is preferred.
+   * @deprecated No longer supported and ignored if set. OAuth now uses
+   * automatic consent (the agent authenticates automatically via DCR + PKCE)
+   * and the sole human gate is the per-agent Approve/Deny in the Agents tab,
+   * where a pending request expires after 5 minutes. A startup warning is
+   * logged if this is present.
    */
   remoteOauthAdminPassword?: string;
   /**
@@ -364,7 +373,7 @@ export interface ServerConfig {
   credentialStorage?: "keychain" | "encrypted-file" | "config";
   /** Tuneable response-size guards — see ResponseLimits. */
   responseLimits?: ResponseLimits;
-  /** Port the settings UI server listens on (default 8765). */
+  /** Port the settings UI server listens on (default 8766). */
   settingsPort?: number;
   /**
    * Progressive tool-disclosure tier. Controls how many tools appear in the
@@ -387,6 +396,28 @@ export interface ServerConfig {
   activeAccountId?: string;
   /** Fire native OS notifications on new pending grants (default true). */
   desktopNotificationsEnabled?: boolean;
+  /**
+   * Auto-open the Settings UI Agents tab in the browser when a new remote agent
+   * registers, so the user can approve/deny the connection immediately
+   * (default true). Skipped on headless hosts (no display). Set false on a
+   * remote/headless deployment to suppress the auto-popup.
+   */
+  autoOpenApprovalWindow?: boolean;
+  /**
+   * Show a NATIVE on-screen Approve/Deny dialog on the machine where mailpouch
+   * runs when a new agent registers, so the operator can decide right there
+   * instead of opening the Agents tab (default true). Falls back to the browser
+   * approval window on headless hosts or where no dialog tool (zenity/osascript/
+   * PowerShell) is available. Set false to use only the browser window.
+   */
+  nativeApprovalDialog?: boolean;
+  /**
+   * Require LOCAL (stdio) agents to register and be approved too, like remote
+   * agents — every connecting client is gated behind the per-agent Approve/Deny
+   * (default true). Set false (or `MAILPOUCH_TRUST_LOCAL=1`) to restore the
+   * legacy behavior where the local stdio client is auto-trusted.
+   */
+  gateLocalAgents?: boolean;
   /** Outbound webhook endpoints that receive grant-change events. */
   webhooks?: WebhookEndpointShape[];
   /**

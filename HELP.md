@@ -292,18 +292,7 @@ Hot-swapping the active account requires a server restart.
 
 ## 13. Remote / HTTP Mode
 
-By default mailpouch uses stdio (for Claude Desktop). To expose it over HTTP for remote MCP clients, edit `~/.mailpouch.json` directly:
-
-```json
-{
-  "remoteMode": "http",
-  "remoteHost": "127.0.0.1",
-  "remotePort": 8788,
-  "remoteBearerToken": "your-secret-token"
-}
-```
-
-Or with OAuth 2.1 + PKCE:
+By default mailpouch uses stdio (for Claude Desktop). To expose it over HTTP for remote MCP clients, edit `~/.mailpouch.json` directly. Remote mode is **OAuth-only** — every agent authenticates as its own client (there is no shared bearer token):
 
 ```json
 {
@@ -311,13 +300,45 @@ Or with OAuth 2.1 + PKCE:
   "remoteHost": "0.0.0.0",
   "remotePort": 8788,
   "remoteOauthEnabled": true,
-  "remoteOauthAdminPassword": "strong-admin-password",
   "remoteTlsCertPath": "/path/to/cert.pem",
   "remoteTlsKeyPath": "/path/to/key.pem"
 }
 ```
 
-Remote mode keys are **not** in the browser UI by design — secrets shouldn't live in web forms.
+- **Interactive agents** self-register over OAuth and you **Approve/Deny** them in the Agents tab (automatic consent — no password).
+- **Headless agents** (cron, CI, scheduled) use a pre-approved **service account** and the `client_credentials` grant:
+
+  ```bash
+  mailpouch agent issue --name nightly-cron --preset read_only
+  # prints client_id + client_secret once; log in via POST /oauth/token grant_type=client_credentials
+  ```
+
+Remote mode keys are **not** in the browser UI by design — secrets shouldn't live in web forms (but the "+ Service account" button in the Agents tab issues client_credentials credentials).
+
+### Connecting a client (Claude Code, Claude Desktop, …)
+
+The Setup tab's **Connect a client** section (and the install wizard's final step) write the MCP entry for you — pick the transport, then click **Write to Claude Code** (`~/.claude.json`) or **Write to Claude Desktop**:
+
+- **stdio** — the client spawns its own mailpouch. The entry sets `MAILPOUCH_FORCE_STDIO=1` so it speaks stdio even if your config has `remoteMode: true`. Don't run it alongside the shared HTTP daemon for the same Proton account (they'd fight over the one IMAP connection).
+- **HTTP** — the client connects to the shared daemon at `/mcp`; it does an OAuth login and you Approve it once in the Agents tab. Needs remote mode + OAuth enabled and the daemon running.
+
+You can also just copy the snippet shown and paste it into any MCP host's `mcpServers`.
+
+### Run as a shared daemon (use several apps at once)
+
+mailpouch keeps **one mailbox connection per account**, so you can't run two separate copies for the same account at the same time (the second quits). To use mailpouch from several apps together — for example **Claude Code and Claude cowork**, or scheduled/headless agents — run one shared daemon and point everything at it:
+
+```bash
+mailpouch daemon          # starts the shared connection (you start it; it isn't an autostart)
+```
+
+Leave it running (e.g. in a tmux or login session). Then:
+- **Apps like Claude Code / Claude Desktop** connect to it and you approve each once in the Agents tab.
+- **Headless or cowork hosts** use a per-host login: `mailpouch agent issue --name <host> --preset <preset>` (gives a client_id + secret).
+
+Everything shares the one connection — nothing fights over the mailbox.
+
+While the shared mailpouch is running, the "Connect an app" chooser only offers the shared option (the per-computer one is turned off, because it would conflict). Adding or replacing a headless login takes effect right away — no restart. Revoking one removes its login for good; to bring it back, issue a new one.
 
 See [README.md — Remote HTTP Mode](README.md#remote-http-mode) for the full guide.
 

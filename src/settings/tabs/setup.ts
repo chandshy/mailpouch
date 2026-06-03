@@ -172,11 +172,22 @@ export function buildSetupHtml(p: SetupParams): string {
             Disable if you prefer to check the Agents tab manually.
           </div>
         </div>
+        <div class="field" style="margin-top:6px">
+          <label class="toggle-wrap" style="width:fit-content">
+            <span class="toggle"><input type="checkbox" id="auto-open-approval" checked><span class="slider"></span></span>
+            <span>Auto-open the approval window when an agent connects</span>
+          </label>
+          <div class="hint" style="margin-top:4px">
+            When a new remote agent registers, automatically open this Settings UI to the Agents tab so you can
+            approve or deny the connection right away. On by default; skipped on headless hosts. Turn off on a
+            remote/headless deployment.
+          </div>
+        </div>
         <div class="field" style="margin-top:14px">
           <label for="settings-port">Settings UI port</label>
-          <input type="number" id="settings-port" min="1" max="65535" placeholder="8765" style="width:120px"
+          <input type="number" id="settings-port" min="1" max="65535" placeholder="8766" style="width:120px"
             data-input="checkPortMismatch">
-          <div class="hint">Port the settings web UI listens on. Takes effect on the next launch. Default: 8765.</div>
+          <div class="hint">Port the settings web UI listens on. Takes effect on the next launch. Default: 8766.</div>
           <div id="port-mismatch-warn" style="display:none;margin-top:4px;font-size:12px;color:var(--warn,#f59e0b)">
             ⚠ Currently running on port ${p.runningPort}. Save and restart settings for the new port to take effect.
           </div>
@@ -212,6 +223,31 @@ export function buildSetupHtml(p: SetupParams): string {
           <div class="hint">Only set if pass-cli is not on your PATH. <a href="https://github.com/protonpass/pass-cli" target="_blank" rel="noopener" style="color:var(--primary)">Install pass-cli ↗</a></div>
         </div>
       </fieldset>
+    </div>
+
+    <div class="card" style="margin-top:16px">
+      <div class="card-title">Connect an app</div>
+      <div class="card-desc">Add mailpouch to an app like Claude Code or Claude Desktop. Pick how it should connect, then click a button to set it up for you.</div>
+      <div id="cc-daemon-note" style="display:none;margin:0 0 10px;padding:8px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;font-size:13px;color:var(--muted)">A shared mailpouch is running, so apps connect to it. The "just this computer" option is off because it would conflict with the shared one.</div>
+      <fieldset style="border:none;padding:0;margin:0">
+        <label id="cc-stdio-label" style="display:block;margin-bottom:8px">
+          <input type="radio" name="cc-transport" value="stdio" id="cc-radio-stdio" checked data-change="setClientTransport">
+          <strong>Just this computer</strong> <span style="color:var(--muted)">(recommended)</span><br>
+          <span style="color:var(--muted);font-size:13px">The app starts mailpouch on its own when it needs it. Simplest — nothing else to run.</span>
+        </label>
+        <label style="display:block">
+          <input type="radio" name="cc-transport" value="http" id="cc-radio-http" data-change="setClientTransport">
+          <strong>Share one connection</strong><br>
+          <span style="color:var(--muted);font-size:13px">Connect to a mailpouch that's already running, so several apps or devices can share it. You'll approve the app the first time it connects. (Requires remote access turned on.)</span>
+        </label>
+      </fieldset>
+      <pre id="cc-snippet" style="margin-top:12px;padding:10px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;font-size:12px;overflow:auto"></pre>
+      <div class="actions" style="margin-top:8px">
+        <button class="btn btn-primary" data-action="writeClaudeCode">Set up Claude Code</button>
+        <button class="btn btn-ghost"   data-action="writeClaudeDesktopFromSetup">Set up Claude Desktop</button>
+        <button class="btn btn-ghost"   data-action="copyClientSnippet">Copy setup text</button>
+        <span id="cc-result" style="align-self:center;font-size:13px;color:var(--muted)"></span>
+      </div>
     </div>
 
     <div class="actions">

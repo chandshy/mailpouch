@@ -22,7 +22,10 @@ import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { expect } from "vitest";
 import { buildPermissions } from "../../src/config/loader.js";
+import { localAgentId } from "../../src/agents/caller-context.js";
+import { buildBridgeTlsOptions, readPinnedBridgeCert } from "../../src/services/bridge-tls.js";
 import { ImapFixtures } from "./fixtures/imap-fixtures.js";
+import { ScratchSession } from "./support/scratch.js";
 import { GREENMAIL_IMAP_PORT, GREENMAIL_SMTP_PORT, TEST_USER } from "./support/docker.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -53,6 +56,13 @@ export interface E2EHarness {
    */
   resetState(): Promise<void>;
   close(): Promise<void>;
+  /** SAFE mode only: the token-scoped scratch namespace. Use `scratch.create()`
+   *  for folders and `imap.appendScratch(path, runToken, seed)` for messages —
+   *  cleanup on close() deletes only token-bearing folders. Undefined in the
+   *  destructive (wipe-based) modes. */
+  scratch?: ScratchSession;
+  /** SAFE mode only: the unique per-run token every scratch folder name carries. */
+  runToken?: string;
 }
 
 export type HarnessMode = "greenmail" | "bridge";
@@ -61,6 +71,46 @@ export interface StartE2EOptions {
   mode?: HarnessMode;
   /** Override Greenmail user. Ignored in bridge mode. */
   user?: { email: string; username: string; password: string };
+  /** SAFE (non-destructive) mode: never wipe; confine all activity to a
+   *  token-scoped scratch namespace. Defaults from MAILPOUCH_E2E_SAFE=1. The
+   *  only way to run the Bridge gate against a real account without erasing it. */
+  safe?: boolean;
+}
+
+/** MCP client name the harness connects under. Local-agent gating derives the
+ *  grant's clientId from this (localAgentId), so the pre-seeded grant below must
+ *  use the same name. */
+const HARNESS_CLIENT_NAME = "e2e-harness";
+
+/**
+ * Local-agent gating (every stdio agent must register + be approved) would
+ * leave the harness's grant "pending" with no human in CI to approve it,
+ * blocking every mutating tool. Mirror the real out-of-band approval path:
+ * pre-seed an *active* grant for the harness's derived clientId, pointed at by
+ * MAILPOUCH_AGENTS. This exercises the gate (grant must be active) rather than
+ * bypassing it.
+ */
+function writeApprovedAgentGrant(): string {
+  const path = join(HOME, `.mailpouch-e2e-agents-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
+  const now = new Date().toISOString();
+  const store = {
+    version: 1,
+    grants: [
+      {
+        clientId: localAgentId(HARNESS_CLIENT_NAME),
+        clientName: HARNESS_CLIENT_NAME,
+        status: "active",
+        preset: "full",
+        createdAt: now,
+        approvedAt: now,
+        totalCalls: 0,
+        transport: "stdio",
+        note: "e2e harness — pre-approved for CI",
+      },
+    ],
+  };
+  writeFileSync(path, JSON.stringify(store, null, 2), { mode: 0o600 });
+  return path;
 }
 
 /** Phase 1 — write a Greenmail-targeted mailpouch config under $HOME. */
@@ -117,6 +167,8 @@ interface BridgeConnectionConfig {
   imapPort: number;
   username: string;
   password: string;
+  bridgeCertPath?: string;
+  allowInsecureBridge?: boolean;
 }
 
 /** Read the Bridge config file and extract just the IMAP connection fields
@@ -138,7 +190,26 @@ function readBridgeConnection(configPath: string): BridgeConnectionConfig {
     imapPort: conn.imapPort,
     username: conn.username,
     password: conn.password,
+    bridgeCertPath: conn.bridgeCertPath,
+    allowInsecureBridge: conn.allowInsecureBridge,
   };
+}
+
+/** TLS options ImapFixtures needs to reach Bridge's self-signed CN=127.0.0.1
+ *  cert over host `localhost` — the same handling production uses. With a pinned
+ *  cert: trust it as the CA + skip the hostname check (buildBridgeTlsOptions).
+ *  Otherwise, if the operator opted into insecure Bridge, disable verification.
+ *  Greenmail needs none. */
+function bridgeImapTls(bridge: BridgeConnectionConfig): Record<string, unknown> | undefined {
+  if (bridge.bridgeCertPath) {
+    try {
+      return buildBridgeTlsOptions(readPinnedBridgeCert(bridge.bridgeCertPath));
+    } catch { /* fall through to insecure / none */ }
+  }
+  if (bridge.allowInsecureBridge || process.env.MAILPOUCH_INSECURE_BRIDGE === "1") {
+    return { rejectUnauthorized: false, minVersion: "TLSv1.2" };
+  }
+  return undefined;
 }
 
 export async function startE2E(opts: StartE2EOptions = {}): Promise<E2EHarness> {
@@ -148,6 +219,9 @@ export async function startE2E(opts: StartE2EOptions = {}): Promise<E2EHarness> 
   //     scenarios re-run via `test:e2e:bridge` actually target Bridge)
   //   - else default to greenmail
   const mode = opts.mode ?? (bridgeConfigAvailable() ? "bridge" : "greenmail");
+  // SAFE mode never wipes — it confines everything to a token-scoped scratch
+  // namespace, so it's the only mode safe to run against a real Bridge account.
+  const safe = opts.safe ?? process.env.MAILPOUCH_E2E_SAFE === "1";
   const greenmailUser = opts.user ?? TEST_USER;
 
   let configPath: string;
@@ -156,6 +230,12 @@ export async function startE2E(opts: StartE2EOptions = {}): Promise<E2EHarness> 
   let imapPort: number;
   let imapUser: string;
   let imapPass: string;
+  let imapTls: Record<string, unknown> | undefined;
+  // SAFETY: wipe() empties INBOX/Sent/Archive/Trash/Spam/Drafts and deletes all
+  // other folders. Greenmail is disposable → always allowed. Bridge points at a
+  // REAL Proton account, so wipe is OPT-IN: only when MAILPOUCH_E2E_ALLOW_WIPE=1
+  // explicitly confirms a throwaway test account. Never the operator's real mail.
+  let allowWipe: boolean;
   if (mode === "greenmail") {
     configPath = writeGreenmailConfig(greenmailUser);
     isTempConfig = true;
@@ -163,6 +243,8 @@ export async function startE2E(opts: StartE2EOptions = {}): Promise<E2EHarness> 
     imapPort = GREENMAIL_IMAP_PORT;
     imapUser = greenmailUser.username;
     imapPass = greenmailUser.password;
+    imapTls = undefined;
+    allowWipe = true;
   } else {
     // Clone the operator-supplied Bridge config to a unique temp path with
     // `credentialStorage: "config"` baked in. Without this, mailpouch's
@@ -182,7 +264,12 @@ export async function startE2E(opts: StartE2EOptions = {}): Promise<E2EHarness> 
     imapPort = bridge.imapPort;
     imapUser = bridge.username;
     imapPass = bridge.password;
+    imapTls = bridgeImapTls(bridge);
+    allowWipe = process.env.MAILPOUCH_E2E_ALLOW_WIPE === "1";
   }
+  // Safe mode NEVER wipes, regardless of backend — defense in depth on top of
+  // the token-scoped scratch namespace.
+  if (safe) allowWipe = false;
 
   // Greenmail provisions users with bare logins ("alice") but rejects
   // outbound SMTP when MAIL FROM lacks a domain. Real Bridge has full-email
@@ -192,12 +279,14 @@ export async function startE2E(opts: StartE2EOptions = {}): Promise<E2EHarness> 
   const smtpFromOverride = mode === "greenmail"
     ? `${imapUser}@test.local`
     : undefined;
+  const agentsPath = writeApprovedAgentGrant();
   const transport = new StdioClientTransport({
     command: "node",
     args: [SERVER],
     env: {
       ...process.env,
       MAILPOUCH_CONFIG: configPath,
+      MAILPOUCH_AGENTS: agentsPath,
       MAILPOUCH_INSECURE_BRIDGE: "1",
       MAILPOUCH_TIER: "complete",
       // Greenmail's embedded SMTP does not advertise STARTTLS. This
@@ -211,7 +300,7 @@ export async function startE2E(opts: StartE2EOptions = {}): Promise<E2EHarness> 
   });
 
   const client = new Client(
-    { name: "e2e-harness", version: "1.0.0" },
+    { name: HARNESS_CLIENT_NAME, version: "1.0.0" },
     { capabilities: { tools: {} } }
   );
   await client.connect(transport);
@@ -223,8 +312,15 @@ export async function startE2E(opts: StartE2EOptions = {}): Promise<E2EHarness> 
     port: imapPort,
     user: imapUser,
     pass: imapPass,
+    tls: imapTls,
+    allowWipe,
   });
   await imap.connect();
+
+  // SAFE mode: a token-scoped scratch namespace. Preflight asserts the unique
+  // run token is not already present on the server, so cleanup is unambiguous.
+  const scratch = safe ? new ScratchSession(imap) : undefined;
+  if (scratch) await scratch.preflight();
 
   const call = (name: string, args: Record<string, unknown> = {}): Promise<CallResult> =>
     client.callTool({ name, arguments: args }) as Promise<CallResult>;
@@ -267,7 +363,11 @@ export async function startE2E(opts: StartE2EOptions = {}): Promise<E2EHarness> 
   };
 
   const resetState = async (): Promise<void> => {
-    await imap.wipe();
+    // SAFE mode never wipes — scenarios isolate via unique scratch folders. We
+    // still bounce the mailpouch connection online (read-only sync).
+    if (!safe) {
+      await imap.wipe();
+    }
     // sync_emails (and the get_emails fallback) calls ensureConnection() —
     // mutations don't, so without this the next move/star/delete will hit
     // "IMAP client not connected".
@@ -285,6 +385,22 @@ export async function startE2E(opts: StartE2EOptions = {}): Promise<E2EHarness> 
   };
 
   const close = async (): Promise<void> => {
+    // SAFE mode: delete this run's scratch folders (token-guarded) before
+    // closing. Best-effort — never throws, never touches a non-token folder.
+    if (scratch) {
+      try {
+        const retained = await scratch.cleanup();
+        if (retained.length) {
+          console.warn(
+            `safe-gate cleanup retained ${retained.length} scratch folder(s) whose mail could not be ` +
+            `relocated to Trash (Proton would otherwise orphan it in All Mail): ${retained.join(", ")}. ` +
+            `Remove via Proton web UI (search "${"@test.local".replace("@", "")}").`,
+          );
+        }
+      } catch {
+        // ignore — best-effort cleanup
+      }
+    }
     try {
       await imap.close();
     } catch {
@@ -302,7 +418,12 @@ export async function startE2E(opts: StartE2EOptions = {}): Promise<E2EHarness> 
         // ignore
       }
     }
+    try {
+      unlinkSync(agentsPath);
+    } catch {
+      // ignore
+    }
   };
 
-  return { client, imap, call, callRaw, json, domainErrorText, isPermissionBlocked, resetState, close };
+  return { client, imap, call, callRaw, json, domainErrorText, isPermissionBlocked, resetState, close, scratch, runToken: scratch?.token };
 }

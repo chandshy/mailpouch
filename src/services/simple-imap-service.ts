@@ -18,6 +18,7 @@ import {
   MAX_TOTAL_ATTACHMENT_BYTES,
 } from '../utils/helpers.js';
 import { buildBridgeTlsOptions, readPinnedBridgeCert } from './bridge-tls.js';
+import { classifyError, ConnectionStateError } from '../utils/error-classify.js';
 import { tracer, type SpanTags } from '../utils/tracer.js';
 import { BRIDGE_MIN_VERSION } from '../config/schema.js';
 
@@ -881,9 +882,37 @@ export class SimpleIMAPService {
    * Ensure connection is active, reconnect if needed
    */
   private async ensureConnection(): Promise<void> {
+    // Known login failure → fail fast with operator-actionable guidance and do
+    // NOT re-attempt (another bad-password login just re-trips Bridge's "too
+    // many login attempts" lockout). This is what an agent's tool call gets, so
+    // the user is told exactly what to fix rather than an opaque failure.
+    if (this.idleAuthFailure) {
+      throw new ConnectionStateError(
+        `mailpouch can't sign in to your Proton mailbox — ${this.idleAuthFailure.message} ` +
+        `Open the mailpouch Settings UI → Connection, update the Bridge password, then restart mailpouch. ` +
+        `Mailbox tools won't work until this is fixed.`,
+      );
+    }
     if (!this.isConnected || !this.client) {
       logger.warn('IMAP connection lost, attempting to reconnect', 'IMAPService');
-      await this.reconnect();
+      try {
+        await this.reconnect();
+      } catch (err) {
+        const cls = classifyError(err);
+        if (cls.category === 'auth') {
+          // Record it so further calls fail fast (no repeated lockout-feeding
+          // attempts) and the tray surfaces the warning blink.
+          this.idleAuthFailure = { message: cls.message, at: new Date() };
+          throw new ConnectionStateError(
+            `mailpouch can't sign in to your Proton mailbox — ${cls.message} ` +
+            `Open the mailpouch Settings UI → Connection, update the Bridge password, then restart mailpouch.`,
+          );
+        }
+        throw new ConnectionStateError(
+          `mailpouch couldn't reach Proton Bridge — ${cls.message} ` +
+          `Make sure Proton Bridge is running and signed in, then try again.`,
+        );
+      }
     }
   }
 
@@ -2426,60 +2455,79 @@ export class SimpleIMAPService {
     }); // end tracer.span('imap.bulkMoveEmails')
   }
 
+  /**
+   * Resolve the Trash mailbox path. Prefers the server-reported specialUse
+   * `\\Trash` (so localised names like `Papelera` resolve correctly), falls
+   * back to a folder literally named "Trash", then the bare path "Trash".
+   */
+  private async resolveTrashPath(): Promise<string> {
+    try {
+      const folders = await this.getFolders();
+      const byUse = folders.find(f => f.specialUse === '\\Trash');
+      if (byUse) return byUse.path;
+      const byName = folders.find(f => f.path.toLowerCase() === 'trash');
+      if (byName) return byName.path;
+    } catch {
+      logger.warn('Could not resolve Trash from the folder list; defaulting to "Trash"', 'IMAPService');
+    }
+    return 'Trash';
+  }
+
+  /** True if `folder` is the Trash mailbox — a delete there is a no-op, because
+   *  we never permanently delete (EXPUNGE) mail. */
+  private isTrashFolder(folder: string, trashPath: string): boolean {
+    return folder === trashPath || folder.toLowerCase() === 'trash';
+  }
+
+  /**
+   * Delete an email — implemented as a MOVE TO TRASH, never an EXPUNGE. Mail is
+   * always recoverable from Trash (and Proton purges Trash on its own schedule);
+   * mailpouch never directly/permanently deletes a message. An email already in
+   * Trash is left in place (the delete is a no-op success).
+   */
   async deleteEmail(emailId: string, sourceFolder?: string): Promise<boolean> {
     this.validateEmailId(emailId);
     if (sourceFolder !== undefined) this.validateFolderName(sourceFolder);
     return tracer.span('imap.deleteEmail', { emailId, sourceFolder }, async () => {
-    logger.debug('Deleting email', 'IMAPService', { emailId, sourceFolder });
+    logger.debug('Deleting email (move to Trash)', 'IMAPService', { emailId, sourceFolder });
 
     if (!this.client || !this.isConnected) {
       logger.warn('IMAP not connected', 'IMAPService');
       return false;
     }
 
-    try {
-      let folder: string;
-      if (sourceFolder) {
-        folder = sourceFolder;
-      } else {
-        const email = await this.getEmailById(emailId);
-        if (!email) {
-          throw new Error(`Email ${emailId} not found`);
-        }
-        folder = email.folder;
+    const trash = await this.resolveTrashPath();
+
+    let folder: string;
+    if (sourceFolder) {
+      folder = sourceFolder;
+    } else {
+      const email = await this.getEmailById(emailId);
+      if (!email) {
+        throw new Error(`Email ${emailId} not found`);
       }
-
-      const lock = await this.client.getMailboxLock(folder);
-
-      try {
-        const existing = await this.findExistingUidsInLockedFolder([emailId]);
-        if (!existing.has(emailId)) {
-          throw new Error(`Email ${emailId} not found in folder ${folder}`);
-        }
-
-        await this.client.messageDelete(emailId, { uid: true });
-
-        this.evictCacheEntry(`${folder}:${emailId}`);
-
-        logger.info(`Email ${emailId} deleted from ${folder}`, 'IMAPService');
-        return true;
-      } finally {
-        lock.release();
-      }
-    } catch (error) {
-      logger.error('Failed to delete email', 'IMAPService', error);
-      throw error;
+      folder = email.folder;
     }
+
+    if (this.isTrashFolder(folder, trash)) {
+      logger.info(`Email ${emailId} is already in Trash (${folder}); delete is a no-op — mail is never permanently deleted`, 'IMAPService');
+      return true;
+    }
+
+    // MOVE to Trash (verified-landing via moveEmail) instead of EXPUNGE.
+    return this.moveEmail(emailId, trash, folder);
     }); // end tracer.span('imap.deleteEmail')
   }
 
   /**
-   * Permanently delete many emails in one IMAP UID STORE+EXPUNGE per source folder.
+   * Delete many emails — implemented as a MOVE TO TRASH per source folder, never
+   * an EXPUNGE. Mail is always recoverable from Trash; mailpouch never directly/
+   * permanently deletes. Messages already in Trash are counted as success no-ops.
    *
    * @param sourceFolder When provided, all UIDs are assumed to live in this
    *   folder; cache lookup is skipped. Strongly recommended whenever the UIDs
-   *   came from anything other than INBOX. Pre-flight UID existence check
-   *   prevents silent no-ops from being counted as success.
+   *   came from anything other than INBOX. Move-to-Trash is verified-landing
+   *   (via bulkMoveEmails) so a union-mailbox no-op is reported as failure.
    */
   async bulkDeleteEmails(emailIds: string[], sourceFolder?: string): Promise<{ success: number; failed: number; errors: string[] }> {
     if (sourceFolder !== undefined) this.validateFolderName(sourceFolder);
@@ -2538,61 +2586,21 @@ export class SimpleIMAPService {
       }
     }
 
-    for (const [folder, ids] of emailsByFolder2.entries()) {
-      const lock = await this.client.getMailboxLock(folder);
-      try {
-        let existing: Set<string>;
-        try {
-          existing = await this.findExistingUidsInLockedFolder(ids);
-        } catch (e: unknown) {
-          // IMAP-006: transport error during pre-flight. Surface the real
-          // failure mode rather than collapsing into "UIDs not found" — the
-          // caller needs to distinguish "definitely absent" from "couldn't
-          // verify" so a retry is meaningful.
-          const msg = e instanceof Error ? e.message : String(e);
-          for (const id of ids) {
-            results.failed++;
-            results.errors.push(`UID ${id} existence check failed in folder ${folder}: ${msg}`);
-          }
-          continue;
-        }
-        const present: string[] = [];
-        for (const id of ids) {
-          if (existing.has(id)) {
-            present.push(id);
-          } else {
-            results.failed++;
-            results.errors.push(`UID ${id} not found in folder ${folder}`);
-          }
-        }
-        if (present.length === 0) continue;
+    const trash = await this.resolveTrashPath();
 
-        // IMAP-016: per-UID fallback flags \Deleted (cheap STORE, no EXPUNGE)
-        // and records the UID; the single trailing EXPUNGE in `finalize`
-        // removes all flagged UIDs in one round-trip instead of N serial
-        // EXPUNGEs holding the mailbox lock (and blocking IDLE).
-        const flaggedForExpunge: string[] = [];
-        await this.chunkedBatchOp(
-          present,
-          (uidSet) => this.client!.messageDelete(uidSet, { uid: true }),
-          async (id) => { await this.client!.messageFlagsAdd(id, ['\\Deleted'], { uid: true }); flaggedForExpunge.push(id); },
-          (id) => { this.evictCacheEntry(`${folder}:${id}`); results.success++; },
-          (id, msg) => { results.failed++; results.errors.push(`Failed to delete email ${id}: ${msg}`); },
-          'Bulk delete',
-          folder,
-          // Chunk the trailing EXPUNGE through chunkUidsForWire so a large
-          // fallback set can't re-introduce IMAP-002's unbounded command line
-          // (Copilot review on #154). Still O(N/chunk) round-trips, not the
-          // O(N) serial EXPUNGEs IMAP-016 set out to avoid.
-          async () => {
-            for (const uidSet of chunkUidsForWire(flaggedForExpunge)) {
-              await this.client!.messageDelete(uidSet, { uid: true });
-            }
-          },
-        );
-      } finally {
-        lock.release();
+    for (const [folder, ids] of emailsByFolder2.entries()) {
+      // Already in Trash → deletion is a no-op; we never permanently delete.
+      if (this.isTrashFolder(folder, trash)) {
+        for (let i = 0; i < ids.length; i++) results.success++;
+        continue;
       }
+      // Delete = move to Trash, with verified landing (so a union-mailbox no-op
+      // is an honest failure, not a silent success). Per-folder so each group's
+      // UIDs resolve correctly.
+      const moved = await this.bulkMoveEmails(ids, trash, folder);
+      results.success += moved.success;
+      results.failed += moved.failed;
+      results.errors.push(...moved.errors);
     }
 
     tags.successCount = results.success;
@@ -3192,10 +3200,25 @@ export class SimpleIMAPService {
 
   private idleClient: ImapFlow | null = null;
   private idleActive: boolean = false;
+  // Bumped each time an IDLE loop starts. A running loop exits when it sees a
+  // newer generation, so a stop-then-start (e.g. on credential reload) can
+  // never leave two loops racing on idleClient.
+  private _idleGen: number = 0;
+  /** Set when the IDLE loop STOPS itself due to a login/credential failure, so
+   *  the UI and logs can surface it. It is deliberately NOT retried (retrying a
+   *  bad password just locks the account out). Cleared on a successful connect
+   *  or when startIdle() is called again (e.g. after credentials are updated). */
+  public idleAuthFailure: { message: string; at: Date } | null = null;
+  /** Most recent transient (non-auth) connection issue, while the loop keeps
+   *  retrying with backoff. Cleared on a successful connect. */
+  public idleLastIssue: { category: string; message: string; at: Date } | null = null;
 
   /** Start a background IMAP IDLE connection on INBOX to receive push invalidations. */
   async startIdle(): Promise<void> {
     if (this.idleActive || !this.connectionConfig) return;
+    // A fresh start clears any prior auth-stop so updated credentials get a
+    // real attempt (the loop stops itself again if they're still wrong).
+    this.idleAuthFailure = null;
     this.idleActive = true;
 
     // Run in background — don't await
@@ -3206,6 +3229,7 @@ export class SimpleIMAPService {
   }
 
   private async runIdleLoop(): Promise<void> {
+    const myGen = ++this._idleGen; // claim this generation; older loops self-exit
     const cfg = this.connectionConfig;
     if (!cfg) return;
 
@@ -3271,9 +3295,12 @@ export class SimpleIMAPService {
     // exponentially on repeated failures so a session-capped Bridge (which
     // answers "454 too many login attempts") isn't hammered every 30s — which
     // previously turned one auth failure into thousands of leaked sockets/day.
-    const BASE_BACKOFF_MS = 30_000;
-    const MAX_BACKOFF_MS = 5 * 60_000;
-    let backoff = BASE_BACKOFF_MS;
+    // Backoff schedule for TRANSIENT (non-auth) failures: 1, 5, 15, 30 minutes,
+    // then hold at 30. A login/credential failure is NOT retried at all (see the
+    // catch below) — hammering a bad password just trips Bridge's "too many
+    // login attempts" lockout and never recovers on its own.
+    const BACKOFF_SCHEDULE_MS = [60_000, 5 * 60_000, 15 * 60_000, 30 * 60_000];
+    let backoffIdx = 0;
 
     const reapIdleClient = async (): Promise<void> => {
       if (!this.idleClient) return;
@@ -3293,7 +3320,7 @@ export class SimpleIMAPService {
       }
     };
 
-    while (this.idleActive) {
+    while (this.idleActive && this._idleGen === myGen) {
       try {
         await reapIdleClient(); // never leak a prior socket
         this.idleClient = new ImapFlow({
@@ -3306,8 +3333,25 @@ export class SimpleIMAPService {
           connectionTimeout: 30000,
         });
 
+        // imapflow extends EventEmitter. A socket 'error' emitted with NO
+        // 'error' listener throws synchronously → uncaughtException →
+        // gracefulShutdown → the whole process exits. IDLE sockets to a local
+        // Bridge reset routinely (Bridge sleep/restart/session caps), so this
+        // was a recurring "mailpouch keeps crashing". The reconnect loop below
+        // already recovers from drops via try/catch + backoff; these listeners
+        // exist only so the async socket error is handled instead of thrown.
+        this.idleClient.on('error', (err) => {
+          logger.debug('IDLE socket error (will reconnect)', 'IMAPService', err);
+        });
+        this.idleClient.on('close', () => {
+          logger.debug('IDLE socket closed (will reconnect)', 'IMAPService');
+        });
+
         await this.idleClient.connect();
-        backoff = BASE_BACKOFF_MS; // connected cleanly — reset the failure backoff
+        // Connected (and authenticated) cleanly — clear failure state.
+        backoffIdx = 0;
+        this.idleAuthFailure = null;
+        this.idleLastIssue = null;
         const lock = await this.idleClient.getMailboxLock('INBOX');
 
         try {
@@ -3332,13 +3376,45 @@ export class SimpleIMAPService {
       } catch (err) {
         // Close the failed client so its socket is reaped, not orphaned.
         await reapIdleClient();
-        logger.debug(`IDLE connection dropped, will retry in ${Math.round(backoff / 1000)}s`, 'IMAPService', err);
+
+        const cls = classifyError(err);
+        const shape = err as { message?: string; responseText?: string };
+        const text = `${shape?.message ?? ''} ${shape?.responseText ?? ''}`.toLowerCase();
+        // A genuine rejected login is terminal; "too many login attempts" is a
+        // transient lockout (caused BY retrying) that DOES clear on its own, so
+        // treat that as a backoff case rather than a permanent stop.
+        const throttled = /too many login attempts|rate limit|try again later|temporarily/.test(text);
+
+        if (cls.category === 'auth' && !throttled) {
+          this.idleAuthFailure = { message: cls.message, at: new Date() };
+          this.idleActive = false;
+          logger.error(
+            `IMAP login failed — ${cls.message} Halting reconnect attempts to avoid locking the account out. ` +
+            `Fix the Bridge password in Settings → Connection, then restart the server (or relaunch from your MCP client) to retry.`,
+            'IMAPService',
+            err,
+          );
+          break; // STOP — do not reconnect on a credential failure
+        }
+
+        // Transient issue: surface it and retry on the 1 / 5 / 15 / 30-minute
+        // schedule (holding at 30), so we never silently spin or hammer Bridge.
+        this.idleLastIssue = { category: cls.category, message: cls.message, at: new Date() };
+        const waitMs = BACKOFF_SCHEDULE_MS[Math.min(backoffIdx, BACKOFF_SCHEDULE_MS.length - 1)];
+        backoffIdx++;
+        logger.warn(
+          `IMAP connection issue — ${cls.message}${throttled ? ' (server is rate-limiting logins)' : ''} ` +
+          `Retrying in ${Math.round(waitMs / 60_000)} min.`,
+          'IMAPService',
+          err,
+        );
+        if (this.idleActive) await interruptibleSleep(waitMs);
+        continue; // skip the post-success short delay below
       }
 
-      if (this.idleActive) {
-        await interruptibleSleep(backoff);
-        backoff = Math.min(backoff * 2, MAX_BACKOFF_MS); // escalate while failing
-      }
+      // Normal end of an IDLE cycle (server closed idle / change detected):
+      // reconnect promptly rather than waiting a full backoff step.
+      if (this.idleActive) await interruptibleSleep(1000);
     }
 
     await reapIdleClient();
@@ -3349,6 +3425,48 @@ export class SimpleIMAPService {
     this.idleActive = false;
     this.idleClient?.logout().catch(() => {});
     this.idleClient = null;
+  }
+
+  /**
+   * Flush the OLD credentials from every live IMAP client and reconnect with
+   * the NEW password — so a Settings → Connection save takes effect WITHOUT a
+   * restart. Tears down the main + IDLE clients (both authed with the stale
+   * password), updates the stored connection config, clears the auth-failure
+   * stop so tools no longer fast-fail, then reconnects and restarts IDLE.
+   *
+   * Never throws: a failed reconnect (e.g. Bridge still throttling) is logged;
+   * the next IDLE cycle / tool call retries with the new password.
+   */
+  async reloadCredentials(password: string): Promise<void> {
+    if (!this.connectionConfig) {
+      // Never connected (boot connect hasn't run) — nothing live to flush; the
+      // first connect will use whatever the account spec now holds.
+      return;
+    }
+    logger.info('Reloading IMAP credentials and reconnecting with the updated password', 'IMAPService');
+    const wasIdle = this.idleActive;
+    // 1. Flush the stale credential from both live clients.
+    this.stopIdle();                 // reaps the IDLE client (old password)
+    await this.disconnect();         // reaps the main client (old password)
+    // 2. Load the new credential into the live config and clear failure state.
+    this.connectionConfig.password = password;
+    this.idleAuthFailure = null;
+    this.idleLastIssue = null;
+    // 3. Reconnect now so the new password is in effect immediately.
+    const c = this.connectionConfig;
+    try {
+      await this.connect(c.host, c.port, c.username, password, c.bridgeCertPath, c.secure, c.allowInsecureBridge ?? false);
+      logger.info('IMAP reconnected with the updated credentials', 'IMAPService');
+    } catch (err) {
+      logger.warn(
+        `IMAP reconnect after credential update did not succeed — ${classifyError(err).message} ` +
+        `It will retry on the next use or IDLE cycle.`,
+        'IMAPService',
+      );
+    }
+    // 4. Restart IDLE if it had been running (the generation guard ensures the
+    //    previously-stopped loop can't linger alongside the new one).
+    if (wasIdle) await this.startIdle();
   }
 
   /** Clear all in-memory email and folder caches, forcing fresh IMAP fetches on next access. */

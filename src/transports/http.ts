@@ -3,20 +3,22 @@
  *
  * Spec reference: https://modelcontextprotocol.io/specification/2025-11-25
  *
- * Auth supports two modes that can be mixed on the same listener:
+ * Auth is OAuth 2.1 only — there is no shared static bearer. Every caller
+ * authenticates as its OWN client, so a token always maps to a specific,
+ * gated, revocable agent identity (per-agent grant + audit). Two grant types
+ * share the one listener:
  *
- *   1. **Static bearer token** — programmatic use. The user configures
- *      `remoteBearerToken` in the settings file and clients present it
- *      as `Authorization: Bearer <token>`. This is the minimal deployment
- *      (me-on-my-phone talking to my laptop's Bridge over a trusted
- *      tunnel). Token is compared with timingSafeEqual.
+ *   1. **authorization_code + PKCE** — interactive agents. RFC 7591 Dynamic
+ *      Client Registration + RFC 8414 / 9728 metadata + PKCE S256 + RFC 8707
+ *      resource indicators. Consent is automatic; the only human gate is the
+ *      per-agent Approve/Deny in the Agents tab (no admin password). The token
+ *      is inert until the operator approves the grant.
  *
- *   2. **OAuth 2.1 + PKCE** — spec-compliant mode. When `oauthEnabled`
- *      is true the server also mounts the RFC 8414 authorization-server
- *      metadata, RFC 9728 protected-resource metadata, RFC 7591 Dynamic
- *      Client Registration endpoint, and the authorize/token/revoke
- *      endpoints. MCP hosts register themselves and obtain tokens via a
- *      human-in-the-loop consent screen gated on the admin password.
+ *   2. **client_credentials** — headless / unattended agents (cron, CI). The
+ *      operator issues a service account out-of-band (`mailpouch agent issue`
+ *      or the Settings UI); the agent logs in with its own client_id +
+ *      client_secret. The grant is pre-approved at issuance, so no interactive
+ *      consent is needed, yet GrantManager still gates every tool call.
  *
  * Every unauthenticated path is rate-limited per IP. The authed /mcp
  * endpoint is rate-limited per token key so a compromised token can't
@@ -30,24 +32,33 @@ import { createServer, type IncomingMessage, type ServerResponse } from "http";
 import { createServer as createSecureServer } from "https";
 import { readFileSync } from "fs";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
+import { randomUUID } from "crypto";
 import type { Server as McpServer } from "@modelcontextprotocol/sdk/server/index.js";
 import { logger } from "../utils/logger.js";
 import { OAuthStore } from "./oauth-store.js";
 import { OAuthHandlers } from "./oauth-handlers.js";
 import { TokenBucketLimiter } from "./rate-limit.js";
 import type { AgentGrantStore } from "../agents/grant-store.js";
+import type { ServiceAccountStore } from "../agents/service-account-store.js";
 import { notifications } from "../agents/notifications.js";
 import { runWithCaller } from "../agents/caller-context.js";
 
 export interface HttpTransportOptions {
-  /** MCP server instance to wire the transport into. */
+  /** MCP server instance to wire the transport into (fallback for single-session use). */
   server: McpServer;
+  /**
+   * Factory that builds a fresh MCP server with all handlers registered. The
+   * MCP SDK binds one Server to one transport, so each client session needs its
+   * own Server. When provided, a new Server + transport pair is created per
+   * session (keyed by Mcp-Session-Id). When omitted, falls back to a single
+   * shared `server` (only safe for one session at a time).
+   */
+  createServer?: () => McpServer;
   /** Bind host. Default 127.0.0.1 (localhost-only). Use 0.0.0.0 for LAN exposure. */
   host?: string;
   /** Port to listen on. */
   port: number;
-  /** Shared bearer token the client must send in Authorization: Bearer ... */
-  bearerToken: string;
   /** Path where the MCP endpoint lives. Default /mcp. */
   path?: string;
   /** Optional TLS cert/key paths for HTTPS. If omitted, serves over plain HTTP. */
@@ -55,8 +66,6 @@ export interface HttpTransportOptions {
   tlsKeyPath?: string;
   /** Enable OAuth 2.1 authorization-server endpoints alongside the static bearer. */
   oauthEnabled?: boolean;
-  /** Admin password required to complete the consent step. Required when oauthEnabled=true. */
-  oauthAdminPassword?: string;
   /** Externally-visible issuer URL. When omitted we derive it from the bind host/port. */
   oauthIssuer?: string;
   /** Requests per second per client for rate limiting (default 20). */
@@ -71,6 +80,13 @@ export interface HttpTransportOptions {
    * transport behaves as before (bearer-only, no per-agent gating).
    */
   agentGrants?: AgentGrantStore;
+  /**
+   * Persisted service accounts (client_credentials grant). When set, each is
+   * registered into the OAuth client table (for name display) and the token
+   * endpoint accepts the client_credentials grant verified against this store.
+   * Their matching active AgentGrant is ensured by the caller at startup.
+   */
+  serviceAccounts?: ServiceAccountStore;
 }
 
 export interface HttpTransportHandle {
@@ -81,11 +97,6 @@ export interface HttpTransportHandle {
   /** Stop accepting new connections and close existing ones. */
   close: () => Promise<void>;
 }
-
-import { constantTimeEqual } from "../utils/crypto.js";
-
-/** Constant-time compare, safe against length-leak. */
-const tokenMatches = constantTimeEqual;
 
 function extractBearer(req: IncomingMessage): string | null {
   const raw = req.headers["authorization"];
@@ -173,12 +184,19 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
   const host = opts.host ?? "127.0.0.1";
   const path = opts.path ?? "/mcp";
 
-  if (!opts.bearerToken && !opts.oauthEnabled) {
-    throw new Error("HTTP transport requires remoteBearerToken to be set in the config (or enable OAuth)");
+  // OAuth is mandatory in remote mode: every caller must authenticate as its
+  // own client (authorization_code for interactive agents, client_credentials
+  // for service accounts) so it is independently gated, audited, and revocable.
+  // The legacy shared static bearer — which bypassed all of that — is gone.
+  if (!opts.oauthEnabled) {
+    throw new Error("HTTP transport requires OAuth (remoteOauthEnabled). The static bearer was removed — every agent must authenticate as its own client. Issue a service account with `mailpouch agent issue` for headless/programmatic use.");
   }
 
-  const transport = new StreamableHTTPServerTransport({});
-  await opts.server.connect(transport);
+  // One transport per client session (keyed by Mcp-Session-Id). The MCP SDK
+  // binds one Server to one transport, so each session also gets its own Server
+  // via opts.createServer. A new session is created when an unsessioned POST
+  // carries an `initialize` request; subsequent requests route by session id.
+  const sessions = new Map<string, StreamableHTTPServerTransport>();
 
   // Rate limiters — one bucket per client IP for unauthed endpoints; one
   // bucket per token (sha256-fingerprint) for authed /mcp calls.
@@ -222,11 +240,33 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
   // subscribe to the notifications bus. The earlier ordering registered the
   // grant-change listener and then threw, orphaning the subscription handle
   // (the caller never received `unsubGrantChanges` to clean it up).
-  if (opts.oauthEnabled && !opts.oauthAdminPassword) {
-    throw new Error("OAuth is enabled but no oauthAdminPassword is set. Generate one or disable OAuth.");
+  if (opts.oauthEnabled) {
+    // OAuth is always automatic-consent: agents authenticate fully automatically
+    // (DCR + PKCE) and the per-agent grant Approve/Deny is the only human gate.
+    logger.info(
+      "OAuth enabled (automatic consent): agents self-register and obtain a token automatically; each is inert until you Approve it in the Agents tab, and a pending request expires after 5 minutes.",
+      "HTTPTransport",
+    );
   }
 
   const oauthStore = new OAuthStore();
+  // Register persisted service accounts as client_credentials clients so their
+  // token-authenticated calls resolve to a human-readable client_name. Identity
+  // is still the service-account store; this is display + metadata only.
+  if (opts.serviceAccounts) {
+    const now = Math.floor(Date.now() / 1000);
+    for (const acct of opts.serviceAccounts.list()) {
+      oauthStore.registerServiceClient({
+        client_id: acct.clientId,
+        client_id_issued_at: now,
+        client_name: acct.clientName,
+        redirect_uris: [],
+        grant_types: ["client_credentials"],
+        response_types: [],
+        token_endpoint_auth_method: "client_secret_basic",
+      });
+    }
+  }
   // Invalidate outstanding access tokens immediately when a grant transitions
   // out of "active". Without this, a revoked agent's existing token stayed
   // valid up to OAUTH_ACCESS_TOKEN_TTL_MS (24 h).
@@ -236,13 +276,32 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
       if (n > 0) logger.info(`Revoked ${n} OAuth token(s) for client ${ev.grant.clientId} after ${ev.kind}`, "HTTPTransport");
     }
   });
-  const oauthHandlers = opts.oauthEnabled && opts.oauthAdminPassword
+  const oauthHandlers = opts.oauthEnabled
     ? new OAuthHandlers(
         oauthStore,
-        { issuer, resource: `${issuer}${path}`, adminPassword: opts.oauthAdminPassword },
+        { issuer, resource: `${issuer}${path}` },
         unauthLimiter,
         opts.agentGrants
-          ? (c) => opts.agentGrants!.createPending({ clientId: c.client_id, clientName: c.client_name ?? "" })
+          ? (c) => opts.agentGrants!.createPending({ clientId: c.client_id, clientName: c.client_name ?? "", registeredFromIp: c.ip })
+          : undefined,
+        clientIp,
+        opts.serviceAccounts
+          ? (clientId, secret) => {
+              // verify() reloads from disk, so an account issued/re-issued by a
+              // separate `mailpouch agent` process is honored without a restart.
+              const acct = opts.serviceAccounts!.verify(clientId, secret);
+              if (!acct) return false;
+              // (Re)activate the grant live in the running daemon's store so a
+              // freshly-issued — or previously-revoked-then-re-issued — service
+              // account works immediately, no restart. Idempotent.
+              opts.agentGrants?.ensureActiveServiceGrant({
+                clientId: acct.clientId,
+                clientName: acct.clientName,
+                preset: acct.preset,
+                conditions: acct.conditions,
+              });
+              return true;
+            }
           : undefined,
       )
     : null;
@@ -289,26 +348,16 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
     const caller = clientIp(req);
     let tokenKey: string | null = null;
     let ok = false;
-    let isStaticBearer = false;
-    let callerClientId = "bearer:static";
-    let callerClientName = "Static bearer";
+    let callerClientId = "";
+    let callerClientName = "";
 
-    // PERM-008: when OAuth is enabled, the static bearer is NOT accepted. A
-    // static bearer authenticates as a single shared, fully-trusted identity
-    // ("bearer:static") that bypasses the per-agent grant store and the agent
-    // audit log entirely — if it leaks, every tool runs with zero per-agent
-    // attribution. OAuth deployments must use per-client tokens (DCR + grant)
-    // so each agent is independently gated, audited, and revocable. The static
-    // bearer remains available only for non-OAuth deployments.
-    if (token && opts.bearerToken && !oauthHandlers && tokenMatches(token, opts.bearerToken)) {
-      ok = true;
-      isStaticBearer = true;
-      // XPORT-001: key the static-bearer rate bucket per caller IP, not a
-      // single global "bearer:static" string. Otherwise every legitimate
-      // user of the shared token (CLI, phone, laptop) competes for one
-      // bucket and a single busy — or malicious — caller DoSes the rest.
-      tokenKey = `bearer:static:${caller}`;
-    } else if (token && oauthHandlers) {
+    // Every caller authenticates as its own OAuth client — there is no shared
+    // static-bearer bypass. Interactive agents obtain a token via
+    // authorization_code + PKCE (gated by per-agent Approve/Deny); headless
+    // agents via client_credentials (a pre-approved service account). A verified
+    // token always resolves to a real client_id that GrantManager gates and the
+    // audit log attributes.
+    if (token && oauthHandlers) {
       const rec = oauthStore.verifyToken(token);
       if (rec) {
         // Resource Indicators: if the token was bound to a resource, it
@@ -333,9 +382,10 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
         ok = true;
         tokenKey = `oauth:${rec.clientId}`;
         callerClientId = rec.clientId;
-        // Pull the human-readable client name from the DCR record when available.
-        const dcr = oauthStore.getClient(rec.clientId);
-        if (dcr?.client_name) callerClientName = dcr.client_name;
+        // Human-readable client name from the registered client record (DCR for
+        // interactive agents, service-account registration for headless ones);
+        // fall back to the opaque client_id.
+        callerClientName = oauthStore.getClient(rec.clientId)?.client_name ?? rec.clientId;
       }
     }
 
@@ -359,18 +409,47 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
 
     try {
       const body = req.method === "GET" ? undefined : await readJsonBody(req);
+
+      // Route to the per-session transport. Existing session → reuse it.
+      const sessionId = req.headers["mcp-session-id"];
+      const sid = Array.isArray(sessionId) ? sessionId[0] : sessionId;
+      let transport: StreamableHTTPServerTransport | undefined = sid ? sessions.get(sid) : undefined;
+
+      if (!transport) {
+        // No existing session. Only an `initialize` POST may open one.
+        if (req.method === "POST" && isInitializeRequest(body)) {
+          const created = new StreamableHTTPServerTransport({
+            sessionIdGenerator: () => randomUUID(),
+            onsessioninitialized: (newId) => { sessions.set(newId, created); },
+          });
+          created.onclose = () => { if (created.sessionId) sessions.delete(created.sessionId); };
+          const mcp = opts.createServer ? opts.createServer() : opts.server;
+          await mcp.connect(created);
+          transport = created;
+        } else {
+          res.statusCode = 400;
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({
+            jsonrpc: "2.0",
+            error: { code: -32000, message: "Bad Request: no valid session ID (send an initialize request first)" },
+            id: null,
+          }));
+          return;
+        }
+      }
+
       // Wrap the dispatcher in an async-local caller context so the tool
       // layer can identify the agent without threading it through every
-      // function signature. Static bearer uses a well-known clientId so
-      // the gate/audit can distinguish it from an unknown caller.
+      // function signature. callerClientId is always a real OAuth client_id
+      // (no shared-bearer identity), so the gate and audit attribute every
+      // call to a specific, revocable agent.
       await runWithCaller(
         {
           clientId: callerClientId,
           clientName: callerClientName,
           ip: caller,
-          staticBearer: isStaticBearer,
         },
-        async () => { await transport.handleRequest(req, res, body); },
+        async () => { await transport!.handleRequest(req, res, body); },
       );
     } catch (err: unknown) {
       logger.error("HTTP transport request failed", "HttpTransport", err);
@@ -409,7 +488,10 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
     close: async () => {
       clearInterval(sweep);
       unsubGrantChanges();
-      try { await transport.close(); } catch { /* best effort */ }
+      for (const t of sessions.values()) {
+        try { await t.close(); } catch { /* best effort */ }
+      }
+      sessions.clear();
       await new Promise<void>((resolve) => server.close(() => resolve()));
     },
   };

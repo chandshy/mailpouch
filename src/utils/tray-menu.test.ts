@@ -37,6 +37,25 @@ describe("buildSettingsTrayMenu — Settings-UI enable/disable toggle", () => {
     expect(open?.label).toBe("Open Settings");
   });
 
+  it("surfaces the unavailable reason in the tooltip + a disabled item when the UI is off with a reason", () => {
+    const { items, tooltip } = buildSettingsTrayMenu({
+      ...base, settingsEnabled: false, settingsUrl: "", settingsUnavailableReason: "port 8765 in use",
+    });
+    expect(tooltip).toContain("Settings UI off: port 8765 in use");
+    const note = byId(items, "settings-unavailable");
+    expect(note?.enabled).toBe(false);
+    expect(note?.label).toContain("port 8765 in use");
+    expect(byId(items, "open")).toBeUndefined();
+  });
+
+  it("does NOT show the unavailable note when the UI is up, even if a stale reason is passed", () => {
+    const { items, tooltip } = buildSettingsTrayMenu({
+      ...base, settingsEnabled: true, settingsUrl: "http://localhost:8766", settingsUnavailableReason: "stale",
+    });
+    expect(byId(items, "settings-unavailable")).toBeUndefined();
+    expect(tooltip).not.toContain("Settings UI off");
+  });
+
   it("UI-005/UI-007: never offers 'Open Settings' for an enabled-but-urlless state", () => {
     // The _settingsEnabled === !!_settingsUrl invariant should hold upstream, but
     // the menu must fail safe even if it's momentarily violated.

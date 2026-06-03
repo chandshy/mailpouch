@@ -12,6 +12,21 @@
  * callers should log the raw error separately (the dispatcher already does).
  */
 
+/**
+ * A connection/credential problem the OPERATOR must fix (e.g. wrong Bridge
+ * password, Bridge not running). Its message is written for a human and is
+ * surfaced VERBATIM to the MCP client (safeErrorMessage passes it through), so
+ * the agent — and through it the user — gets actionable guidance instead of an
+ * opaque "IMAP operation failed". Thrown from the connection chokepoints; not
+ * reclassified.
+ */
+export class ConnectionStateError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ConnectionStateError";
+  }
+}
+
 /** Stable, machine-stable error categories surfaced to callers. */
 export type ErrorCategory =
   | "not_found" // a folder/label/mailbox does not exist
@@ -95,10 +110,15 @@ export function classifyError(
   if (
     shape.authenticationFailed === true ||
     code === "AUTHENTICATIONFAILED" ||
+    code === "EAUTH" ||
     hay.includes("authenticationfailed") ||
     hay.includes("authentication failed") ||
     hay.includes("invalid credentials") ||
-    hay.includes("login failed")
+    hay.includes("login failed") ||
+    // Proton Bridge's exact local-login rejections.
+    hay.includes("incorrect login credentials") ||
+    hay.includes("no such user") ||
+    hay.includes("invalid username or password")
   ) {
     return {
       category: "auth",

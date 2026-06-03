@@ -12,6 +12,7 @@
 
 import { ImapFlow } from "imapflow";
 import { buildMime, type SeedEmail } from "../support/mime-builder.js";
+import { assertScratch } from "../support/scratch.js";
 
 export interface ImapFixturesOptions {
   host: string;
@@ -20,6 +21,17 @@ export interface ImapFixturesOptions {
   pass: string;
   /** Folders that should never be deleted by wipe(). */
   protectedFolders?: string[];
+  /** TLS options for the imapflow STARTTLS upgrade. Bridge serves a self-signed
+   *  cert with CN=127.0.0.1 but is reached via host `localhost`, so a bare
+   *  client fails (self-signed, then ALTNAME). Pass the production
+   *  buildBridgeTlsOptions(cert) here in Bridge mode. Undefined = Greenmail
+   *  (no special TLS needed). */
+  tls?: Record<string, unknown>;
+  /** Gate on the DESTRUCTIVE wipe(). wipe() empties INBOX/Sent/Archive/Trash/
+   *  Spam/Drafts and deletes every other folder — safe only against a
+   *  disposable mailbox (Greenmail, or an explicitly-confirmed test account).
+   *  Must be true for wipe() to run. */
+  allowWipe?: boolean;
 }
 
 /**
@@ -51,6 +63,10 @@ export class ImapFixtures {
       secure: false,
       auth: { user: this.opts.user, pass: this.opts.pass },
       logger: false,
+      // Bridge's self-signed CN=127.0.0.1 cert (reached via localhost) needs
+      // the production TLS handling (pin cert as CA + skip hostname); Greenmail
+      // leaves this undefined.
+      ...(this.opts.tls ? { tls: this.opts.tls } : {}),
     });
   }
 
@@ -156,27 +172,103 @@ export class ImapFixtures {
     return this.appendEmail(folder, buildMime(seed), flags);
   }
 
+  /** Delete a mailbox. Used by the safe-gate cleanup (which guards the path). */
+  async deleteMailbox(path: string): Promise<void> {
+    await this.withReconnect(async () => { await this.client.mailboxDelete(path); });
+  }
+
+  /** SAFE seed: APPEND only into a token-bearing scratch folder. Refuses any
+   *  non-scratch folder so the safe gate can never write into real mail. */
+  async appendScratch(folder: string, token: string, seed: SeedEmail, flags: string[] = []): Promise<number> {
+    assertScratch(folder, token);
+    return this.appendSeed(folder, seed, flags);
+  }
+
+  /** Move EVERY message in `folder` to Trash. Used by safe-gate cleanup: on
+   *  Proton, deleting a folder strands its messages in the unpurgeable All Mail
+   *  union, so we relocate them to Trash (deletable) first. The caller guards
+   *  that `folder` is a scratch folder. */
+  async emptyToTrash(folder: string): Promise<void> {
+    try { await this.createMailbox("Trash"); } catch { /* Bridge has it; Greenmail may need it */ }
+    await this.withReconnect(async () => {
+      const lock = await this.client.getMailboxLock(folder);
+      try {
+        // Empty folder → nothing to move (and FETCH 1:* would throw on Bridge).
+        if (this.client.mailbox && (this.client.mailbox as { exists?: number }).exists === 0) return;
+        const uids: number[] = [];
+        for await (const msg of this.client.fetch("1:*", { uid: true }, { uid: false })) {
+          if (typeof msg.uid === "number") uids.push(msg.uid);
+        }
+        if (uids.length) await this.client.messageMove(uids, "Trash", { uid: true });
+      } finally { lock.release(); }
+    });
+  }
+
+  /** Permanently delete Trash messages whose Message-ID contains `marker`
+   *  (e.g. `@test.local`). On Proton this also clears them from the All Mail
+   *  union. Only test-seed messages match — real mail never carries the marker. */
+  async purgeTrash(marker: string): Promise<void> {
+    await this.withReconnect(async () => {
+      const lock = await this.client.getMailboxLock("Trash");
+      try {
+        const uids = await this.client.search({ header: { "message-id": marker } }, { uid: true });
+        if (Array.isArray(uids) && uids.length) await this.client.messageDelete(uids, { uid: true });
+      } finally { lock.release(); }
+    });
+  }
+
   /** Return the UIDs present in `folder`, sorted ascending. Reconnects
    *  before fetching so the SELECT sees the latest server state — mailpouch
    *  shares the same Greenmail user and its mutations would otherwise be
    *  invisible to a stale persistent SELECT. */
   async listUids(folder: string): Promise<number[]> {
-    await this.reconnect();
-    const lock = await this.client.getMailboxLock(folder);
-    try {
-      const uids: number[] = [];
-      for await (const msg of this.client.fetch("1:*", { uid: true }, { uid: false })) {
-        if (typeof msg.uid === "number") uids.push(msg.uid);
+    // withReconnect retries once on a transient "Command failed"/"NoConnection"
+    // — Bridge can leave the client wedged right after mailpouch mutates the
+    // folder (move/expunge). reconnect() first forces a fresh SELECT so we see
+    // the latest server state.
+    return this.withReconnect(async () => {
+      await this.reconnect();
+      const lock = await this.client.getMailboxLock(folder);
+      try {
+        // Bridge throws "Command failed" on FETCH 1:* against an EMPTY mailbox
+        // (the state of a move SOURCE after a successful relocation). The SELECT
+        // that getMailboxLock just performed gives the count — short-circuit.
+        if ((this.client.mailbox && (this.client.mailbox as { exists?: number }).exists === 0)) return [];
+        const uids: number[] = [];
+        for await (const msg of this.client.fetch("1:*", { uid: true }, { uid: false })) {
+          if (typeof msg.uid === "number") uids.push(msg.uid);
+        }
+        return uids.sort((a, b) => a - b);
+      } finally {
+        lock.release();
       }
-      return uids.sort((a, b) => a - b);
-    } finally {
-      lock.release();
-    }
+    });
   }
 
   /** Number of messages in `folder`. */
   async messageCount(folder: string): Promise<number> {
     return (await this.listUids(folder)).length;
+  }
+
+  /** ScratchImap alias for messageCount — used by cleanup to verify a folder is
+   *  empty before deleting it (so a no-op move can never orphan mail). */
+  async countMessages(folder: string): Promise<number> {
+    return this.messageCount(folder);
+  }
+
+  /** UIDs in `folder` whose Subject header contains `substr` (server-side
+   *  SEARCH). Used to locate a self-seeded, token-subjected message inside the
+   *  All Mail union for the Bug-A move-out-of-All-Mail test. */
+  async searchSubject(folder: string, substr: string): Promise<number[]> {
+    return this.withReconnect(async () => {
+      const lock = await this.client.getMailboxLock(folder);
+      try {
+        const uids = await this.client.search({ header: { subject: substr } }, { uid: true });
+        return Array.isArray(uids) ? uids : [];
+      } finally {
+        lock.release();
+      }
+    });
   }
 
   /** Return the IMAP flags set on a specific UID in `folder`, or null if not found.
@@ -237,6 +329,18 @@ export class ImapFixtures {
    * last. We never delete protected names.
    */
   async wipe(): Promise<void> {
+    // SAFETY: wipe() is destructive — it empties INBOX/Sent/Archive/Trash/Spam/
+    // Drafts and deletes every other folder. It must NEVER run against a real
+    // mailbox. Refuse unless the caller explicitly confirmed a disposable target
+    // (Greenmail, or MAILPOUCH_E2E_ALLOW_WIPE=1 for a throwaway Proton account).
+    if (this.opts.allowWipe !== true) {
+      throw new Error(
+        `ImapFixtures.wipe() refused: this empties INBOX/Sent/Archive/Trash/Spam/Drafts and ` +
+        `deletes all other folders on ${this.opts.user}@${this.opts.host}. It only runs against a ` +
+        `DISPOSABLE mailbox. Greenmail sets allowWipe automatically; for Bridge set ` +
+        `MAILPOUCH_E2E_ALLOW_WIPE=1 ONLY when pointed at a throwaway test account — never your real one.`,
+      );
+    }
     // Ensure each protected mailbox exists, then empty it. Greenmail starts
     // with only INBOX — the rest are created lazily by tests, so we create
     // them here so subsequent assertions can lock/list them safely.
