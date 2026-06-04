@@ -4,11 +4,9 @@
  */
 
 import nodemailer from "nodemailer";
-import { readFileSync, statSync } from "fs";
-import { join as pathJoin } from "path";
 import { ProtonMailConfig, SendEmailOptions } from "../types/index.js";
 import { logger } from "../utils/logger.js";
-import { buildBridgeTlsOptions, readPinnedBridgeCert } from "./bridge-tls.js";
+import { buildBridgeTlsConfig } from "./bridge-tls.js";
 import { parseEmails, parseEmailsDetailed, isValidEmail, sanitizeForLog, validateAttachmentLimits } from "../utils/helpers.js";
 import { tracer } from "../utils/tracer.js";
 import { classifyError } from "../utils/error-classify.js";
@@ -84,10 +82,13 @@ export class SMTPService {
     this.transporter = null;
     this.insecureTls = false;
 
-    // Check if using localhost (Proton Bridge)
+    // Check if using localhost (Proton Bridge). Include IPv6 loopback ::1 to
+    // match the IMAP path + buildBridgeTlsConfig — otherwise host "::1" falls
+    // through to full-validation TLS against Bridge's self-signed cert and fails.
     const isLocalhost =
       this.config.smtp.host === "localhost" ||
-      this.config.smtp.host === "127.0.0.1";
+      this.config.smtp.host === "127.0.0.1" ||
+      this.config.smtp.host === "::1";
 
     // Prefer SMTP token over password for direct (non-Bridge) connections
     const authPassword = !isLocalhost && this.config.smtp.smtpToken
@@ -98,87 +99,33 @@ export class SMTPService {
       this.config.smtp.allowInsecureBridge === true ||
       process.env.MAILPOUCH_INSECURE_BRIDGE === "1";
 
-    // Build TLS options based on connection type
+    // TLS config via the SHARED bridge-tls decision (same as the IMAP path) so the
+    // pinned-cert / insecure-fallback contract can't diverge between transports.
+    // SMTP keeps its deferred-init semantics: a secure-config-impossible error is
+    // stashed (not thrown) so the MCP server stays up and sendEmail() surfaces it.
     let tlsOptions: Record<string, unknown>;
-    if (isLocalhost) {
-      const certPath = this.config.smtp.bridgeCertPath;
-      if (certPath) {
-        // If a directory was given, look for cert.pem inside it
-        let resolvedCertPath = certPath;
-        try {
-          if (statSync(certPath).isDirectory()) {
-            resolvedCertPath = pathJoin(certPath, "cert.pem");
-            logger.info(`SMTP: Directory given for cert path — resolved to ${resolvedCertPath}`, "SMTPService");
-          }
-        } catch { /* stat failed — let readFileSync produce the real error below */ }
-        // Load the exported Bridge certificate — proper trust without disabling validation
-        try {
-          const bridgeCert = readPinnedBridgeCert(resolvedCertPath);
-          tlsOptions = buildBridgeTlsOptions(bridgeCert);
-          logger.info(`SMTP: Using exported Bridge certificate for TLS trust (${resolvedCertPath})`, "SMTPService");
-        } catch (err: unknown) {
-          // Robust message extraction: if a non-Error is thrown (string,
-          // object, etc.), (err as Error).message yields undefined and the
-          // diagnostic reads "Underlying error: undefined".
-          const errMsg = err instanceof Error ? err.message : String(err);
-          if (!allowInsecure) {
-            // Deferred failure: stash an actionable message, log a loud
-            // warning, return without building a transporter. sendEmail()
-            // surfaces this to the caller; the MCP server stays up.
-            this.initError =
-              `SMTP: Bridge cert at "${resolvedCertPath}" could not be loaded and allowInsecureBridge is not set. ` +
-              `Fix the cert path in Settings → Connection, or set allowInsecureBridge: true ` +
-              `(or MAILPOUCH_INSECURE_BRIDGE=1) to opt into the legacy insecure behavior. ` +
-              `Underlying error: ${errMsg}`;
-            logger.warn(
-              `SMTP init deferred: ${this.initError} ` +
-              "Send attempts will fail with this message until the user fixes the config and reinitialize() runs.",
-              "SMTPService",
-            );
-            return;
-          }
-          logger.warn(
-            `SMTP: Failed to load Bridge cert at "${resolvedCertPath}" — running with TLS validation DISABLED (allowInsecureBridge is set). ` +
-            "Export a fresh cert from Bridge → Help → Export TLS Certificate and update Settings → Connection to re-secure.",
-            "SMTPService",
-            err
-          );
-          tlsOptions = { rejectUnauthorized: false, minVersion: "TLSv1.2" };
-          this.insecureTls = true;
-        }
-      } else if (this.config.smtp.username) {
-        // Credentials are loaded — this is a real connection attempt.
-        if (!allowInsecure) {
-          // Deferred failure — same rationale as the cert-load branch above.
-          this.initError =
-            "SMTP: No Bridge certificate configured. Export the cert from Bridge → Help → Export TLS Certificate " +
-            "and set 'bridgeCertPath' in Settings → Connection. To opt into the legacy behavior (TLS validation " +
-            "disabled for localhost), set allowInsecureBridge: true or launch with MAILPOUCH_INSECURE_BRIDGE=1.";
-          logger.warn(
-            `SMTP init deferred: ${this.initError} ` +
-            "Send attempts will fail with this message until the user fixes the config and reinitialize() runs.",
-            "SMTPService",
-          );
-          return;
-        }
-        logger.warn(
-          "SMTP: No Bridge certificate configured and allowInsecureBridge is set — " +
-          "TLS certificate validation DISABLED for localhost. Export the cert from Bridge → Help → " +
-          "Export TLS Certificate and clear the insecure flag to re-secure.",
-          "SMTPService"
-        );
-        tlsOptions = { rejectUnauthorized: false, minVersion: "TLSv1.2" };
-        this.insecureTls = true;
-      } else {
-        // Pre-config constructor call — credentials haven't loaded yet. Skip the hard
-        // check until reinitialize() runs after main() populates the config.
-        logger.debug("SMTP: transporter pre-initialized (no config loaded yet — reinitialize() will be called after config loads)", "SMTPService");
-        tlsOptions = { rejectUnauthorized: false, minVersion: "TLSv1.2" };
-        this.insecureTls = true;
-      }
+    if (isLocalhost && !this.config.smtp.bridgeCertPath && !this.config.smtp.username) {
+      // Pre-config constructor call — credentials haven't loaded yet. Soft insecure;
+      // reinitialize() runs the real check once main() populates the config.
+      logger.debug("SMTP: transporter pre-initialized (no config loaded yet — reinitialize() will be called after config loads)", "SMTPService");
+      tlsOptions = { rejectUnauthorized: false, minVersion: "TLSv1.2" };
+      this.insecureTls = true;
     } else {
-      // Non-localhost: full certificate validation required
-      tlsOptions = { minVersion: "TLSv1.2" };
+      try {
+        const cfg = buildBridgeTlsConfig(this.config.smtp.host, this.config.smtp.bridgeCertPath, allowInsecure);
+        tlsOptions = cfg.tlsOptions;
+        this.insecureTls = cfg.insecure;
+        for (const l of cfg.logs) logger[l.level](`SMTP: ${l.msg}`, "SMTPService");
+      } catch (err: unknown) {
+        // Deferred failure: stash the actionable message, keep the server up.
+        this.initError = `SMTP: ${err instanceof Error ? err.message : String(err)}`;
+        logger.warn(
+          `SMTP init deferred: ${this.initError} ` +
+          "Send attempts will fail with this message until the user fixes the config and reinitialize() runs.",
+          "SMTPService",
+        );
+        return;
+      }
     }
 
     // requireTLS forces nodemailer to issue STARTTLS and reject the

@@ -138,6 +138,22 @@ All five flagged REBUILD; the search path had the most accumulated debt of any s
 - **`searchSingleFolder`** validates its folder name defensively (private, but a bad name must fail clearly, not via a cryptic lock error).
 - **FTS `sinceEpoch`:** was a post-`LIMIT` filter → under-returned. Pushed into the SQL `WHERE` (all three query paths) so the date floor applies before `LIMIT`.
 
+## Phase 6 — Drafts & Send (`refactor/phase6-drafts-send`)
+
+| Function | File | Avg | Verdict |
+|---|---|---|---|
+| `saveDraft` | simple-imap-service.ts | 9.5 | PASS |
+| `sendEmail` | smtp-service.ts | 9.3 | PASS |
+| SMTP connect/TLS | smtp-service.ts | 8.4 | REBUILT → PASS¹ |
+| `send_email`/`reply_to_email`/`forward_email` tools | sending.ts | 8.6 | REBUILT → PASS² |
+| reply/forward handlers | sending.ts | 6.8 | REBUILT → PASS² |
+
+**Scope-check — Proton-native scheduled-send (create/cancel):** OUT OF SCOPE. Creating/cancelling a Proton-NATIVE scheduled send requires Proton's private REST API (no public API — see [[project_proton_roadmap]]); Bridge IMAP/SMTP can't. mailpouch already covers future delivery correctly via its OWN scheduler (`schedule_email`/`cancel_scheduled_email`/`list_scheduled_emails`, deferred SMTP) plus read-only `list_proton_scheduled` (reads the "All Scheduled" IMAP folder). No build.
+
+¹ **Rebuilt — the Phase-0 follow-up + a real bug:** SMTP had a 4th inline copy of the Bridge-TLS decision tree that didn't reuse `buildBridgeTlsConfig`, AND it omitted IPv6 loopback `::1` from its localhost check (host `::1` → full-validation TLS against Bridge's self-signed cert → connection failure). Refactored `initializeTransporter` to call `buildBridgeTlsConfig` (kills the 4th copy + fixes `::1` in one move), preserving SMTP's deferred-init via try/catch. Also fixed the same `::1` omission in the IMAP IDLE socket path.
+
+² **Rebuilt:** `forward_email` dropped the original `inReplyTo`/`references` (broke thread continuity — `reply_to_email` carried them); now threaded. The embedded original From/To in the quoted header are CRLF-stripped. Both reply + forward now LOG a `setFlag` (`\Answered`/`$Forwarded`) failure instead of silently swallowing it.
+
 ### PR #192 reviewer fixes (CodeQL + Copilot)
 - `stripHtml` block-strip now matches `</script\s*>` / `</style\s*>` (trailing
   whitespace close tag could bypass the strip — CodeQL bad-HTML-filtering).

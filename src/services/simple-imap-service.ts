@@ -3040,7 +3040,7 @@ export class SimpleIMAPService {
     // throws in the same situation. Mirror that contract here: if the
     // operator pinned a cert OR set localhost without an insecure opt-in,
     // refuse to bring up the IDLE socket downgraded.
-    const isLocalhost = cfg.host === 'localhost' || cfg.host === '127.0.0.1';
+    const isLocalhost = cfg.host === 'localhost' || cfg.host === '127.0.0.1' || cfg.host === '::1';
     const allowInsecure = cfg.allowInsecureBridge
       || process.env.MAILPOUCH_INSECURE_BRIDGE === '1';
     // Same TLS decision as connect(), but IDLE ABORTS (rather than throwing)

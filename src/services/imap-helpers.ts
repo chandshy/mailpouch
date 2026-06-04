@@ -215,7 +215,13 @@ export function buildEmailMessage(
         )
       : undefined,
     inReplyTo: parsed.inReplyTo,
-    references: parsed.references,
+    // mailparser returns a single string for a one-reference message and an
+    // array for multiple. EmailMessage.references is string[], and sendEmail
+    // calls .map() on it — normalize so a single-reference forward/reply can't
+    // crash with "references.map is not a function".
+    references: parsed.references === undefined
+      ? undefined
+      : Array.isArray(parsed.references) ? parsed.references : [parsed.references],
     isAnswered: message.flags?.has("\\Answered") ?? false,
     // Bridge marks a forward with the `$Forwarded` keyword (what our own
     // forward setter writes) or the standard `\Forwarded` — NOT `\Forward`,
