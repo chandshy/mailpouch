@@ -148,12 +148,15 @@ export class FtsIndexService {
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
       ),
       remove: this.db.prepare(`DELETE FROM messages WHERE id = ?`),
+      // `date_epoch >= ?` lives in the WHERE so the date floor is applied BEFORE
+      // the LIMIT (a post-LIMIT filter under-returns). Binding 0 when no
+      // sinceEpoch is supplied matches everything (epochs are non-negative).
       searchAll: this.db.prepare(
         `SELECT id, subject, "from", "to", folder, body, date_epoch,
                 bm25(messages) AS score,
                 snippet(messages, 5, '[[', ']]', '…', 12) AS snippet
            FROM messages
-          WHERE messages MATCH ?
+          WHERE messages MATCH ? AND date_epoch >= ?
           ORDER BY score
           LIMIT ?`,
       ),
@@ -162,7 +165,7 @@ export class FtsIndexService {
                 bm25(messages) AS score,
                 snippet(messages, 5, '[[', ']]', '…', 12) AS snippet
            FROM messages
-          WHERE messages MATCH ? AND folder = ?
+          WHERE messages MATCH ? AND folder = ? AND date_epoch >= ?
           ORDER BY score
           LIMIT ?`,
       ),
@@ -245,6 +248,9 @@ export class FtsIndexService {
   search(opts: FtsSearchOptions): FtsHit[] {
     const limit = Math.min(Math.max(1, opts.limit ?? 20), 200);
     const folder = opts.folder?.trim();
+    // Date floor pushed into every query's WHERE (not a post-LIMIT filter, which
+    // would under-return). 0 = no floor (epochs are non-negative).
+    const sinceFloor = typeof opts.sinceEpoch === "number" ? opts.sinceEpoch : 0;
     // Folder allowlist short-circuit: an explicit empty array means "the
     // caller has no folder grants" — return zero hits without touching SQL.
     if (Array.isArray(opts.allowedFolders) && opts.allowedFolders.length === 0) {
@@ -271,21 +277,22 @@ export class FtsIndexService {
                 bm25(messages) AS score,
                 snippet(messages, 5, '[[', ']]', '…', 12) AS snippet
            FROM messages
-          WHERE messages MATCH ? AND folder COLLATE NOCASE IN (${placeholders})${single}
+          WHERE messages MATCH ? AND folder COLLATE NOCASE IN (${placeholders})${single} AND date_epoch >= ?
           ORDER BY score
           LIMIT ?`;
       const stmt = this.db.prepare(sql);
       const params: unknown[] = [opts.query, ...opts.allowedFolders];
       if (folder) params.push(folder);
+      params.push(sinceFloor);
       params.push(limit);
       hits = this.runMatch(stmt, params);
     } else {
       hits = folder
-        ? this.runMatch(this.stmts.searchFolder, [opts.query, folder, limit])
-        : this.runMatch(this.stmts.searchAll, [opts.query, limit]);
+        ? this.runMatch(this.stmts.searchFolder, [opts.query, folder, sinceFloor, limit])
+        : this.runMatch(this.stmts.searchAll, [opts.query, sinceFloor, limit]);
     }
     const rows = hits as Array<Record<string, unknown>>;
-    let mapped: FtsHit[] = rows.map(r => ({
+    const mapped: FtsHit[] = rows.map(r => ({
       id: String(r.id ?? ""),
       subject: String(r.subject ?? ""),
       from: String(r.from ?? ""),
@@ -296,9 +303,7 @@ export class FtsIndexService {
       score: typeof r.score === "number" ? r.score : Number(r.score ?? 0),
       snippet: String(r.snippet ?? ""),
     }));
-    if (typeof opts.sinceEpoch === "number") {
-      mapped = mapped.filter(h => h.dateEpoch >= (opts.sinceEpoch ?? 0));
-    }
+    // sinceEpoch now applied in SQL WHERE (before LIMIT) — no post-filter.
     return mapped;
   }
 

@@ -1200,6 +1200,10 @@ export class SimpleIMAPService {
    */
   private async searchSingleFolder(folder: string, options: SearchEmailOptions, limit: number): Promise<EmailMessage[]> {
     if (!this.client) return [];
+    // Defensive: searchEmails validates folders, but this is private and could be
+    // reached by a future caller — a bad name must fail clearly, not via a cryptic
+    // getMailboxLock error (or a path-traversal/CRLF reaching the IMAP wire).
+    this.validateFolderName(folder);
     const lock = await this.client.getMailboxLock(folder);
 
     try {
@@ -1296,30 +1300,40 @@ export class SimpleIMAPService {
     return tracer.span('imap.searchEmails', tags, async () => {
     logger.debug('Searching emails', 'IMAPService', options);
 
+    // IMAP-012: a connection failure must NOT be reported as an empty result set
+    // (indistinguishable from "no matches"). Throw, matching getFolders/getEmails.
     try {
       await this.ensureConnection();
     } catch (error) {
-      logger.warn('IMAP not connected', 'IMAPService');
-      return [];
+      throw new IMAPNotConnectedError('Cannot search emails: IMAP connection unavailable');
     }
-
     if (!this.client) {
-      logger.warn('IMAP client not available', 'IMAPService');
-      return [];
+      throw new IMAPNotConnectedError('Cannot search emails: IMAP client not available');
     }
 
     const limit = Math.min(Math.max(1, options.limit || 100), 200);
+    const FOLDER_CAP = 20;
+    // hasAttachment is a LOCAL post-filter (IMAP SEARCH can't express it). To
+    // avoid grossly under-returning below `limit`, over-fetch the per-folder
+    // candidate window when it's set, then filter, then slice to `limit`.
+    const perFolderLimit = options.hasAttachment !== undefined ? 200 : limit;
+    const applyAttachmentFilter = (xs: EmailMessage[]): EmailMessage[] =>
+      options.hasAttachment !== undefined ? xs.filter(e => e.hasAttachment === options.hasAttachment) : xs;
 
     // Determine which folders to search
     let foldersToSearch: string[];
     if (options.folders && options.folders.length > 0) {
       if (options.folders[0] === '*' || options.folders[0] === 'all') {
-        // Search all available folders (capped at 20 to prevent abuse)
         const allFolders = await this.getFolders();
-        foldersToSearch = allFolders.slice(0, 20).map(f => f.path);
+        foldersToSearch = allFolders.slice(0, FOLDER_CAP).map(f => f.path);
+        if (allFolders.length > FOLDER_CAP) {
+          logger.warn(`Search across all folders truncated to the first ${FOLDER_CAP} of ${allFolders.length} — results may be incomplete`, 'IMAPService');
+        }
       } else {
-        // Cap at 20 explicit folders
-        foldersToSearch = options.folders.slice(0, 20);
+        if (options.folders.length > FOLDER_CAP) {
+          logger.warn(`Search folder list truncated to the first ${FOLDER_CAP} of ${options.folders.length} requested`, 'IMAPService');
+        }
+        foldersToSearch = options.folders.slice(0, FOLDER_CAP);
       }
     } else {
       // Single folder — original behaviour (defaults to INBOX)
@@ -1333,32 +1347,31 @@ export class SimpleIMAPService {
 
     try {
       if (foldersToSearch.length === 1) {
-        // Fast path: no merging needed
-        const results = await this.searchSingleFolder(foldersToSearch[0], options, limit);
-        const filtered = options.hasAttachment !== undefined
-          ? results.filter(e => e.hasAttachment === options.hasAttachment)
-          : results;
+        // Fast path: no merging needed. Filter BEFORE the limit slice so an
+        // attachment filter can't silently under-return.
+        const results = await this.searchSingleFolder(foldersToSearch[0], options, perFolderLimit);
+        const filtered = applyAttachmentFilter(results).slice(0, limit);
         tags.resultCount = filtered.length;
         logger.info(`Search found ${filtered.length} emails`, 'IMAPService');
         return filtered;
       }
 
-      // Multi-folder: search each, merge, sort by date desc, apply limit
+      // Multi-folder: search each, merge, sort by date desc, filter, then limit.
       const settled = await Promise.allSettled(
-        foldersToSearch.map(f => this.searchSingleFolder(f, options, limit))
+        foldersToSearch.map(f => this.searchSingleFolder(f, options, perFolderLimit))
       );
 
       const merged: EmailMessage[] = [];
-      for (const r of settled) {
+      settled.forEach((r, i) => {
         if (r.status === 'fulfilled') merged.push(...r.value);
-      }
+        // Don't silently swallow a per-folder failure — surface which folder failed.
+        else logger.warn(`Search failed for folder '${foldersToSearch[i]}': ${r.reason instanceof Error ? r.reason.message : String(r.reason)}`, 'IMAPService');
+      });
 
       merged.sort((a, b) => b.date.getTime() - a.date.getTime());
 
-      const limited = merged.slice(0, limit);
-      const filtered = options.hasAttachment !== undefined
-        ? limited.filter(e => e.hasAttachment === options.hasAttachment)
-        : limited;
+      // Filter by attachment BEFORE applying the limit (was sliced first → under-return).
+      const filtered = applyAttachmentFilter(merged).slice(0, limit);
 
       tags.resultCount = filtered.length;
       logger.info(`Multi-folder search found ${filtered.length} emails across ${foldersToSearch.length} folders`, 'IMAPService');
