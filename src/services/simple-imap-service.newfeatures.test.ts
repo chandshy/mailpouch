@@ -806,21 +806,20 @@ describe("SimpleIMAPService.searchEmails (multi-folder)", () => {
     expect(mockClient.getMailboxLock).toHaveBeenCalledTimes(2);
   });
 
-  it("returns [] when ensureConnection throws", async () => {
+  it("throws (not []) when ensureConnection fails (IMAP-012)", async () => {
     const svc = new SimpleIMAPService();
     vi.spyOn(svc as any, "ensureConnection").mockRejectedValue(new Error("no config"));
 
-    const results = await svc.searchEmails({ folder: "INBOX" });
-    expect(results).toEqual([]);
+    // A connection failure must not masquerade as "no matches".
+    await expect(svc.searchEmails({ folder: "INBOX" })).rejects.toThrow(/Cannot search emails/);
   });
 
-  it("returns [] when client is null after ensureConnection", async () => {
+  it("throws (not []) when client is null after ensureConnection (IMAP-012)", async () => {
     const svc = new SimpleIMAPService();
     vi.spyOn(svc as any, "ensureConnection").mockResolvedValue(undefined);
     (svc as any).client = null;
 
-    const results = await svc.searchEmails({ folder: "INBOX" });
-    expect(results).toEqual([]);
+    await expect(svc.searchEmails({ folder: "INBOX" })).rejects.toThrow(/Cannot search emails/);
   });
 
   it("applies hasAttachment filter to single-folder results", async () => {
@@ -864,6 +863,30 @@ describe("SimpleIMAPService.searchEmails (multi-folder)", () => {
     // Multi-folder search with hasAttachment=false filter — email 100 has hasAttachment=true, so filtered out
     const results = await svc.searchEmails({ folders: ["INBOX", "Sent"], hasAttachment: false });
     expect(results).toEqual([]);
+  });
+
+  it("does not under-return below limit when hasAttachment filters early matches (over-fetch)", async () => {
+    const svc = new SimpleIMAPService();
+    vi.spyOn(svc as any, "ensureConnection").mockResolvedValue(undefined);
+    const lockObj = { release: vi.fn() };
+    // SEARCH returns 6 UIDs; the first 4 have NO attachment, the last 2 do.
+    const mockClient = {
+      getMailboxLock: vi.fn().mockResolvedValue(lockObj),
+      search: vi.fn().mockResolvedValue([1, 2, 3, 4, 5, 6]),
+    };
+    (svc as any).client = mockClient;
+    for (const uid of [1, 2, 3, 4, 5, 6]) {
+      (svc as any).setCacheEntry(String(uid), {
+        id: String(uid), folder: "INBOX", from: "a@b.com", to: [], subject: "S",
+        body: "B", date: new Date(), isRead: false, isStarred: false,
+        hasAttachment: uid >= 5, isHtml: false,
+      });
+    }
+    // limit=2, hasAttachment=true. The OLD code limited the IMAP window to 2
+    // (UIDs 1,2 — both attachment-less) then filtered to ZERO. The over-fetch
+    // must instead return the 2 attachment-bearing messages.
+    const results = await svc.searchEmails({ folder: "INBOX", hasAttachment: true, limit: 2 });
+    expect(results.map(e => e.id).sort()).toEqual(["5", "6"]);
   });
 
   it("re-throws when searchSingleFolder throws (outer catch block)", async () => {

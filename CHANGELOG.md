@@ -23,6 +23,10 @@ Bridge-capability program (subsystem-by-subsystem TDD redesign + per-function ul
 - **Forwarded flag:** reads `$Forwarded`/`\Forwarded` (the setter's flag) instead of the non-existent `\Forward`, which always read back as not-forwarded.
 - **`download_attachment` memory safety:** the oversize guard now checks the actual resolved byte length (the stale-metadata path could OOM); re-maps by filename if the re-fetch attachment order drifts.
 - **`bulk_copy` failure messages** now carry the source folder, matching `bulk_move`.
+- **`search_emails` no longer returns `[]` on a connection failure** (IMAP-012) — it throws, so a connection drop is distinguishable from "no matches".
+- **`search_emails` `hasAttachment` no longer under-returns** below the requested limit — the local attachment filter now runs before the limit (with a bounded over-fetch) instead of after; per-folder failures and folder-cap truncation are logged instead of silent; `searchSingleFolder` validates its folder defensively.
+- **`fts_search` `sinceEpoch` is applied in SQL before `LIMIT`** (was a post-`LIMIT` filter that could return far fewer than the limit).
+- **Bridge `SEARCH BODY/TEXT` docs reconciled** — `body`/`text` search criteria are wired and exposed (the limitation note was pre-Phase-0 stale).
 
 ## [3.0.73] — 2026-06-03
 

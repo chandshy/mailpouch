@@ -183,9 +183,9 @@ Bridge implements standard IMAP SEARCH. The MCP server uses the following search
 | `FLAGGED` | `options.isStarred` |
 | `UID <range>` | Used internally for all UID-based operations |
 
+**Body / full-text search:** `options.body` → IMAP `SEARCH BODY` and `options.text` → `SEARCH TEXT` (header + body) ARE now mapped in the MCP server's search criteria (`buildSearchCriteria`) and exposed on `search_emails`. Both are sanitized (CRLF/quote-stripped, length-capped). Server-side effectiveness depends on the Bridge/Gluon build's `SEARCH BODY/TEXT` support; the local **FTS index** (`fts_search`) remains the more reliable, ranked full-text path when the index is populated.
+
 **Limitations:**
-- `BODY` (full-text search) is not implemented in the MCP server's search criteria
-- `TEXT` (header + body) search is not implemented
 - `X-GM-LABELS` (Gmail extension) is not supported by Bridge
 - Search results are limited to the first N UIDs fetched; results are then enriched by individual `getEmailById` calls
 - Multi-folder search works by searching each folder sequentially and merging results, capped at 20 folders

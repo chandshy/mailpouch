@@ -108,6 +108,20 @@ describeMaybe("FtsIndexService", () => {
     expect(hits.map(h => h.id)).toEqual(["new"]);
   });
 
+  it("applies sinceEpoch BEFORE the limit (no under-return)", () => {
+    const base = 1_700_000_000;
+    // 5 old (excluded) then 5 recent (included). With the date floor applied
+    // post-LIMIT, a limit of 5 would fill with the 5 old rows and then filter to
+    // ZERO. Applied in the WHERE (pre-LIMIT), it must return the 5 recent ones.
+    svc.upsertMany([
+      ...Array.from({ length: 5 }, (_, i) => sampleRecord({ id: `old${i}`, dateEpoch: base, body: `ping ${i}` })),
+      ...Array.from({ length: 5 }, (_, i) => sampleRecord({ id: `new${i}`, dateEpoch: base + 10_000, body: `ping ${i}` })),
+    ]);
+    const hits = svc.search({ query: "ping", sinceEpoch: base + 5_000, limit: 5 });
+    expect(hits).toHaveLength(5);
+    expect(hits.every(h => h.id.startsWith("new"))).toBe(true);
+  });
+
   it("respects the limit cap (1-200)", () => {
     const many = Array.from({ length: 30 }, (_, i) => sampleRecord({ id: `m${i}`, body: `ping ${i}` }));
     svc.upsertMany(many);

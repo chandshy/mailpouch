@@ -117,6 +117,27 @@ Tests: pagination empty-page, $Forwarded read (list + buildEmailMessage), oversi
 
 ² **Rebuilt:** `bulkStar` (and single `starEmail`) toggled `\Flagged` — which changes the Starred system-folder count — but did NOT `clearFolderCache()`, so `get_folders` returned stale starred counts until the TTL expired (`bulkMarkRead`/`markEmailRead` correctly clear on the `\Seen` path). Both now clear the cache on success. Tests assert a star refetches folder counts.
 
+## Phase 5 — Search (IMAP SEARCH incl. BODY/TEXT + FTS) (`refactor/phase5-search`)
+
+All five flagged REBUILD; the search path had the most accumulated debt of any subsystem.
+
+| Function | File | Verdict |
+|---|---|---|
+| `searchEmails` | simple-imap-service.ts | REBUILT → PASS |
+| `searchSingleFolder` | simple-imap-service.ts | REBUILT → PASS |
+| `validateSearchInput`/`buildSearchCriteria` | search-input.ts / imap-helpers.ts | PASS (criteria already 10/10 in Phase 0; doc reconciled) |
+| FTS `search` | fts-service.ts | REBUILT → PASS |
+| `search_emails`/`fts_search` tool | reading.ts | PASS (covered by the service fixes) |
+
+**Capability note:** the plan's "IMAP `SEARCH BODY/TEXT`" gap was already wired in Phase 0 (`buildSearchCriteria` maps `c.body`/`c.text`, exposed on `search_emails`). The Bridge doc still carried the pre-Phase-0 "not implemented" note — **reconciled** (body/text are wired + sanitized; FTS remains the reliable ranked full-text path).
+
+**Rebuilt defects:**
+- **IMAP-012:** `searchEmails` returned `[]` on a connection failure (indistinguishable from "no matches") — now throws `IMAPNotConnectedError`, matching `getFolders`/`getEmails`.
+- **`hasAttachment` under-return:** the local filter ran AFTER the limit slice (both single + multi-folder), so an attachment query could return far fewer than `limit`. Now filters before the limit with a bounded per-folder over-fetch (200) when the filter is active.
+- **Silent failures surfaced:** per-folder `Promise.allSettled` rejections and the 20-folder cap truncation are now logged (were invisible).
+- **`searchSingleFolder`** validates its folder name defensively (private, but a bad name must fail clearly, not via a cryptic lock error).
+- **FTS `sinceEpoch`:** was a post-`LIMIT` filter → under-returned. Pushed into the SQL `WHERE` (all three query paths) so the date floor applies before `LIMIT`.
+
 ### PR #192 reviewer fixes (CodeQL + Copilot)
 - `stripHtml` block-strip now matches `</script\s*>` / `</style\s*>` (trailing
   whitespace close tag could bypass the strip — CodeQL bad-HTML-filtering).
