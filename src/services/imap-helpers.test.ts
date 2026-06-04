@@ -117,6 +117,17 @@ describe("buildEmailMessage", () => {
     expect(buildEmailMessage(msg(8, ["\\Forwarded"]), parsed({}), "INBOX").isForwarded).toBe(true);
     expect(buildEmailMessage(msg(9, ["\\Forward"]), parsed({}), "INBOX").isForwarded).toBe(false);
   });
+
+  it("normalizes references to a string[] (mailparser returns a string for one ref)", () => {
+    // A single-reference message → mailparser yields a bare string; it MUST be
+    // normalized to an array so sendEmail's references.map() can't crash.
+    const single = buildEmailMessage(msg(10), parsed({ references: "<only@x.com>" as never }), "INBOX");
+    expect(single.references).toEqual(["<only@x.com>"]);
+    const multi = buildEmailMessage(msg(11), parsed({ references: ["<a@x.com>", "<b@x.com>"] as never }), "INBOX");
+    expect(multi.references).toEqual(["<a@x.com>", "<b@x.com>"]);
+    const none = buildEmailMessage(msg(12), parsed({}), "INBOX");
+    expect(none.references).toBeUndefined();
+  });
 });
 
 describe("stripHtml / truncateBody / normalizeAddressList (moved, unchanged)", () => {

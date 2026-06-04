@@ -20,7 +20,7 @@ function original(over: Partial<EmailMessage> = {}): EmailMessage {
     id: "42", from: "Alice <alice@x.com>", to: ["bob@x.com"], subject: "Hello",
     body: "original body", isHtml: false, date: new Date("2026-01-01T00:00:00Z"),
     folder: "INBOX", isRead: true, isStarred: false, hasAttachment: false,
-    inReplyTo: "<parent@x.com>", references: "<root@x.com> <parent@x.com>",
+    inReplyTo: "<parent@x.com>", references: ["<root@x.com>", "<parent@x.com>"],
     ...over,
   } as EmailMessage;
 }
@@ -36,7 +36,7 @@ describe("forward_email", () => {
     await mod.handlers.forward_email(ctx);
     const sent = sendEmail.mock.calls[0][0];
     expect(sent.inReplyTo).toBe("<parent@x.com>");
-    expect(sent.references).toBe("<root@x.com> <parent@x.com>");
+    expect(sent.references).toEqual(["<root@x.com>", "<parent@x.com>"]);
   });
 
   it("strips control chars from the embedded original From/To in the quoted header", async () => {
