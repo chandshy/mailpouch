@@ -4,7 +4,7 @@
 
 The pitch in one line: if you picked Proton Mail because you didn't want a third party reading your inbox, you don't suddenly want to hand a chatbot OAuth access to that same inbox so it can triage on your behalf. The usual "connect your email" integrations route everything through someone else's servers and ask for blanket scopes. Hand-rolled IMAP inside the agent is worse — no permission boundary, no audit trail, and the model holds your credentials in its context window. Neither option respects why you chose the provider in the first place.
 
-`mailpouch` runs locally and speaks to Proton Bridge over a TLS socket on your own machine; nothing leaves the box unless you asked it to. 70 tools across reading, sending, drafts, folders, search, analytics, aliases, Proton Pass, and system control, tiered into `core` / `extended` / `complete` so an agent that only reads doesn't burn context on Bridge lifecycle tools it will never call. Every connecting client gets its own grant with folder allowlists, IP pins, per-tool rate caps, expiry, and account binding — all hashed-args in the audit log, never the values. Delete, trash, spam, and alias removal round-trip through MCP elicitation for human confirmation before they execute. That last part sounds like theatre until you watch an agent try to empty a folder and get blocked mid-call.
+`mailpouch` runs locally and speaks to Proton Bridge over a TLS socket on your own machine; nothing leaves the box unless you asked it to. 71 tools across reading, sending, drafts, folders, search, analytics, aliases, Proton Pass, and system control, tiered into `core` / `extended` / `complete` so an agent that only reads doesn't burn context on Bridge lifecycle tools it will never call. Every connecting client gets its own grant with folder allowlists, IP pins, per-tool rate caps, expiry, and account binding — all hashed-args in the audit log, never the values. Delete, trash, spam, and alias removal round-trip through MCP elicitation for human confirmation before they execute. That last part sounds like theatre until you watch an agent try to empty a folder and get blocked mid-call.
 
 It is real because the primitives are real: OAuth 2.1 with PKCE S256, RFC 7591 dynamic client registration, RFC 8707 resource indicators, RFC 9728 protected-resource metadata, and an OAuth `client_credentials` grant so headless agents authenticate too — every agent gets its own gated, revocable identity. Credentials live in the OS keychain. A local FTS5 index with BM25 ranking handles phrase, boolean, prefix, and column-filter queries so your search terms never leave your laptop. Desktop notifications use native `osascript` / `notify-send` / `powershell.exe` with no added dependency; webhook dispatch auto-detects CloudEvents 1.0, Slack, or Discord, signs with HMAC, and retries with eight-attempt exponential backoff. So how do you point it at your Bridge install and wire up a client?
 
@@ -29,7 +29,7 @@ Proton's Terms of Service ([proton.me/legal/terms](https://proton.me/legal/terms
 This server is designed to keep access **user-initiated**, not autonomous:
 
 - Default permission preset is `read_only`. Sending, deletion, and folder mutation require explicit user opt-in via the settings UI.
-- Destructive tools (delete / move-to-trash / move-to-spam / `alias_delete` / `pass_get`) require explicit confirmation. With MCP elicitation-capable clients, the server prompts the user out-of-band before executing; non-elicitation clients must pass `{ confirmed: true }`.
+- Destructive tools (delete / empty_trash / move-to-trash / move-to-spam / `alias_delete` / `pass_get`) require explicit confirmation. With MCP elicitation-capable clients, the server prompts the user out-of-band before executing; non-elicitation clients must pass `{ confirmed: true }`.
 - Elevated permissions require out-of-band human approval (settings UI button or terminal), not an agent-only grant.
 - The settings UI shows a first-run ToS acknowledgement the user must click through before credentials are accepted.
 
@@ -47,7 +47,7 @@ Your emails are decrypted on your own machine by Proton Bridge. This server neve
 
 ## Key Features
 
-- **70 tools** across 11 categories — reading, search, analytics, sending, drafts, scheduling, follow-up reminders, folder management, bulk actions, deletion, Bridge/server lifecycle, plus optional companion services (SimpleLogin aliases, Proton Pass, local FTS5 search). See [`src/config/schema.ts`](src/config/schema.ts) (`ALL_TOOLS`, `TOOL_CATEGORIES`) for the canonical inventory.
+- **71 tools** across 11 categories — reading, search, analytics, sending, drafts, scheduling, follow-up reminders, folder management, bulk actions, deletion, Bridge/server lifecycle, plus optional companion services (SimpleLogin aliases, Proton Pass, local FTS5 search). See [`src/config/schema.ts`](src/config/schema.ts) (`ALL_TOOLS`, `TOOL_CATEGORIES`) for the canonical inventory.
 - **Two transports** — stdio (default, Claude Desktop) and HTTP (remote / self-host). HTTP is OAuth-only: `authorization_code` + PKCE-S256 for interactive agents and `client_credentials` for headless service accounts, with RFC 7591 Dynamic Client Registration, RFC 8414 authorization-server metadata, and RFC 9728 protected-resource metadata. Per-caller token-bucket rate limiting on every endpoint.
 - **Progressive tool tiering** — `core` / `extended` / `complete` controls how many tools land in the client's `ListTools` response, so context isn't burned on tools you don't use. Configurable via `toolTier` or `MAILPOUCH_TIER`.
 - **Destructive-tool confirmation** — uses MCP elicitation when the client supports it (Claude Desktop, Cline) so the user sees a prompt before any delete / trash / spam / `alias_delete` / `pass_get` runs. Falls back to a required `{ confirmed: true }` argument for clients without elicitation.
@@ -341,7 +341,7 @@ Configuration is stored in `~/.mailpouch.json` and managed via the settings UI �
 
 ## Available Tools
 
-**70 tools across 11 categories.** This README lists categories and counts; see [`src/config/schema.ts`](src/config/schema.ts) (`ALL_TOOLS` and `TOOL_CATEGORIES`) for the canonical, machine-checkable inventory.
+**71 tools across 11 categories.** This README lists categories and counts; see [`src/config/schema.ts`](src/config/schema.ts) (`ALL_TOOLS` and `TOOL_CATEGORIES`) for the canonical, machine-checkable inventory.
 
 | Category | Tools | Default tier | Risk | Permission required |
 |---|---:|---|---|---|
@@ -600,7 +600,7 @@ npm run settings       # start standalone settings UI (after build)
 
 ```
 src/
-  index.ts                    # Unified daemon: MCP server (70 tools, resources, prompts) + settings + tray
+  index.ts                    # Unified daemon: MCP server (71 tools, resources, prompts) + settings + tray
   settings-main.ts            # Standalone settings UI CLI (for headless/SSH environments)
   # (Tray moved to native/tray/ — napi-rs binding around tauri-apps/tray-icon)
   config/

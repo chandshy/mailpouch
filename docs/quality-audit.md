@@ -86,6 +86,21 @@ Tests: allSettled best-effort, junk classification, localised-mailbox protection
 - Also fixed the `\Forward` flag in `buildEmailMessage` (shared by getEmailById).
 Tests: pagination empty-page, $Forwarded read (list + buildEmailMessage), oversize-on-refetch guard, filename re-map on order drift.
 
+## Phase 3 — Move / Copy / Delete / Label + `empty_trash` (`refactor/phase3-move-delete`)
+
+| Function | File | Job | Simpl | Eleg | Sec | Focus | Avg | Verdict |
+|---|---|---|---|---|---|---|---|---|
+| `emptyTrash` (NEW) | simple-imap-service.ts | 10 | 10 | 10 | 10 | 10 | 10.0 | PASS |
+| `bulkMoveEmails` | simple-imap-service.ts | 10 | 9.5 | 9.5 | 10 | 9.5 | 9.64 | PASS |
+| `deletionTool` (delete/bulk/empty_trash + gate) | tools/deletion.ts | 9.5 | — | — | — | — | 9.5 | PASS |
+| `moveEmail` | simple-imap-service.ts | 9.5 | 9 | 9.5 | 10 | 9 | 9.4 | PASS |
+| `deleteEmail` + `bulkDeleteEmails` | simple-imap-service.ts | 9 | — | — | — | — | 9.2 | PASS |
+| `bulkCopyToFolder` + `bulkDeleteFromFolder` | simple-imap-service.ts | 9 | 9.5 | 9 | 9.5 | 8.5 | 9.0 | REBUILT → PASS¹ |
+
+**New capability — `empty_trash`** (the plan's gated permanent-delete): server-`\Trash`-only target (never a caller folder), `{ confirmed: true }`-gated (`DESTRUCTIVE_TOOLS`), empty-mailbox short-circuit. Scored **10/10**. Everywhere else delete remains move-to-Trash.
+
+¹ **Rebuilt:** `bulkCopyToFolder` omitted the `folder` field from its verify jobs (and used a 1-arg error callback), so copy-failure messages lost the source folder that `bulkMoveEmails` includes — a multi-source copy failure was undebuggable. Now matches the move path: `folder` threaded through, `(uid, src)` error message. Test asserts `from <source>` appears in the failure.
+
 ### PR #192 reviewer fixes (CodeQL + Copilot)
 - `stripHtml` block-strip now matches `</script\s*>` / `</style\s*>` (trailing
   whitespace close tag could bypass the strip — CodeQL bad-HTML-filtering).

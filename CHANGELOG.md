@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Bridge-capability program (subsystem-by-subsystem TDD redesign + per-function ultra-review to a 9.5 quality bar; see `docs/quality-audit.md`).
+
+### Added
+
+- **`empty_trash` tool** — the one sanctioned permanent-delete path. PERMANENTLY EXPUNGEs the Trash mailbox (resolved by server `\Trash` special-use, so localised names like `Papelera` work) and **only** Trash — it can never be pointed at live mail. Gated by `{ confirmed: true }` like the other destructive tools; short-circuits an already-empty Trash. Everywhere else, delete still means move-to-Trash. Scored 10/10 on the ultra-review.
+
+### Fixed
+
+- **`get_folders` exposes `specialUse` + `folderType`** so agents identify Trash/Sent/Archive by special-use (localised-account-safe) instead of English names, and avoid the `\All` union.
+- **Fail-open folder protection closed (security):** `delete_folder`/`rename_folder` could destroy a localised system mailbox if folder discovery threw; the protection check now fails closed.
+- **`getFolders` robustness:** one folder's `STATUS` failure no longer nukes the whole listing (`Promise.allSettled`); a cold-cache + disconnect throws instead of returning `[]`.
+- **`getEmails` pagination:** an out-of-range `offset` returns an empty page instead of a clamped message #1.
+- **Forwarded flag:** reads `$Forwarded`/`\Forwarded` (the setter's flag) instead of the non-existent `\Forward`, which always read back as not-forwarded.
+- **`download_attachment` memory safety:** the oversize guard now checks the actual resolved byte length (the stale-metadata path could OOM); re-maps by filename if the re-fetch attachment order drifts.
+- **`bulk_copy` failure messages** now carry the source folder, matching `bulk_move`.
+
 ## [3.0.73] — 2026-06-03
 
 Field-report fixes from driving the HTTP daemon against a real, All-Mail-heavy account, plus the Proton Bridge semantics research that grounds them (`docs/proton-bridge-imap.md`).

@@ -98,6 +98,10 @@ When a label is applied to an email in Proton, the email appears in BOTH the `La
 
 When an email is moved to Trash, Bridge removes all labels from it (same behavior as Proton web/mobile clients).
 
+### Deleting mail: move-to-Trash vs the gated `empty_trash`
+
+Every delete tool (`delete_email`, `bulk_delete_emails`) is a **MOVE TO TRASH**, never an EXPUNGE — mail stays recoverable from Trash and Proton purges it on its own schedule. The single exception is **`empty_trash`**, which PERMANENTLY EXPUNGEs the Trash mailbox. It targets the **server-resolved `\Trash` mailbox only** (so a localised name like `Papelera` is handled and it can never be pointed at live mail), short-circuits an already-empty Trash (the Bridge empty-mailbox quirk), and is gated by `{ confirmed: true }` like the other destructive tools. Mail purged via `empty_trash` is unrecoverable by design.
+
 ### Important: Folder vs Label Distinction
 - Moving an email to `Folders/Work` in IMAP sets its Proton folder to "Work" (exclusive)
 - Moving an email to `Labels/Important` in IMAP applies the "Important" label (additive)
