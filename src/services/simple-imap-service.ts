@@ -1804,6 +1804,7 @@ export class SimpleIMAPService {
         }
 
         logger.info(`Email ${emailId} ${isStarred ? 'starred' : 'unstarred'}`, 'IMAPService');
+        this.clearFolderCache(); // Starred (\Flagged) folder count changed → next get_folders refetches
         return true;
       } finally {
         lock.release();
@@ -2558,6 +2559,7 @@ export class SimpleIMAPService {
       } finally { lock.release(); }
     }
     tags.successCount = results.success; tags.failCount = results.failed;
+    if (results.success > 0) this.clearFolderCache(); // Starred (\Flagged) count changed → next get_folders refetches
     logger.info(`Bulk star completed: ${results.success}/${results.failed}`, 'IMAPService');
     return results;
     }); // end tracer.span('imap.bulkStar')

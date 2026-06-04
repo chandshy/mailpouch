@@ -101,6 +101,22 @@ Tests: pagination empty-page, $Forwarded read (list + buildEmailMessage), oversi
 
 ¹ **Rebuilt:** `bulkCopyToFolder` omitted the `folder` field from its verify jobs (and used a 1-arg error callback), so copy-failure messages lost the source folder that `bulkMoveEmails` includes — a multi-source copy failure was undebuggable. Now matches the move path: `folder` threaded through, `(uid, src)` error message. Test asserts `from <source>` appears in the failure.
 
+## Phase 4 — Flags + `mark_answered`/`mark_forwarded` (`refactor/phase4-flags`)
+
+| Function | File | Job | Simpl | Eleg | Sec | Focus | Avg | Verdict |
+|---|---|---|---|---|---|---|---|---|
+| `setFlag` | simple-imap-service.ts | 10 | 10 | 10 | 10 | 10 | 10.0 | PASS |
+| `markEmailRead` | simple-imap-service.ts | 9.8 | — | — | — | — | 9.8 | PASS |
+| `starEmail` | simple-imap-service.ts | 9.5 | — | — | — | — | 9.5 | PASS¹ |
+| `mark_email_read`/`star_email`/`mark_answered`/`mark_forwarded` tools | tools/actions.ts | 9.2 | — | — | — | — | 9.2 | PASS |
+| `bulkMarkRead` + `bulkStar` | simple-imap-service.ts | 7 | 9 | 8 | 10 | 8 | 8.4 | REBUILT → PASS² |
+
+**New capability — `mark_answered` / `mark_forwarded`** (the plan's flag gap): wrap `setFlag` with `\Answered` and `$Forwarded` respectively (`$Forwarded` is the keyword the forward tool writes and the Phase-2-fixed readers honour). Both thread `sourceFolder`; registered in `ALL_TOOLS` + the email-actions preset.
+
+¹ `starEmail` (single) had the same missing-cache-clear bug as `bulkStar` (the verifier noted it); fixed alongside ².
+
+² **Rebuilt:** `bulkStar` (and single `starEmail`) toggled `\Flagged` — which changes the Starred system-folder count — but did NOT `clearFolderCache()`, so `get_folders` returned stale starred counts until the TTL expired (`bulkMarkRead`/`markEmailRead` correctly clear on the `\Seen` path). Both now clear the cache on success. Tests assert a star refetches folder counts.
+
 ### PR #192 reviewer fixes (CodeQL + Copilot)
 - `stripHtml` block-strip now matches `</script\s*>` / `</style\s*>` (trailing
   whitespace close tag could bypass the strip — CodeQL bad-HTML-filtering).

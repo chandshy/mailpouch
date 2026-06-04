@@ -2934,6 +2934,26 @@ describe("SimpleIMAPService folder-count cache invalidation (#2)", () => {
     await svc.syncFolders();
     expect(status.mock.calls.length).toBeGreaterThan(n);
   });
+
+  it("starEmail invalidates the folder cache (Starred \\Flagged count changes)", async () => {
+    const { svc, client, status } = svcWithFolders();
+    await svc.getFolders();
+    const afterFirst = status.mock.calls.length;
+    seedUids(client, "INBOX", [1]);
+    await svc.starEmail("1", true, "INBOX");
+    await svc.getFolders();
+    expect(status.mock.calls.length).toBeGreaterThan(afterFirst); // refetched after the star
+  });
+
+  it("bulkStar invalidates the folder cache on success (parity with bulkMarkRead)", async () => {
+    const { svc, client, status } = svcWithFolders();
+    await svc.getFolders();
+    const afterFirst = status.mock.calls.length;
+    seedUids(client, "INBOX", [1, 2]);
+    await svc.bulkStar(["1", "2"], true, "INBOX");
+    await svc.getFolders();
+    expect(status.mock.calls.length).toBeGreaterThan(afterFirst);
+  });
 });
 
 // ─── empty_trash: gated permanent purge, Trash-only ───────────────────────────
