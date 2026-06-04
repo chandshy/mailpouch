@@ -133,6 +133,14 @@ describe("SMTPService TLS strict mode (no allowInsecureBridge)", () => {
     // Non-localhost never enters the bridge-cert branch; insecureTls must stay false.
     expect(svc.insecureTls).toBe(false);
   });
+
+  it("treats IPv6 loopback ::1 as localhost (Bridge), not a remote host", () => {
+    // With ::1 mistakenly treated as remote, this would skip the bridge-cert
+    // branch and defer no error; instead it must take the localhost path and
+    // (no cert, strict) record the "No Bridge certificate configured" deferral.
+    const svc = new SMTPService(baseConfig({ host: "::1" }));
+    expect(svc.initError).toMatch(/No Bridge certificate configured/);
+  });
 });
 
 describe("SMTPService TLS insecure opt-in", () => {

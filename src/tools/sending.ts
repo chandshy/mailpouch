@@ -8,6 +8,7 @@
 
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { isValidEmail, optionalFolderHint, validateAttachments, sanitizeAttachments, requireNumericEmailId } from "../utils/helpers.js";
+import { logger } from "../utils/logger.js";
 import { escapeHtml } from "../services/smtp-service.js";
 import type { ToolDef, ToolHandler, ToolModule } from "./types.js";
 
@@ -225,7 +226,8 @@ export const handlers: Record<string, ToolHandler> = {
       return { content: [{ type: "text" as const, text: "Email delivery failed" }], isError: true };
     }
     if (result.success) {
-      await imapService.setFlag(emailId, '\\Answered').catch(() => {});
+      await imapService.setFlag(emailId, '\\Answered').catch((err) =>
+        logger.warn(`reply_to_email: failed to set \\Answered on ${emailId}: ${err instanceof Error ? err.message : String(err)}`, 'Sending'));
     }
     return actionOk(result.messageId);
   },
@@ -249,12 +251,15 @@ export const handlers: Record<string, ToolHandler> = {
       ? fwdSubjectRaw.slice(0, MAX_SUBJECT_LENGTH)
       : fwdSubjectRaw;
 
+    // Strip control chars from the embedded original From/To so a CRLF in a
+    // display name can't break the quoted header block's visual structure.
+    const stripCtl = (s: string) => s.replace(/[\r\n\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
     const fwdHeader = [
       "---------- Forwarded message ----------",
-      `From: ${fwdOriginal.from}`,
+      `From: ${stripCtl(fwdOriginal.from)}`,
       `Date: ${fwdOriginal.date.toISOString()}`,
       `Subject: ${fwdCleanSubject}`,
-      `To: ${(fwdOriginal.to ?? []).join(", ")}`,
+      `To: ${stripCtl((fwdOriginal.to ?? []).join(", "))}`,
       "",
     ].join("\n");
 
@@ -277,13 +282,18 @@ export const handlers: Record<string, ToolHandler> = {
       subject: fwdSubject,
       body: fwdBody,
       isHtml: fwdOriginal.isHtml,
+      // Keep the forward in the original thread (parity with reply_to_email).
+      inReplyTo: fwdOriginal.inReplyTo,
+      references: fwdOriginal.references,
     });
 
     if (!fwdResult.success) {
       return { content: [{ type: "text" as const, text: "Forward failed" }], isError: true };
     }
     if (fwdResult.success) {
-      await imapService.setFlag(fwdId, '$Forwarded').catch(() => {});
+      // Best-effort flag; log (don't fail the send) so a flag-set failure isn't invisible.
+      await imapService.setFlag(fwdId, '$Forwarded').catch((err) =>
+        logger.warn(`forward_email: failed to set $Forwarded on ${fwdId}: ${err instanceof Error ? err.message : String(err)}`, 'Sending'));
     }
     return actionOk(fwdResult.messageId);
   },
