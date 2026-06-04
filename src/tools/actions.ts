@@ -79,6 +79,40 @@ export const defs: ToolDef[] = [
     outputSchema: ACTION_RESULT_SCHEMA,
   },
   {
+    name: "mark_answered",
+    title: "Mark Email Answered",
+    description:
+      "Set or clear the \\Answered flag on an email (the IMAP 'replied to' marker). answered defaults to true. Pass sourceFolder whenever the UID came from a folder other than INBOX.",
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        emailId: { type: "string" },
+        answered: { type: "boolean", default: true },
+        sourceFolder: SOURCE_FOLDER_SCHEMA,
+      },
+      required: ["emailId"],
+    },
+    outputSchema: ACTION_RESULT_SCHEMA,
+  },
+  {
+    name: "mark_forwarded",
+    title: "Mark Email Forwarded",
+    description:
+      "Set or clear the $Forwarded keyword on an email (the 'has been forwarded' marker the forward tool writes). forwarded defaults to true. Pass sourceFolder whenever the UID came from a folder other than INBOX.",
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        emailId: { type: "string" },
+        forwarded: { type: "boolean", default: true },
+        sourceFolder: SOURCE_FOLDER_SCHEMA,
+      },
+      required: ["emailId"],
+    },
+    outputSchema: ACTION_RESULT_SCHEMA,
+  },
+  {
     name: "move_email",
     title: "Move Email",
     description:
@@ -316,6 +350,31 @@ export const handlers: Record<string, ToolHandler> = {
     const isStarred = args.isStarred !== undefined ? (args.isStarred as boolean) : true;
     const seSourceFolder = optionalSourceFolder(args.sourceFolder);
     await imapService.starEmail(seEmailId, isStarred, seSourceFolder);
+    return actionOk();
+  },
+
+  mark_answered: async (ctx) => {
+    const { args, imapService, actionOk } = ctx;
+    const maEmailId = requireNumericEmailId(args.emailId);
+    if (args.answered !== undefined && typeof args.answered !== "boolean") {
+      throw new McpError(ErrorCode.InvalidParams, "'answered' must be a boolean when provided.");
+    }
+    const answered = args.answered !== undefined ? (args.answered as boolean) : true;
+    const maSourceFolder = optionalSourceFolder(args.sourceFolder);
+    await imapService.setFlag(maEmailId, "\\Answered", answered, maSourceFolder);
+    return actionOk();
+  },
+
+  mark_forwarded: async (ctx) => {
+    const { args, imapService, actionOk } = ctx;
+    const mfEmailId = requireNumericEmailId(args.emailId);
+    if (args.forwarded !== undefined && typeof args.forwarded !== "boolean") {
+      throw new McpError(ErrorCode.InvalidParams, "'forwarded' must be a boolean when provided.");
+    }
+    const forwarded = args.forwarded !== undefined ? (args.forwarded as boolean) : true;
+    const mfSourceFolder = optionalSourceFolder(args.sourceFolder);
+    // $Forwarded is the keyword the forward tool writes and the readers honour.
+    await imapService.setFlag(mfEmailId, "$Forwarded", forwarded, mfSourceFolder);
     return actionOk();
   },
 

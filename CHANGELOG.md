@@ -11,6 +11,7 @@ Bridge-capability program (subsystem-by-subsystem TDD redesign + per-function ul
 
 ### Added
 
+- **`mark_answered` / `mark_forwarded` tools** — set/clear the IMAP `\Answered` flag and the `$Forwarded` keyword (the marker the forward tool writes and the readers now honour). Both thread `sourceFolder` and wrap the existing `setFlag`.
 - **`empty_trash` tool** — the one sanctioned permanent-delete path. PERMANENTLY EXPUNGEs the Trash mailbox (resolved by server `\Trash` special-use, so localised names like `Papelera` work) and **only** Trash — it can never be pointed at live mail. Gated by `{ confirmed: true }` like the other destructive tools; short-circuits an already-empty Trash. Everywhere else, delete still means move-to-Trash. Scored 10/10 on the ultra-review.
 
 ### Fixed

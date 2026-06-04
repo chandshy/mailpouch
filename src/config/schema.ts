@@ -20,7 +20,7 @@ export const ALL_TOOLS = [
   // Folder management
   "get_folders", "sync_folders", "create_folder", "delete_folder", "rename_folder",
   // Email actions
-  "mark_email_read", "star_email", "move_email", "archive_email",
+  "mark_email_read", "star_email", "mark_answered", "mark_forwarded", "move_email", "archive_email",
   "move_to_trash", "move_to_spam", "move_to_folder",
   "bulk_mark_read", "bulk_star", "bulk_move_emails",
   "move_to_label", "bulk_move_to_label",
@@ -90,7 +90,7 @@ export const TOOL_CATEGORIES: Record<string, ToolCategory> = {
     label: "Email Actions",
     description: "Mark read/unread, star, move, label, and bulk operations",
     tools: [
-      "mark_email_read", "star_email", "move_email", "archive_email",
+      "mark_email_read", "star_email", "mark_answered", "mark_forwarded", "move_email", "archive_email",
       "move_to_trash", "move_to_spam", "move_to_folder",
       "bulk_mark_read", "bulk_star", "bulk_move_emails",
       "move_to_label", "bulk_move_to_label",
