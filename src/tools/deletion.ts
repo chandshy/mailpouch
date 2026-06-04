@@ -93,7 +93,10 @@ export const defs: ToolDef[] = [
     title: "Empty Trash",
     description:
       "PERMANENTLY delete every message in the Trash mailbox. This is the only operation that bypasses the move-to-Trash safety net — purged mail is UNRECOVERABLE. It only ever touches the Trash mailbox, never live mail. Requires { confirmed: true }.",
-    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
+    // idempotentHint:false — matches the other destructive tools and, more
+    // importantly, discourages client auto-retry: a retry could purge Trash
+    // messages that arrived between attempts.
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
     inputSchema: {
       type: "object",
       properties: {

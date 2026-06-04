@@ -81,13 +81,13 @@ import {
 function describeDestructivePreview(tool: string, args: Record<string, unknown>): string {
   switch (tool) {
     case "delete_email":
-      return `Would permanently delete email with ID ${String(args.emailId ?? "(missing)")}.`;
+      return `Would move email with ID ${String(args.emailId ?? "(missing)")} to Trash (recoverable — not a permanent delete).`;
     case "bulk_delete":
     case "bulk_delete_emails": {
       const ids = Array.isArray(args.emailIds) ? args.emailIds : [];
       const preview = ids.slice(0, 5).map(String).join(", ");
       const tail = ids.length > 5 ? `, … +${ids.length - 5} more` : "";
-      return `Would permanently delete ${ids.length} email(s): [${preview}${tail}].`;
+      return `Would move ${ids.length} email(s) to Trash (recoverable — not a permanent delete): [${preview}${tail}].`;
     }
     case "empty_trash":
       return `Would PERMANENTLY delete every message in the Trash mailbox. This cannot be undone.`;
