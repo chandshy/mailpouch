@@ -37,6 +37,13 @@ describe("mark_answered / mark_forwarded tools (Phase 4 flag gap)", () => {
     expect(setFlag).toHaveBeenCalledWith("99", "$Forwarded", true, undefined);
   });
 
+  it("mark_forwarded can CLEAR the keyword and threads sourceFolder", async () => {
+    const setFlag = vi.fn().mockResolvedValue(true);
+    const ctx = makeCtx({ args: { emailId: "8", forwarded: false, sourceFolder: "Labels/Foo" }, imapService: { setFlag } as unknown as ToolCallContext["imapService"] });
+    await mod.handlers.mark_forwarded(ctx);
+    expect(setFlag).toHaveBeenCalledWith("8", "$Forwarded", false, "Labels/Foo");
+  });
+
   it("rejects a non-boolean answered/forwarded", async () => {
     const ctx = makeCtx({ args: { emailId: "1", answered: "yes" }, imapService: { setFlag: vi.fn() } as unknown as ToolCallContext["imapService"] });
     await expect(mod.handlers.mark_answered(ctx)).rejects.toThrow(/must be a boolean/);
