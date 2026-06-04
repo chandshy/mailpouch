@@ -28,7 +28,9 @@ Bridge-capability program (subsystem-by-subsystem TDD redesign + per-function ul
 - **`fts_search` `sinceEpoch` is applied in SQL before `LIMIT`** (was a post-`LIMIT` filter that could return far fewer than the limit).
 - **Bridge `SEARCH BODY/TEXT` docs reconciled** — `body`/`text` search criteria are wired and exposed (the limitation note was pre-Phase-0 stale).
 - **SMTP now uses the shared `buildBridgeTlsConfig`** (no more 4th inline TLS copy that could diverge from the IMAP path's pinned-cert/insecure-fallback contract), which also fixes SMTP + the IMAP IDLE socket not recognizing IPv6 loopback `::1` as localhost.
-- **`forward_email` keeps the message in its thread** — it now carries the original `In-Reply-To`/`References` (parity with `reply_to_email`), CRLF-strips the embedded original From/To in the quoted header, and logs (instead of silently swallowing) a `$Forwarded`/`\Answered` flag-set failure.
+- **`forward_email` keeps the message in its thread** — it now carries the original `In-Reply-To`/`References` (parity with `reply_to_email`), CRLF-strips the embedded original From/To in the quoted header, and logs (instead of silently swallowing) a `$Forwarded`/`\Answered` flag-set failure. Also fixed a latent crash: `references` is normalized to an array (mailparser returns a bare string for a single-reference message, which would have thrown on the send path).
+- **Multi-account credential staleness fixed:** the per-account keychain entry is now authoritative on startup, so a stale legacy keychain entry can no longer shadow the fresh per-account password a Settings save wrote (and account #2 can't inherit account #1's password). Single-account / config-plaintext installs are unaffected.
+- **Background IDLE now runs for every account, not just the active one**, so a non-active account still receives push cache invalidations instead of degrading to manual syncs.
 
 ## [3.0.73] — 2026-06-03
 

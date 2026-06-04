@@ -2467,11 +2467,17 @@ async function main() {
       }),
     ]);
 
-    // Start background IDLE for push cache invalidation
+    // Start background IDLE for push cache invalidation — for EVERY account,
+    // not just the active one, so a non-active account still receives INBOX
+    // EXISTS/EXPUNGE push invalidations instead of degrading to manual syncs.
+    // startIdle() is idempotent (guarded by idleActive), and since every
+    // account watches from boot, an account hot-swap needs no extra wiring.
     if (config.debug) {
-      logger.debug('Starting IMAP IDLE background watcher', 'MCPServer');
+      logger.debug('Starting IMAP IDLE background watcher for all accounts', 'MCPServer');
     }
-    imapService.startIdle().catch(err => logger.debug('IDLE startup failed', 'MCPServer', err));
+    for (const svcs of accountManager.list()) {
+      svcs.imap.startIdle().catch(err => logger.debug('IDLE startup failed', 'MCPServer', err));
+    }
 
     // Start the email scheduler (loads persisted pending emails, begins 60s poll)
     schedulerService.start();

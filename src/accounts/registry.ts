@@ -79,40 +79,35 @@ export async function readRegistryWithSecrets(): Promise<AccountRegistry> {
   const reg = readRegistry();
   const { loadCredentials } = await import("../security/keychain.js");
   for (const acct of reg.accounts) {
-    // CRED-005: fetch the per-account keychain entry at most once. The entry
-    // carries both fields, so the prior two-block form re-hit the keychain
-    // (a sync libsecret/Keychain/Cred-Manager FFI) for every account that had
-    // both password and smtpToken missing.
-    const needsPassword = !acct.password;
-    const needsSmtpToken = !acct.smtpToken;
-    if (!needsPassword && !needsSmtpToken) continue;
-
+    // The per-account keychain entry is AUTHORITATIVE for that account. Load it
+    // unconditionally and PREFER it over any value already on the spec — that
+    // pre-set value may be a broadcast of the LEGACY (no-suffix) keychain entry
+    // applied by applyKeychainCredentials(), and a stale legacy entry must not
+    // shadow the fresh per-account password a Settings save wrote. This was the
+    // recurring daemon-restart staleness (CRED-005 once skipped this load
+    // whenever a password was already set, which is exactly when the shadow
+    // happened). A keychain miss falls back to the existing value / legacy key,
+    // so config-plaintext and single-account installs are unaffected.
     const perAccount = await loadAccountCredentials(acct.id);
-    // Legacy key is loaded lazily and only for the "primary" slot.
     let legacy: Awaited<ReturnType<typeof loadCredentials>> | null | undefined;
     const getLegacy = async () => {
       if (legacy === undefined) legacy = (await loadCredentials()) ?? null;
       return legacy;
     };
 
-    if (needsPassword) {
-      if (perAccount?.password) {
-        acct.password = perAccount.password;
-      } else if (acct.id === "primary") {
-        // Back-compat: the pre-multi-account keychain entry didn't use
-        // a per-account suffix. Fall back to the legacy key so existing
-        // installs keep working after this change.
-        const l = await getLegacy();
-        if (l?.password) acct.password = l.password;
-      }
+    if (perAccount?.password) {
+      acct.password = perAccount.password;
+    } else if (!acct.password && acct.id === "primary") {
+      // Back-compat: the pre-multi-account keychain entry had no per-account
+      // suffix. Fall back to the legacy key so existing installs keep working.
+      const l = await getLegacy();
+      if (l?.password) acct.password = l.password;
     }
-    if (needsSmtpToken) {
-      if (perAccount?.smtpToken) {
-        acct.smtpToken = perAccount.smtpToken;
-      } else if (acct.id === "primary") {
-        const l = await getLegacy();
-        if (l?.smtpToken) acct.smtpToken = l.smtpToken;
-      }
+    if (perAccount?.smtpToken) {
+      acct.smtpToken = perAccount.smtpToken;
+    } else if (!acct.smtpToken && acct.id === "primary") {
+      const l = await getLegacy();
+      if (l?.smtpToken) acct.smtpToken = l.smtpToken;
     }
   }
   return reg;

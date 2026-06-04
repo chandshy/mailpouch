@@ -154,6 +154,20 @@ All five flagged REBUILD; the search path had the most accumulated debt of any s
 
 ² **Rebuilt:** `forward_email` dropped the original `inReplyTo`/`references` (broke thread continuity — `reply_to_email` carried them); now threaded. The embedded original From/To in the quoted header are CRLF-stripped. Both reply + forward now LOG a `setFlag` (`\Answered`/`$Forwarded`) failure instead of silently swallowing it.
 
+## Phase 7 — System / Connection / Auth (`refactor/phase7-system-auth`) — FINAL
+
+| Function | File | Avg | Verdict |
+|---|---|---|---|
+| `ensureConnection` + `reconnect` + `healthCheck` | simple-imap-service.ts | 9.8 | PASS |
+| `connect` | simple-imap-service.ts | 9.2 | PASS |
+| per-agent gate + OAuth automatic-consent | index.ts / grant-manager.ts | 9.0 | PASS |
+| `startIdle` + `runIdleLoop` | simple-imap-service.ts | 9.0 | REBUILT → PASS¹ |
+| startup credential resolution | index.ts / registry.ts / keychain.ts | 7.4 | REBUILT → PASS² |
+
+¹ **Rebuilt — multi-account IDLE:** `startIdle()` ran only for the ACTIVE account at boot, so a non-active account never received INBOX EXISTS/EXPUNGE push invalidations (degraded to manual syncs). Now IDLE starts for **every** account at boot (`accountManager.list()`); `startIdle` is idempotent and every account watches from boot, so an account hot-swap needs no extra wiring. (Follow-ups noted: an account ADDED at runtime needs its IDLE kicked; the transient-throttle detection still uses free-text regex on Bridge error messages — a `classifyError` `throttled` category would be more robust. Neither is a regression.)
+
+² **Rebuilt — the recurring credential staleness (multi-account shadow):** `applyKeychainCredentials()` broadcasts the LEGACY (no-suffix) keychain password onto every account spec, then `readRegistryWithSecrets()`'s `needsPassword = !acct.password` short-circuit SKIPPED the per-account keychain load whenever a password was already set — so a stale legacy entry shadowed the fresh per-account password a Settings save wrote (account #2 could even inherit account #1's password). The per-account keychain entry is now **authoritative**: loaded unconditionally and preferred over a pre-set value, with the legacy key only as the `primary` fallback when no per-account entry exists. Safe for single-account/config-plaintext (a keychain miss keeps the existing value). **Note:** for Chuck's single "primary" account, Settings-save and the daemon both use the legacy key consistently, so his specific daemon-restart staleness is most likely **Bridge rotating its IMAP/SMTP password on restart** (environmental) — already handled by IDLE-stop-on-auth-failure + the tray red-triangle surface + live `reloadCredentials` on Settings save. Tests: per-account-wins-over-broadcast, single-account fallback safe, CRED-005 invariant preserved.
+
 ### PR #192 reviewer fixes (CodeQL + Copilot)
 - `stripHtml` block-strip now matches `</script\s*>` / `</style\s*>` (trailing
   whitespace close tag could bypass the strip — CodeQL bad-HTML-filtering).

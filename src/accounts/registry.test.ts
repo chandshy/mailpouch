@@ -292,4 +292,42 @@ describe("accounts registry", () => {
     expect(reg.accounts.find(a => a.id === "primary")?.password).toBe("pw");
     expect(reg.accounts.find(a => a.id === "primary")?.smtpToken).toBe("tok");
   });
+
+  it("the per-account keychain entry is AUTHORITATIVE — it overrides a pre-set (broadcast legacy) password", async () => {
+    const keychain = await import("../security/keychain.js");
+    vi.mocked(keychain.loadAccountCredentials).mockReset();
+    // The per-account keychain entry holds the FRESH password a Settings save wrote.
+    vi.mocked(keychain.loadAccountCredentials).mockResolvedValue({ password: "fresh-per-account", smtpToken: "fresh-tok" });
+    vi.mocked(keychain.loadCredentials).mockResolvedValue({ password: "stale-legacy", smtpToken: "stale-tok" });
+    // The spec already carries the STALE legacy password (as applyKeychainCredentials
+    // would have broadcast it before this runs). The fresh per-account entry must win,
+    // not be shadowed by the already-set value.
+    seedConfig({
+      accounts: [
+        { id: "primary", name: "A", providerType: "imap", smtpHost: "s", smtpPort: 1, imapHost: "i", imapPort: 1, username: "a", password: "stale-legacy", smtpToken: "stale-tok" },
+      ],
+      activeAccountId: "primary",
+    } as Partial<ServerConfig>);
+
+    const reg = await readRegistryWithSecrets();
+    expect(reg.accounts.find(a => a.id === "primary")?.password).toBe("fresh-per-account");
+    expect(reg.accounts.find(a => a.id === "primary")?.smtpToken).toBe("fresh-tok");
+  });
+
+  it("falls back to the existing value when no per-account keychain entry exists (single-account safe)", async () => {
+    const keychain = await import("../security/keychain.js");
+    vi.mocked(keychain.loadAccountCredentials).mockReset();
+    vi.mocked(keychain.loadAccountCredentials).mockResolvedValue(null); // no per-account entry
+    vi.mocked(keychain.loadCredentials).mockResolvedValue(null);
+    seedConfig({
+      accounts: [
+        { id: "primary", name: "A", providerType: "imap", smtpHost: "s", smtpPort: 1, imapHost: "i", imapPort: 1, username: "a", password: "config-plaintext", smtpToken: "" },
+      ],
+      activeAccountId: "primary",
+    } as Partial<ServerConfig>);
+
+    const reg = await readRegistryWithSecrets();
+    // No keychain entry → keep the value already on the spec (config plaintext / broadcast).
+    expect(reg.accounts.find(a => a.id === "primary")?.password).toBe("config-plaintext");
+  });
 });
