@@ -15,12 +15,12 @@ Get connected in this exact order. The server's own MCP `initialize` instruction
    ```
 
 2. **Call `setup_status` FIRST.** It is always available — even before credentials are set or this agent is approved — and returns the single next action. Its `state` is one of:
-   - `unconfigured` — credentials aren't set. Run `npx mailpouch setup --username <you@proton.me> --password-stdin` (the Proton **Bridge** password — Bridge app → Settings → IMAP/SMTP → Password — **not** the Proton login password), or ask the user to run `npx mailpouch-settings` for the interactive wizard.
+   - `unconfigured` — credentials aren't set. Run `npx -y mailpouch setup --username <you@proton.me> --password-stdin` (the Proton **Bridge** password — Bridge app → Settings → IMAP/SMTP → Password — **not** the Proton login password), or ask the user to run `npx -y mailpouch-settings` for the interactive wizard.
    - `bridge-unreachable` — ask the user to start the Proton Bridge desktop app (signed in). Bridge listens on **127.0.0.1** (IMAP 1143, SMTP 1025).
    - `pending-approval` — **expected on first connect, not an error.** Every agent is gated behind a human Approve/Deny. Ask the user to open the settings UI (default `http://localhost:8766/#/agents`) and click Approve, then retry. You cannot approve yourself.
    - `ready` — call `get_connection_status` to confirm live auth, then use the mail tools.
 
-3. **`npx mailpouch doctor`** prints the same diagnosis from a shell and exits non-zero until the install is `ready` — useful for scripted setup.
+3. **`npx -y mailpouch doctor`** prints the same diagnosis from a shell and exits non-zero until the install is `ready` — useful for scripted setup.
 
 Credentials are entered on the user's machine and stored in the OS keychain (or `~/.mailpouch.json`, mode 0600); never ask the user to paste their password into the chat — the server injects it.
 

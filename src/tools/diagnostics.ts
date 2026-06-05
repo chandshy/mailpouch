@@ -35,7 +35,7 @@ export const defs: ToolDef[] = [
         configured: { type: "boolean", description: "A username and Bridge password are configured." },
         bridgeReachable: { type: "boolean", description: "Both IMAP and SMTP Bridge ports accept TCP connections." },
         configExists: { type: "boolean" },
-        configPath: { type: "string", description: "Absolute path to ~/.mailpouch.json." },
+        configPath: { type: "string", description: "Path to the config file (default ~/.mailpouch.json; overridable via the MAILPOUCH_CONFIG env var). Redacted to '~/.mailpouch.json' for callers whose grant is not yet active." },
         username: { type: ["string", "null"] },
         credentialStorage: { type: ["string", "null"], enum: ["keychain", "encrypted-file", "config", null] },
         imap: {

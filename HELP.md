@@ -27,7 +27,7 @@ Practical how-tos for every feature. For API reference see [README_FIRST_AI.md](
 ## 1. Quick Start
 
 ```bash
-npx mailpouch-settings      # opens the settings UI in your browser (no install needed)
+npx -y mailpouch-settings      # opens the settings UI in your browser (no install needed)
 ```
 
 **Three things you need before Claude can read your mail:**
@@ -38,7 +38,7 @@ npx mailpouch-settings      # opens the settings UI in your browser (no install 
 
 Fill these in on the Setup tab, click **Save Configuration**, then **Test Connections**. Green means ready.
 
-Prefer the command line? `npx mailpouch setup --username you@proton.me --password-stdin` writes the same config, and `npx mailpouch doctor` verifies it.
+Prefer the command line? `npx -y mailpouch setup --username you@proton.me --password-stdin` writes the same config, and `npx -y mailpouch doctor` verifies it.
 
 **Wire up Claude Desktop** — this form works whether or not mailpouch is globally installed:
 
