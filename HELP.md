@@ -27,8 +27,7 @@ Practical how-tos for every feature. For API reference see [README_FIRST_AI.md](
 ## 1. Quick Start
 
 ```bash
-npm install -g mailpouch
-mailpouch-settings          # opens the settings UI in your browser
+npx mailpouch-settings      # opens the settings UI in your browser (no install needed)
 ```
 
 **Three things you need before Claude can read your mail:**
@@ -39,17 +38,22 @@ mailpouch-settings          # opens the settings UI in your browser
 
 Fill these in on the Setup tab, click **Save Configuration**, then **Test Connections**. Green means ready.
 
-**Wire up Claude Desktop** (copy from the Status tab's MCP Config Snippet):
+Prefer the command line? `npx mailpouch setup --username you@proton.me --password-stdin` writes the same config, and `npx mailpouch doctor` verifies it.
+
+**Wire up Claude Desktop** — this form works whether or not mailpouch is globally installed:
 
 ```json
 {
   "mcpServers": {
     "mailpouch": {
-      "command": "mailpouch"
+      "command": "npx",
+      "args": ["-y", "mailpouch"]
     }
   }
 }
 ```
+
+(If you ran `npm install -g mailpouch`, you can use `"command": "mailpouch"` with no args instead. The Status tab's MCP Config Snippet generates the right form for your machine.)
 
 ---
 
@@ -61,8 +65,8 @@ Open **Settings → Setup tab**.
 
 | Field | Where to find it |
 |---|---|
-| SMTP host / port | `localhost` / `1025` (Bridge defaults) |
-| IMAP host / port | `localhost` / `1143` (Bridge defaults) |
+| SMTP host / port | `127.0.0.1` / `1025` (Bridge defaults) |
+| IMAP host / port | `127.0.0.1` / `1143` (Bridge defaults) |
 | Username | Your full Proton address (e.g. `you@proton.me`) |
 | Bridge password | Bridge → Settings → IMAP/SMTP → Password |
 | TLS cert | Bridge → Settings → Export TLS certificates → `cert.pem` |

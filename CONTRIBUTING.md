@@ -102,7 +102,7 @@ feat: add email filtering by date range
 
 ```
 src/
-├── index.ts                    # Unified daemon: MCP server (69 tools, Resources, Prompts) + settings HTTP server + system tray
+├── index.ts                    # Unified daemon: MCP server (76 tools, Resources, Prompts) + settings HTTP server + system tray
 ├── settings-main.ts            # Standalone settings-UI CLI entry point — hosts the persistent tray icon via mailpouch-settings
 ├── accounts/
 │   ├── registry.ts             # Multi-account CRUD + per-account keychain routing

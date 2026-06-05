@@ -132,6 +132,7 @@ import { sanitizeText } from "./settings/security.js";
 import { tracer } from "./utils/tracer.js";
 import { allToolDefs, allHandlers, escalationHandlers, describeRequestEscalation } from "./tools/registry.js";
 import type { ToolCallContext, ToolSharedState } from "./tools/types.js";
+import { gatherSetupStatus } from "./diagnostics/setup-status.js";
 
 // ─── Service Initialization ───────────────────────────────────────────────────
 // All credentials and connection settings are loaded from ~/.mailpouch.json
@@ -508,6 +509,29 @@ function truncateEmailBody(body: string, maxLength: number = 2000): string {
 
 // ─── MCP Server ───────────────────────────────────────────────────────────────
 
+// Returned in the MCP `initialize` response — the one channel a client/agent
+// reads to learn what this server is and how to get connected. Keep it tight;
+// clients inject it into the model's context on every session.
+const SERVER_INSTRUCTIONS =
+  "mailpouch is a local MCP server that exposes a Proton Mail / IMAP mailbox (via the Proton Bridge " +
+  "desktop app) as permission-gated, audit-logged tools. It runs on the user's machine; mail content " +
+  "you read is sent to your model provider for processing.\n\n" +
+  "GETTING CONNECTED — do this in order:\n" +
+  "1. Call `setup_status` FIRST. It is always available (even before approval) and tells you exactly " +
+  "what is wrong and the single next step.\n" +
+  "2. If it reports `unconfigured`: credentials must be set on the user's machine. Either run " +
+  "`npx mailpouch setup --username <you@proton.me> --password-stdin` (the Proton BRIDGE password, not " +
+  "the Proton login password), or ask the user to run `npx mailpouch-settings` for the interactive wizard.\n" +
+  "3. If it reports `bridge-unreachable`: ask the user to start the Proton Bridge app (signed in). " +
+  "Bridge listens on 127.0.0.1 — IMAP :1143, SMTP :1025.\n" +
+  "4. If it reports `pending-approval`: this is EXPECTED on first connect, not an error. Every agent is " +
+  "gated behind a human Approve/Deny. Ask the user to open the settings UI (default http://localhost:8766/#/agents) " +
+  "and click Approve, then retry. You cannot approve yourself.\n" +
+  "5. When it reports `ready`, call `get_connection_status` to confirm live auth, then use the mail tools.\n\n" +
+  "Use `request_permission_escalation` to ask the user for a higher permission preset. " +
+  "Full tool reference: README_FIRST_AI.md (https://github.com/chandshy/mailpouch/blob/main/README_FIRST_AI.md), " +
+  "also bundled in the installed package.";
+
 const server = new Server(
   { name: "mailpouch", version: _pkgVersion },
   {
@@ -516,6 +540,7 @@ const server = new Server(
       resources: { listChanged: false, subscribe: false },
       prompts: { listChanged: false },
     },
+    instructions: SERVER_INSTRUCTIONS,
   }
 );
 
@@ -574,6 +599,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   const { body: _b, attachments: _a, password: _p, ...safeArgs } = args as Record<string, unknown>;
   logger.debug(`Tool: ${name}`, "MCPServer", safeArgs);
+
+  // ── setup_status: ungated install/connect diagnostic (CALL FIRST) ─────────
+  // Pre-gate like the escalation tools so an agent with no credentials, an
+  // unreachable Bridge, or an unapproved grant can still learn exactly what is
+  // wrong and the single next action. Read-only; never grants or mutates.
+  if (name === "setup_status") {
+    const diagCaller = currentCaller() ?? _stdioCaller ?? undefined;
+    const diagGrant = diagCaller ? agentGrants.get(diagCaller.clientId) : undefined;
+    const result = await gatherSetupStatus({
+      grant: diagGrant ? { status: diagGrant.status, clientName: diagGrant.clientName } : undefined,
+    });
+    return {
+      content: [{ type: "text" as const, text: result.summary }],
+      structuredContent: result as unknown as Record<string, unknown>,
+    };
+  }
 
   // ── Always-available meta-tools (bypass permission gate) ─────────────────
   // These tools let the agent REQUEST more access — but they can never GRANT it.
@@ -1443,6 +1484,7 @@ export function createSessionServer(): Server {
         resources: { listChanged: false, subscribe: false },
         prompts: { listChanged: false },
       },
+      instructions: SERVER_INSTRUCTIONS,
     },
   );
   // Capture the MCP handshake's connection info onto this agent's grant for
@@ -2130,6 +2172,20 @@ async function main() {
     const { runAgentCli } = await import("./cli/agent-cli.js");
     const code = await runAgentCli(process.argv.slice(3), { serviceAccounts, agentGrants });
     process.exit(code);
+  }
+
+  // `mailpouch setup …` writes Bridge credentials to ~/.mailpouch.json + keychain
+  // non-interactively (the agent/CI path; the wizard remains the default for
+  // humans). `mailpouch doctor` prints the install/connect diagnosis and exits.
+  // Both run offline — no Bridge connect, no transport — before any server side
+  // effects, mirroring the `agent` subcommand above.
+  if (process.argv[2] === "setup") {
+    const { runSetupCli } = await import("./cli/setup-cli.js");
+    process.exit(await runSetupCli(process.argv.slice(3)));
+  }
+  if (process.argv[2] === "doctor") {
+    const { runDoctorCli } = await import("./cli/doctor-cli.js");
+    process.exit(await runDoctorCli(process.argv.slice(3)));
   }
 
   // `mailpouch daemon [--host H] [--port P]` runs the shared HTTP daemon

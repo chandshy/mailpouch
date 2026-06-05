@@ -24,6 +24,7 @@ import * as bridge     from "./bridge.js";
 import * as aliases    from "./aliases.js";
 import * as pass       from "./pass.js";
 import * as drafts     from "./drafts.js";
+import * as diagnostics from "./diagnostics.js";
 import * as escalation from "./escalation.js";
 
 import type { ToolDef, ToolHandler } from "./types.js";
@@ -44,6 +45,7 @@ export function allToolDefs(): ToolDef[] {
     ...pass.defs,
     ...drafts.defs,
     ...reading.defsLate,
+    ...diagnostics.defs,
     ...escalation.defs,
   ];
 }

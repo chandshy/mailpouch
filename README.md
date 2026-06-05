@@ -4,7 +4,7 @@
 
 The pitch in one line: if you picked Proton Mail because you didn't want a third party reading your inbox, you don't suddenly want to hand a chatbot OAuth access to that same inbox so it can triage on your behalf. The usual "connect your email" integrations route everything through someone else's servers and ask for blanket scopes. Hand-rolled IMAP inside the agent is worse — no permission boundary, no audit trail, and the model holds your credentials in its context window. Neither option respects why you chose the provider in the first place.
 
-`mailpouch` runs locally and speaks to Proton Bridge over a TLS socket on your own machine; nothing leaves the box unless you asked it to. 73 tools across reading, sending, drafts, folders, search, analytics, aliases, Proton Pass, and system control, tiered into `core` / `extended` / `complete` so an agent that only reads doesn't burn context on Bridge lifecycle tools it will never call. Every connecting client gets its own grant with folder allowlists, IP pins, per-tool rate caps, expiry, and account binding — all hashed-args in the audit log, never the values. Delete, trash, spam, and alias removal round-trip through MCP elicitation for human confirmation before they execute. That last part sounds like theatre until you watch an agent try to empty a folder and get blocked mid-call.
+`mailpouch` runs locally and speaks to Proton Bridge over a TLS socket on your own machine; nothing leaves the box unless you asked it to. 76 tools across reading, sending, drafts, folders, search, analytics, aliases, Proton Pass, and system control, tiered into `core` / `extended` / `complete` so an agent that only reads doesn't burn context on Bridge lifecycle tools it will never call. Every connecting client gets its own grant with folder allowlists, IP pins, per-tool rate caps, expiry, and account binding — all hashed-args in the audit log, never the values. Delete, trash, spam, and alias removal round-trip through MCP elicitation for human confirmation before they execute. That last part sounds like theatre until you watch an agent try to empty a folder and get blocked mid-call.
 
 It is real because the primitives are real: OAuth 2.1 with PKCE S256, RFC 7591 dynamic client registration, RFC 8707 resource indicators, RFC 9728 protected-resource metadata, and an OAuth `client_credentials` grant so headless agents authenticate too — every agent gets its own gated, revocable identity. Credentials live in the OS keychain. A local FTS5 index with BM25 ranking handles phrase, boolean, prefix, and column-filter queries so your search terms never leave your laptop. Desktop notifications use native `osascript` / `notify-send` / `powershell.exe` with no added dependency; webhook dispatch auto-detects CloudEvents 1.0, Slack, or Discord, signs with HMAC, and retries with eight-attempt exponential backoff. So how do you point it at your Bridge install and wire up a client?
 
@@ -14,7 +14,7 @@ It is real because the primitives are real: OAuth 2.1 with PKCE S256, RFC 7591 d
 [![Node.js](https://img.shields.io/badge/node-%3E%3D20.0.0-brightgreen.svg)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-6.0-blue.svg)](https://www.typescriptlang.org/)
 [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-1.29+-green.svg)](https://github.com/modelcontextprotocol/sdk)
-[![Tests](https://img.shields.io/badge/tests-1%2C967%20passing-brightgreen.svg)](#development)
+[![Tests](https://img.shields.io/badge/tests-2%2C179%20passing-brightgreen.svg)](#development)
 
 **Read, compose, and manage your encrypted Proton Mail inbox from any AI assistant — over stdio or remote HTTP — with human-controlled permissions.**
 
@@ -45,9 +45,32 @@ Your emails are decrypted on your own machine by Proton Bridge. This server neve
 
 ---
 
+## Quick Start (zero to running)
+
+Prereq: [Proton Bridge](https://proton.me/mail/bridge) installed, running, and signed in.
+
+1. **Add the MCP server to your client.** This one form works whether or not mailpouch is globally installed:
+
+   ```json
+   { "mcpServers": { "mailpouch": { "command": "npx", "args": ["-y", "mailpouch"] } } }
+   ```
+
+2. **Configure Bridge credentials** — either path writes `~/.mailpouch.json` (+ OS keychain):
+   - Interactive wizard: `npx mailpouch-settings`
+   - Non-interactive (scriptable / agent-driven): `npx mailpouch setup --username you@proton.me --password-stdin`
+     (paste the Proton **Bridge** password — Bridge → Settings → IMAP/SMTP → Password — **not** your Proton login password)
+
+3. **Verify:** `npx mailpouch doctor` — prints the exact next step until it reports `ready`. (Agents can call the always-available `setup_status` tool for the same diagnosis.)
+
+4. **Approve the agent.** On first connect, every client is gated behind a one-time human Approve/Deny — open the settings UI (`http://localhost:8766/#/agents`) and click Approve. This is expected, not an error.
+
+That's it. The sections below cover everything in depth.
+
+---
+
 ## Key Features
 
-- **73 tools** across 11 categories — reading, search, analytics, sending, drafts, scheduling, follow-up reminders, folder management, bulk actions, deletion, Bridge/server lifecycle, plus optional companion services (SimpleLogin aliases, Proton Pass, local FTS5 search). See [`src/config/schema.ts`](src/config/schema.ts) (`ALL_TOOLS`, `TOOL_CATEGORIES`) for the canonical inventory.
+- **76 tools** — 73 categorized across 11 categories (reading, search, analytics, sending, drafts, scheduling, follow-up reminders, folder management, bulk actions, deletion, Bridge/server lifecycle, plus optional companion services: SimpleLogin aliases, Proton Pass, local FTS5 search), plus 3 always-available meta-tools (`setup_status`, `request_permission_escalation`, `check_escalation_status`). See [`src/config/schema.ts`](src/config/schema.ts) (`ALL_TOOLS`, `TOOL_CATEGORIES`, `ALWAYS_AVAILABLE_TOOLS`) for the canonical inventory.
 - **Two transports** — stdio (default, Claude Desktop) and HTTP (remote / self-host). HTTP is OAuth-only: `authorization_code` + PKCE-S256 for interactive agents and `client_credentials` for headless service accounts, with RFC 7591 Dynamic Client Registration, RFC 8414 authorization-server metadata, and RFC 9728 protected-resource metadata. Per-caller token-bucket rate limiting on every endpoint.
 - **Progressive tool tiering** — `core` / `extended` / `complete` controls how many tools land in the client's `ListTools` response, so context isn't burned on tools you don't use. Configurable via `toolTier` or `MAILPOUCH_TIER`.
 - **Destructive-tool confirmation** — uses MCP elicitation when the client supports it (Claude Desktop, Cline) so the user sees a prompt before any delete / trash / spam / `alias_delete` / `pass_get` runs. Falls back to a required `{ confirmed: true }` argument for clients without elicitation.
@@ -63,7 +86,7 @@ Your emails are decrypted on your own machine by Proton Bridge. This server neve
 - **Multi-account** — configure more than one Proton / IMAP account; hot-swap the active account from the Settings UI with no server restart. Tools accept an optional `account_id` argument to route a single call to a specific account. See [`src/accounts/`](src/accounts/).
 - **Per-agent grants** — each MCP client (identified by its OAuth `client_id`) is gated by its own approvable grant, with optional folder allowlists, IP pins, per-tool rate caps, expiry, and account binding. Separate from the global preset and the escalation flow. See [`src/agents/`](src/agents/).
 - **Live notifications** — desktop toasts (no extra deps) and outbound webhooks (CloudEvents / Slack / Discord, HMAC-signed, retried) fire on grant-state changes. See [`src/notifications/`](src/notifications/).
-- **1,967 tests passing** (Vitest); minimal `any` usage in production source (private Node.js readline internals only).
+- **2,179 tests passing** (Vitest); minimal `any` usage in production source (private Node.js readline internals only).
 
 **Documentation:** [HELP.md](HELP.md) (task-oriented how-tos) · [README_FIRST_AI.md](README_FIRST_AI.md) (agent API reference) · [docs/index.md](docs/index.md) (full index)
 
@@ -137,6 +160,8 @@ Bridge listens locally on:
 npm install -g mailpouch
 ```
 
+Or skip the install entirely — `npx -y mailpouch` runs the latest published version on demand, which is exactly what the canonical MCP client config below uses.
+
 ### Option B — From source
 
 ```bash
@@ -180,11 +205,32 @@ The **6-step wizard** walks you through everything automatically:
 
 Settings are saved to `~/.mailpouch.json` with mode `0600` (owner read/write only). The Bridge password and SMTP token prefer the OS keychain when available.
 
+### Non-interactive setup (agents / CI)
+
+When a browser/TUI wizard isn't an option, configure credentials from the command line — it writes the same `~/.mailpouch.json` (+ keychain) the wizard does:
+
+```bash
+# password from stdin (keeps the secret out of the process list)
+printf '%s' "$BRIDGE_PASSWORD" | npx mailpouch setup --username you@proton.me --password-stdin
+
+# or from a file, or inline; optional non-default ports / cert
+npx mailpouch setup --username you@proton.me --password-file ./bridge.pw \
+  [--imap-host 127.0.0.1 --imap-port 1143 --smtp-host 127.0.0.1 --smtp-port 1025] \
+  [--bridge-cert /path/cert.pem | --insecure]
+```
+
+Then check the install end-to-end:
+
+```bash
+npx mailpouch doctor          # human-readable diagnosis + next step; exit 0 when ready
+npx mailpouch doctor --json   # structured output for scripts
+```
+
+`doctor` reports the same state machine the always-available `setup_status` MCP tool returns: `unconfigured` → `bridge-unreachable` → `pending-approval` → `ready`, each with the exact action to advance.
+
 ---
 
 ## Claude Desktop Configuration (stdio)
-
-**Use the settings wizard to get the correct snippet for your machine.** The final step of the wizard (or the Status tab → MCP Config Snippet) generates and copies the exact JSON to use — the path to the installed package differs per machine and OS.
 
 The config file locations are:
 
@@ -192,20 +238,40 @@ The config file locations are:
 - **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
 - **Linux:** `~/.config/Claude/claude_desktop_config.json`
 
-The generated entry looks like this (your path will differ):
+**Canonical entry — works whether or not mailpouch is globally installed:**
+
+```json
+{
+  "mcpServers": {
+    "mailpouch": {
+      "command": "npx",
+      "args": ["-y", "mailpouch"]
+    }
+  }
+}
+```
+
+This is the same JSON shown in `llms.txt` and `README_FIRST_AI.md` — use it everywhere. If you installed globally (`npm install -g mailpouch`) you may instead use `"command": "mailpouch"` with no args. Restart the client after saving.
+
+<details>
+<summary>Running from a source checkout (Option B)</summary>
+
+If you cloned the repo instead of installing from npm, point the client at the built entry file directly (your path will differ):
 
 ```json
 {
   "mcpServers": {
     "mailpouch": {
       "command": "node",
-      "args": ["/path/to/node_modules/mailpouch/dist/index.js"]
+      "args": ["/path/to/mailpouch/dist/index.js"]
     }
   }
 }
 ```
 
-The wizard can also write this entry to your client config automatically — click **Write to Claude Desktop** on the Done step. Restart the client after saving.
+</details>
+
+The settings wizard can also write the entry to your client config automatically — click **Write to Claude Desktop** on the Done step.
 
 ---
 
@@ -590,7 +656,7 @@ npm install
 
 npm run build          # compile TypeScript to dist/
 npm run dev            # watch mode (recompiles on save)
-npm run test           # run test suite (Vitest, 1,967 tests)
+npm run test           # run test suite (Vitest, 2,179 tests)
 npm run test:coverage  # coverage report
 npm run lint           # TypeScript type check (tsc --noEmit)
 npm run settings       # start standalone settings UI (after build)
@@ -600,7 +666,7 @@ npm run settings       # start standalone settings UI (after build)
 
 ```
 src/
-  index.ts                    # Unified daemon: MCP server (73 tools, resources, prompts) + settings + tray
+  index.ts                    # Unified daemon: MCP server (76 tools, resources, prompts) + settings + tray
   settings-main.ts            # Standalone settings UI CLI (for headless/SSH environments)
   # (Tray moved to native/tray/ — napi-rs binding around tauri-apps/tray-icon)
   config/
