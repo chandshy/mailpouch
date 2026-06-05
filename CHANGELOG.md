@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [3.0.75] — 2026-06-05
 
 Foolproof install & authentication for AI agents — close the "an AI can't recognize, install, or connect this MCP server" gap surfaced in the field. The MCP server now describes itself on `initialize`, ships an always-available diagnostic, and exposes a non-interactive credential path so an agent can go from zero to connected without driving a browser.
 
