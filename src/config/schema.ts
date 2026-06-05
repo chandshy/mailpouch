@@ -378,7 +378,7 @@ export interface ServerConfig {
   /**
    * Progressive tool-disclosure tier. Controls how many tools appear in the
    * ListTools response — reduces context bloat when only a subset is needed.
-   *   "core"     — reading / sending / analytics / system (27 tools + 2 escalation = 29 visible)
+   *   "core"     — reading / sending / analytics / system (27 categorized + 3 meta = 30 visible)
    *   "extended" — core + drafts / folders / actions
    *   "complete" — all tools (default, preserves current behavior)
    * Override per-launch with MAILPOUCH_TIER.
@@ -505,10 +505,11 @@ export type ToolTier = "core" | "extended" | "complete";
 /**
  * Where each category surfaces first.
  *
- * Actual tool counts per tier (cumulative, including always-available escalation tools):
- *   core     — 27 tools (reading 14 + sending 4 + analytics 4 + system 5)  + 2 escalation = 29 visible
- *   extended — 64 tools (core 27 + drafts 9 + folders 5 + actions 14 + aliases 6 + pass 3) + 2 = 66 visible
- *   complete — 70 tools (extended 64 + deletion 3 + bridge_control 3)                       + 2 = 72 visible
+ * Actual tool counts per tier (cumulative, including the 3 always-available
+ * meta-tools: setup_status + request_permission_escalation + check_escalation_status):
+ *   core     — 27 categorized (reading 14 + sending 4 + analytics 4 + system 5)            + 3 meta = 30 visible
+ *   extended — 66 categorized (core 27 + drafts 9 + folders 5 + actions 16 + aliases 6 + pass 3) + 3 = 69 visible
+ *   complete — 73 categorized (extended 66 + deletion 4 + bridge_control 3)                       + 3 = 76 visible
  */
 export const TOOL_CATEGORY_TIER: Record<string, ToolTier> = {
   reading:        "core",     // reading is the 80 % use case
@@ -525,11 +526,15 @@ export const TOOL_CATEGORY_TIER: Record<string, ToolTier> = {
 };
 
 /**
- * Escalation tools (request_permission_escalation, check_escalation_status)
- * are always available — they bypass the permission gate and sit outside the
- * category registry. They are also outside the tiering system.
+ * Always-available meta-tools — they bypass the permission gate, sit outside
+ * the category registry, and ignore the tiering system (visible at every tier):
+ *   setup_status                  — read-only install/connect diagnostic (CALL FIRST)
+ *   request_permission_escalation — ask a human for a higher preset
+ *   check_escalation_status       — poll an escalation request
+ * None can GRANT access; they only report or request.
  */
 export const ALWAYS_AVAILABLE_TOOLS: ReadonlySet<string> = new Set<string>([
+  "setup_status",
   "request_permission_escalation",
   "check_escalation_status",
 ]);

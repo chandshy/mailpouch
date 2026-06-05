@@ -4,9 +4,29 @@
 
 mailpouch connects to Proton Bridge over a local TLS socket. Email is decrypted by Bridge on the user's device; the MCP server never persists email to disk and wipes the in-memory cache on shutdown. It works with Claude Desktop, Cline, and any MCP-compatible host over stdio or HTTP.
 
+## Quick start (AI agents)
+
+Get connected in this exact order. The server's own MCP `initialize` instructions repeat these steps.
+
+1. **Add the MCP server** to your client config (this single form works everywhere — global install or not):
+
+   ```json
+   { "mcpServers": { "mailpouch": { "command": "npx", "args": ["-y", "mailpouch"] } } }
+   ```
+
+2. **Call `setup_status` FIRST.** It is always available — even before credentials are set or this agent is approved — and returns the single next action. Its `state` is one of:
+   - `unconfigured` — credentials aren't set. Run `npx mailpouch setup --username <you@proton.me> --password-stdin` (the Proton **Bridge** password — Bridge app → Settings → IMAP/SMTP → Password — **not** the Proton login password), or ask the user to run `npx mailpouch-settings` for the interactive wizard.
+   - `bridge-unreachable` — ask the user to start the Proton Bridge desktop app (signed in). Bridge listens on **127.0.0.1** (IMAP 1143, SMTP 1025).
+   - `pending-approval` — **expected on first connect, not an error.** Every agent is gated behind a human Approve/Deny. Ask the user to open the settings UI (default `http://localhost:8766/#/agents`) and click Approve, then retry. You cannot approve yourself.
+   - `ready` — call `get_connection_status` to confirm live auth, then use the mail tools.
+
+3. **`npx mailpouch doctor`** prints the same diagnosis from a shell and exits non-zero until the install is `ready` — useful for scripted setup.
+
+Credentials are entered on the user's machine and stored in the OS keychain (or `~/.mailpouch.json`, mode 0600); never ask the user to paste their password into the chat — the server injects it.
+
 ## Documentation
 
-- [README.md](README.md): Full human-facing documentation — installation, configuration, permission presets, security model, all 70 tools listed by category.
+- [README.md](README.md): Full human-facing documentation — installation, configuration, permission presets, security model, all 76 tools listed by category.
 - [README_FIRST_AI.md](README_FIRST_AI.md): AI agent guide — read this before calling any tools. Covers tool reference, parameter specs, limits, error handling, operating guidelines, and the escalation flow.
 - [SECURITY.md](SECURITY.md): Security model, responsible disclosure policy.
 - [CONTRIBUTING.md](CONTRIBUTING.md): Development setup and contribution guidelines.
@@ -15,8 +35,8 @@ mailpouch connects to Proton Bridge over a local TLS socket. Email is decrypted 
 
 ## Key facts for agents
 
-- **70 tools** across reading, search, analytics, sending, drafts, scheduling, follow-up reminders, folder management, bulk actions, deletion, SimpleLogin aliases, Proton Pass, Bridge/server lifecycle. Full list in `src/config/schema.ts` (`ALL_TOOLS`).
-- **Tool tiering**: `core` (~27 tools), `extended` (adds drafts/folders/actions/aliases/Pass), `complete` (default, all tools). The `ListTools` response reflects the active tier — agents cannot call tools not in the list.
+- **76 tools** (73 categorized in `src/config/schema.ts` `ALL_TOOLS`, plus 3 always-available meta-tools: `setup_status`, `request_permission_escalation`, `check_escalation_status`) across reading, search, analytics, sending, drafts, scheduling, follow-up reminders, folder management, bulk actions, deletion, SimpleLogin aliases, Proton Pass, Bridge/server lifecycle.
+- **Tool tiering**: `core` (27 categorized + 3 meta = 30 visible), `extended` (66 + 3 = 69 visible), `complete` (default, 73 + 3 = 76 visible). The `ListTools` response reflects the active tier — agents cannot call tools not in the list. The 3 meta-tools are visible at every tier.
 - **Permission presets**: `read_only` (default), `send_only`, `supervised`, `full`, `custom`. Enforced server-side. Agents cannot bypass them.
 - **Remote auth (HTTP) is OAuth-only — every agent authenticates as its own client; there is no shared bearer token.** Interactive agents self-register (RFC 7591 DCR) and use `authorization_code` + PKCE, gated by a human Approve/Deny in the Agents tab. Headless agents (cron, CI) use a pre-approved *service account* and the OAuth `client_credentials` grant (own `client_id` + `client_secret`). Operators provision them with `mailpouch agent issue --name <n> --preset <preset>` (or the Agents-tab "+ Service account" button). Local stdio callers are gated too. Every authenticated call resolves to a distinct, revocable identity and is written to the per-agent audit log.
 - **Human-gated escalation**: use `request_permission_escalation` + `check_escalation_status` to request temporary elevated access. A human must approve via browser UI or terminal.
@@ -32,5 +52,5 @@ mailpouch connects to Proton Bridge over a local TLS socket. Email is decrypted 
 
 - GitHub: https://github.com/chandshy/mailpouch
 - npm: https://www.npmjs.com/package/mailpouch
-- Install: `npm install -g mailpouch`
+- Install/run: `npx -y mailpouch` (no global install needed), or `npm install -g mailpouch`
 - MCP SDK: 1.29+, Node.js ≥ 20

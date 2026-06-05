@@ -153,6 +153,7 @@ describe("Tool tiering", () => {
       expect(core.has("get_email_stats")).toBe(true);     // analytics
       expect(core.has("get_connection_status")).toBe(true); // system
       expect(core.has("request_permission_escalation")).toBe(true); // always available
+      expect(core.has("setup_status")).toBe(true);          // always available (CALL FIRST diagnostic)
       // Not in core:
       expect(core.has("delete_email")).toBe(false);       // deletion → complete
       expect(core.has("save_draft")).toBe(false);         // drafts → extended

@@ -7,6 +7,25 @@
 
 ---
 
+## Getting connected (do this first)
+
+If mail tools are failing or you're not sure the server is set up, **call `setup_status`** — it is always available (even before credentials exist or you're approved) and returns the single next action. Its `state`:
+
+| `state` | What it means | What to do |
+|---|---|---|
+| `unconfigured` | No credentials on the machine | Ask the user to run `npx mailpouch setup --username <addr> --password-stdin` (the Proton **Bridge** password, not the login password) or `npx mailpouch-settings`. You cannot do this for them. |
+| `bridge-unreachable` | Proton Bridge isn't running | Ask the user to start the Proton Bridge app, signed in (IMAP `127.0.0.1:1143`, SMTP `127.0.0.1:1025`). |
+| `pending-approval` | **Expected on first connect** — you're registered but not yet approved | Ask the user to open `http://localhost:8766/#/agents` and click Approve, then retry. This is not an error; you cannot approve yourself. |
+| `ready` | Good to go | Call `get_connection_status` to confirm live auth, then use the tools below. |
+
+The MCP client config that launches this server (for the user's reference):
+
+```json
+{ "mcpServers": { "mailpouch": { "command": "npx", "args": ["-y", "mailpouch"] } } }
+```
+
+---
+
 ## Quick orientation
 
 You have access to a user's Proton Mail inbox via Proton Bridge (a local

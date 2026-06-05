@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Foolproof install & authentication for AI agents — close the "an AI can't recognize, install, or connect this MCP server" gap surfaced in the field. The MCP server now describes itself on `initialize`, ships an always-available diagnostic, and exposes a non-interactive credential path so an agent can go from zero to connected without driving a browser.
+
+### Added
+
+- **MCP server `instructions`** — the `initialize` response now carries a concise identity + connect-lifecycle guide (call `setup_status` first; what `unconfigured` / `bridge-unreachable` / `pending-approval` / `ready` mean and the exact next action). Set on both the stdio and the per-session HTTP `Server`. This is the channel a client/agent reads to learn what the server is; it was previously empty.
+- **`setup_status` tool** — always-available, ungated, read-only install/connect diagnostic (dispatched pre-gate like the escalation meta-tools, so an agent with no credentials, no reachable Bridge, or no approved grant can still call it). Returns a `state` machine + the single next step. Visible at every tool tier. Because it is reachable pre-approval, it **redacts** the mailbox address (masked local-part) and the absolute config path for any caller whose grant is not yet `active`.
+- **`mailpouch setup` CLI** — non-interactive credential setup (`--username`, `--password-stdin` / `--password-file` / `--password`, optional host/port/cert flags). Writes through the same account registry the settings UI uses (`writeRegistry`), so the secret lands on the **authoritative per-account** keychain key (`bridge-password:<id>`) — not the legacy key, which a per-account install would shadow — and updates the active account (synthesizing `primary` on a fresh install). The agent/CI path; the interactive wizard remains the default for humans.
+- **`mailpouch doctor` CLI** — prints the `setup_status` diagnosis from a shell (`--json` for scripts); exits non-zero until the install is `ready`.
+
+### Changed
+
+- **Single canonical MCP client config** across README, HELP, README_FIRST_AI, and llms.txt: `{ "command": "npx", "args": ["-y", "mailpouch"] }` — works with or without a global install. The `node /path/.../dist/index.js` form is now labelled as the source-checkout option only.
+- **`llms.txt` leads with an AI quickstart** (config → `setup_status` → setup → approve) and README/README_FIRST_AI gain a "zero to running" block.
+- **Documentation consistency:** tool count reconciled to **76** (73 categorized + 3 always-available meta-tools) everywhere — the previous docs drifted across 69/70/73; Bridge host shown as `127.0.0.1` (not `localhost`) in the connection tables.
+
 ## [3.0.74] — 2026-06-04
 
 Bridge-capability program — a subsystem-by-subsystem TDD redesign with a per-function multi-agent ultra-review to a 9.5 quality bar (8 phases, `docs/quality-audit.md`). Adds the gated `empty_trash` and `mark_answered`/`mark_forwarded` capabilities and fixes a fail-open folder-delete protection hole, an attachment-download OOM bypass, two search under-return bugs, the `$Forwarded` write/read asymmetry, the SMTP TLS divergence + IPv6 `::1` handling, and the multi-account keychain credential shadow.
