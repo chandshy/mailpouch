@@ -520,8 +520,8 @@ const SERVER_INSTRUCTIONS =
   "1. Call `setup_status` FIRST. It is always available (even before approval) and tells you exactly " +
   "what is wrong and the single next step.\n" +
   "2. If it reports `unconfigured`: credentials must be set on the user's machine. Either run " +
-  "`npx mailpouch setup --username <you@proton.me> --password-stdin` (the Proton BRIDGE password, not " +
-  "the Proton login password), or ask the user to run `npx mailpouch-settings` for the interactive wizard.\n" +
+  "`npx -y mailpouch setup --username <you@proton.me> --password-stdin` (the Proton BRIDGE password, not " +
+  "the Proton login password), or ask the user to run `npx -y mailpouch-settings` for the interactive wizard.\n" +
   "3. If it reports `bridge-unreachable`: ask the user to start the Proton Bridge app (signed in). " +
   "Bridge listens on 127.0.0.1 — IMAP :1143, SMTP :1025.\n" +
   "4. If it reports `pending-approval`: this is EXPECTED on first connect, not an error. Every agent is " +

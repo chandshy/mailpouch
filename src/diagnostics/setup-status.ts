@@ -63,10 +63,10 @@ export interface SetupStatusResult {
 }
 
 const SETUP_HINT =
-  "Run:  npx mailpouch setup --username <you@proton.me> --password-stdin\n" +
+  "Run:  npx -y mailpouch setup --username <you@proton.me> --password-stdin\n" +
   "  (paste your Proton BRIDGE password — Bridge app -> Settings -> IMAP/SMTP -> Password — " +
   "NOT your Proton login password.)\n" +
-  "  Or launch the interactive wizard:  npx mailpouch-settings";
+  "  Or launch the interactive wizard:  npx -y mailpouch-settings";
 
 /** Mask an email's local part so it isn't disclosed to an unapproved caller. */
 function maskEmail(email: string): string {
@@ -157,7 +157,10 @@ export function computeSetupStatus(input: SetupStatusInput): SetupStatusResult {
     configured,
     bridgeReachable,
     configExists: input.configExists,
-    configPath: input.configExists ? displayConfigPath : input.configPath,
+    // Always go through displayConfigPath — never the raw absolute path — so a
+    // pending/unapproved caller can't read the home dir (and OS username) even
+    // on first run when the config file doesn't exist yet.
+    configPath: displayConfigPath,
     username: displayUsername || null,
     credentialStorage: input.credentialStorage,
     imap: input.imap,

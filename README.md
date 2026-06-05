@@ -14,7 +14,7 @@ It is real because the primitives are real: OAuth 2.1 with PKCE S256, RFC 7591 d
 [![Node.js](https://img.shields.io/badge/node-%3E%3D20.0.0-brightgreen.svg)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-6.0-blue.svg)](https://www.typescriptlang.org/)
 [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-1.29+-green.svg)](https://github.com/modelcontextprotocol/sdk)
-[![Tests](https://img.shields.io/badge/tests-2%2C179%20passing-brightgreen.svg)](#development)
+[![Tests](https://img.shields.io/badge/tests-2%2C180%20passing-brightgreen.svg)](#development)
 
 **Read, compose, and manage your encrypted Proton Mail inbox from any AI assistant — over stdio or remote HTTP — with human-controlled permissions.**
 
@@ -56,11 +56,11 @@ Prereq: [Proton Bridge](https://proton.me/mail/bridge) installed, running, and s
    ```
 
 2. **Configure Bridge credentials** — either path writes `~/.mailpouch.json` (+ OS keychain):
-   - Interactive wizard: `npx mailpouch-settings`
-   - Non-interactive (scriptable / agent-driven): `npx mailpouch setup --username you@proton.me --password-stdin`
+   - Interactive wizard: `npx -y mailpouch-settings`
+   - Non-interactive (scriptable / agent-driven): `npx -y mailpouch setup --username you@proton.me --password-stdin`
      (paste the Proton **Bridge** password — Bridge → Settings → IMAP/SMTP → Password — **not** your Proton login password)
 
-3. **Verify:** `npx mailpouch doctor` — prints the exact next step until it reports `ready`. (Agents can call the always-available `setup_status` tool for the same diagnosis.)
+3. **Verify:** `npx -y mailpouch doctor` — prints the exact next step until it reports `ready`. (Agents can call the always-available `setup_status` tool for the same diagnosis.)
 
 4. **Approve the agent.** On first connect, every client is gated behind a one-time human Approve/Deny — open the settings UI (`http://localhost:8766/#/agents`) and click Approve. This is expected, not an error.
 
@@ -86,7 +86,7 @@ That's it. The sections below cover everything in depth.
 - **Multi-account** — configure more than one Proton / IMAP account; hot-swap the active account from the Settings UI with no server restart. Tools accept an optional `account_id` argument to route a single call to a specific account. See [`src/accounts/`](src/accounts/).
 - **Per-agent grants** — each MCP client (identified by its OAuth `client_id`) is gated by its own approvable grant, with optional folder allowlists, IP pins, per-tool rate caps, expiry, and account binding. Separate from the global preset and the escalation flow. See [`src/agents/`](src/agents/).
 - **Live notifications** — desktop toasts (no extra deps) and outbound webhooks (CloudEvents / Slack / Discord, HMAC-signed, retried) fire on grant-state changes. See [`src/notifications/`](src/notifications/).
-- **2,179 tests passing** (Vitest); minimal `any` usage in production source (private Node.js readline internals only).
+- **2,180 tests passing** (Vitest); minimal `any` usage in production source (private Node.js readline internals only).
 
 **Documentation:** [HELP.md](HELP.md) (task-oriented how-tos) · [README_FIRST_AI.md](README_FIRST_AI.md) (agent API reference) · [docs/index.md](docs/index.md) (full index)
 
@@ -190,7 +190,7 @@ Tools in unconfigured groups return a clean configuration error rather than fail
 Run the settings server to complete first-time setup:
 
 ```bash
-npx mailpouch-settings
+npx -y mailpouch-settings
 # Then open http://localhost:8766
 ```
 
@@ -211,10 +211,10 @@ When a browser/TUI wizard isn't an option, configure credentials from the comman
 
 ```bash
 # password from stdin (keeps the secret out of the process list)
-printf '%s' "$BRIDGE_PASSWORD" | npx mailpouch setup --username you@proton.me --password-stdin
+printf '%s' "$BRIDGE_PASSWORD" | npx -y mailpouch setup --username you@proton.me --password-stdin
 
 # or from a file, or inline; optional non-default ports / cert
-npx mailpouch setup --username you@proton.me --password-file ./bridge.pw \
+npx -y mailpouch setup --username you@proton.me --password-file ./bridge.pw \
   [--imap-host 127.0.0.1 --imap-port 1143 --smtp-host 127.0.0.1 --smtp-port 1025] \
   [--bridge-cert /path/cert.pem | --insecure]
 ```
@@ -222,8 +222,8 @@ npx mailpouch setup --username you@proton.me --password-file ./bridge.pw \
 Then check the install end-to-end:
 
 ```bash
-npx mailpouch doctor          # human-readable diagnosis + next step; exit 0 when ready
-npx mailpouch doctor --json   # structured output for scripts
+npx -y mailpouch doctor          # human-readable diagnosis + next step; exit 0 when ready
+npx -y mailpouch doctor --json   # structured output for scripts
 ```
 
 `doctor` reports the same state machine the always-available `setup_status` MCP tool returns: `unconfigured` → `bridge-unreachable` → `pending-approval` → `ready`, each with the exact action to advance.
@@ -481,7 +481,7 @@ The escalation system lets an agent request broader permissions without permanen
 - CSRF-protected: the approval API requires a session token embedded only in the rendered HTML page
 - Rate-limited: max 5 escalation requests per hour, max 1 pending at a time
 - Audit trail: every request, approval, and denial is appended to `~/.mailpouch.audit.jsonl`
-- Approve from another device: `npx mailpouch-settings --lan`
+- Approve from another device: `npx -y mailpouch-settings --lan`
 
 ---
 
@@ -492,13 +492,13 @@ The settings UI starts automatically on `http://localhost:8766` whenever your MC
 To run the settings UI standalone (useful for initial setup, headless / SSH systems, or a dedicated remote-mode host):
 
 ```bash
-npx mailpouch-settings           # auto-detects display; opens browser if available
-npx mailpouch-settings --port 9000   # custom port (default: 8766)
-npx mailpouch-settings --lan         # bind to 0.0.0.0 (approve from phone/other device)
-npx mailpouch-settings --browser     # force browser UI even if no display detected
-npx mailpouch-settings --tui         # force interactive terminal UI
-npx mailpouch-settings --plain       # plain readline menus (no ANSI colors/escapes)
-npx mailpouch-settings --no-open     # start server but don't auto-open browser
+npx -y mailpouch-settings           # auto-detects display; opens browser if available
+npx -y mailpouch-settings --port 9000   # custom port (default: 8766)
+npx -y mailpouch-settings --lan         # bind to 0.0.0.0 (approve from phone/other device)
+npx -y mailpouch-settings --browser     # force browser UI even if no display detected
+npx -y mailpouch-settings --tui         # force interactive terminal UI
+npx -y mailpouch-settings --plain       # plain readline menus (no ANSI colors/escapes)
+npx -y mailpouch-settings --no-open     # start server but don't auto-open browser
 ```
 
 The same standalone behaviour is available from the main binary via `mailpouch --settings-only`: it starts only the settings UI + tray (no MCP transport, no Bridge connect) and stays running until you quit it from the tray or with Ctrl-C. Unlike a bare `mailpouch`, it is safe to launch detached (autostart / `nohup` / a wrapper) — it does not tie its lifetime to stdin.
@@ -638,7 +638,7 @@ Canonical code: [`src/notifications/desktop.ts`](src/notifications/desktop.ts), 
 - Confirm the `mcpServers` block is valid JSON (no trailing commas).
 - Fully quit and reopen Claude Desktop.
 - Check MCP logs: **Help → Show Logs**.
-- Verify the server starts manually: `npx mailpouch` — it should stay running silently.
+- Verify the server starts manually: `npx -y mailpouch` — it should stay running silently.
 
 ### Analytics show zero or empty data
 
@@ -656,7 +656,7 @@ npm install
 
 npm run build          # compile TypeScript to dist/
 npm run dev            # watch mode (recompiles on save)
-npm run test           # run test suite (Vitest, 2,179 tests)
+npm run test           # run test suite (Vitest, 2,180 tests)
 npm run test:coverage  # coverage report
 npm run lint           # TypeScript type check (tsc --noEmit)
 npm run settings       # start standalone settings UI (after build)

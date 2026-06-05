@@ -79,6 +79,18 @@ describe("computeSetupStatus", () => {
     expect(r.summary).not.toContain("/home/u/.mailpouch.json");
   });
 
+  it("redacts the config path even when the config file does not exist yet (first-run leak)", () => {
+    const r = computeSetupStatus(base({
+      configExists: false,
+      username: "",
+      hasPassword: false,
+      grant: { status: "pending" },
+    }));
+    // A pending caller on a fresh box must not receive the absolute home path.
+    expect(r.configPath).toBe("~/.mailpouch.json");
+    expect(r.summary).not.toContain("/home/u/.mailpouch.json");
+  });
+
   it("does NOT redact for an active grant or when there is no grant gate", () => {
     expect(computeSetupStatus(base({ grant: { status: "active" } })).username).toBe("me@proton.me");
     expect(computeSetupStatus(base()).configPath).toBe("/home/u/.mailpouch.json");
