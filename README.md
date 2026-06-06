@@ -224,9 +224,11 @@ Then check the install end-to-end:
 ```bash
 npx -y mailpouch doctor          # human-readable diagnosis + next step; exit 0 when ready
 npx -y mailpouch doctor --json   # structured output for scripts
+npx -y mailpouch status          # is it running? ports, connection, approved agents (read-only)
+npx -y mailpouch --help          # all commands + flags + the config/log paths
 ```
 
-`doctor` reports the same state machine the always-available `setup_status` MCP tool returns: `unconfigured` → `bridge-unreachable` → `pending-approval` → `ready`, each with the exact action to advance.
+`doctor` reports the same state machine the always-available `setup_status` MCP tool returns: `unconfigured` → `bridge-unreachable` → `pending-approval` → `ready`, each with the exact action to advance. These commands **print and exit** — they never start a server, so they're safe to run alongside a live daemon. (Running `mailpouch` with no command starts the MCP stdio server, which is what your MCP client spawns.)
 
 ---
 
