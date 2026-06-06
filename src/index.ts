@@ -579,10 +579,12 @@ const READONLY_TOOLS: ReadonlySet<string> = new Set(
 );
 
 /**
- * Per-action security notification (debug aid). Always debug-logs the action;
- * surfaces a desktop toast ONLY for a successful, non-read-only tool call when
- * "Surface security messages" (surfaceSecurityNotifications) is enabled and
- * desktop notifications aren't disabled. Fire-and-forget.
+ * Per-action security notification (debug aid). Read-only tools and
+ * errored/no-op calls are ignored entirely (they would be pure noise). For a
+ * successful, non-read-only tool call it writes a DEBUG log line, and
+ * additionally surfaces a desktop toast when "Surface security messages"
+ * (surfaceSecurityNotifications) is enabled and desktop notifications aren't
+ * disabled. Fire-and-forget.
  */
 function notifyActionPerformed(
   tool: string,
@@ -996,9 +998,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       state: sharedState,
     };
     const result = await handler(ctx);
-    // Per-action security notification (debug aid) — debug-logs always; toasts
-    // only when "Surface security messages" is enabled. Uses the one config
-    // snapshot already loaded for this call's gate chain.
+    // Per-action security notification (debug aid) — debug-logs a successful
+    // non-read-only action; also toasts it when "Surface security messages" is
+    // enabled. Uses the one config snapshot already loaded for this gate chain.
     notifyActionPerformed(name, caller, result, configSnapshot);
     return result;
   } catch (error: unknown) {
