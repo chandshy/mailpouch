@@ -154,6 +154,15 @@ Platforms: `osascript` (macOS), `notify-send` (Linux), `powershell.exe` (Windows
 
 Disable if you prefer to poll the **Agents tab** manually, or if you're running headless.
 
+### Surface security messages (debug)
+
+A second toggle, **Surface security messages** (off by default), controls the *informational* security toasts:
+
+- post-decision grant changes — agent **approved / denied / revoked / expired**, and
+- a per-action notification for each non-read-only tool mailpouch runs (send, move, delete, …).
+
+By default these are routed to the **debug log** only, so your desktop isn't peppered with "token revoked" / per-action toasts. Turn the toggle on (or set `surfaceSecurityNotifications: true` in `~/.mailpouch.json`) to surface them as toasts while debugging what an agent is doing. The **"agent awaiting approval"** prompt is never affected by this toggle — it always shows so the approval gate keeps working. Read-only tool calls and failed/no-op actions never notify.
+
 ---
 
 ## 6. Full-Text Search

@@ -174,6 +174,19 @@ export function buildSetupHtml(p: SetupParams): string {
         </div>
         <div class="field" style="margin-top:6px">
           <label class="toggle-wrap" style="width:fit-content">
+            <span class="toggle"><input type="checkbox" id="surface-security-notifications"><span class="slider"></span></span>
+            <span>Surface security messages (debug)</span>
+          </label>
+          <div class="hint" style="margin-top:4px">
+            Off by default. When on, mailpouch also pops a toast for security/action events it
+            performs — post-decision grant changes (approved / denied / <strong>revoked</strong> / expired)
+            and each non-read-only tool action (send, move, delete, …). Useful for debugging what an
+            agent is doing; otherwise these go only to the debug log. The "agent awaiting approval"
+            prompt always shows regardless of this setting.
+          </div>
+        </div>
+        <div class="field" style="margin-top:6px">
+          <label class="toggle-wrap" style="width:fit-content">
             <span class="toggle"><input type="checkbox" id="auto-open-approval" checked><span class="slider"></span></span>
             <span>Auto-open the approval window when an agent connects</span>
           </label>

@@ -1357,6 +1357,8 @@ ${buildStyles(cspNonce)}
     if (confirmEl) confirmEl.checked = c.requireDestructiveConfirm !== false;
     var desktopNotifEl = document.getElementById('desktop-notifications');
     if (desktopNotifEl) desktopNotifEl.checked = c.desktopNotificationsEnabled !== false;
+    var surfaceSecEl = document.getElementById('surface-security-notifications');
+    if (surfaceSecEl) surfaceSecEl.checked = c.surfaceSecurityNotifications === true;
     var autoOpenEl = document.getElementById('auto-open-approval');
     if (autoOpenEl) autoOpenEl.checked = c.autoOpenApprovalWindow !== false;
     set('sl-api-key',        cn.simpleloginApiKey  ? '••••••••' : '');
@@ -1460,6 +1462,7 @@ ${buildStyles(cspNonce)}
         },
         requireDestructiveConfirm: !!(document.getElementById('require-destructive-confirm') && document.getElementById('require-destructive-confirm').checked),
         desktopNotificationsEnabled: !!(document.getElementById('desktop-notifications') && document.getElementById('desktop-notifications').checked),
+        surfaceSecurityNotifications: !!(document.getElementById('surface-security-notifications') && document.getElementById('surface-security-notifications').checked),
         autoOpenApprovalWindow: !!(document.getElementById('auto-open-approval') && document.getElementById('auto-open-approval').checked),
         settingsPort: (function(){ var p = parseInt(get('settings-port'), 10); return isNaN(p) ? 8766 : p; })(),
       };

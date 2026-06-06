@@ -397,6 +397,17 @@ export interface ServerConfig {
   /** Fire native OS notifications on new pending grants (default true). */
   desktopNotificationsEnabled?: boolean;
   /**
+   * Debug aid ("Surface security messages"). Default false. When false, the
+   * informational/security desktop toasts — post-decision grant lifecycle
+   * (approved/denied/revoked/expired) and per-action notifications for the
+   * non-read-only tools mailpouch runs — are routed to the DEBUG log instead of
+   * popping a toast. When true, they surface as desktop notifications for
+   * debugging. The actionable "agent awaiting approval" prompt is NOT gated by
+   * this — it always fires (subject to desktopNotificationsEnabled) so the human
+   * approval gate keeps working.
+   */
+  surfaceSecurityNotifications?: boolean;
+  /**
    * Auto-open the Settings UI Agents tab in the browser when a new remote agent
    * registers, so the user can approve/deny the connection immediately
    * (default true). Skipped on headless hosts (no display). Set false on a

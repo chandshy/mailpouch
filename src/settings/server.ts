@@ -895,6 +895,9 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
         if (typeof body.desktopNotificationsEnabled === "boolean") {
           current.desktopNotificationsEnabled = body.desktopNotificationsEnabled;
         }
+        if (typeof body.surfaceSecurityNotifications === "boolean") {
+          current.surfaceSecurityNotifications = body.surfaceSecurityNotifications;
+        }
         if (typeof body.autoOpenApprovalWindow === "boolean") {
           current.autoOpenApprovalWindow = body.autoOpenApprovalWindow;
         }
