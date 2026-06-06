@@ -62,7 +62,7 @@ import { acquireSingletonLock, releaseSingletonLock } from "./utils/singleton-lo
 import { isValidEmail, validateTargetFolder, requireNumericEmailId } from "./utils/helpers.js";
 import { classifyError, ConnectionStateError } from "./utils/error-classify.js";
 import { permissions } from "./permissions/manager.js";
-import { loadConfig, defaultConfig, migrateCredentials, loadCredentialsFromKeychain, loadAuxiliaryCredentialsFromKeychain } from "./config/loader.js";
+import { loadConfig, defaultConfig, migrateCredentials, loadCredentialsFromKeychain, loadAuxiliaryCredentialsFromKeychain, getConfigPath } from "./config/loader.js";
 import type { ToolName } from "./config/schema.js";
 import {
   DESTRUCTIVE_TOOLS,
@@ -134,6 +134,7 @@ import { allToolDefs, allHandlers, escalationHandlers, describeRequestEscalation
 import type { ToolCallContext, ToolSharedState } from "./tools/types.js";
 import { gatherSetupStatus } from "./diagnostics/setup-status.js";
 import { shouldSurfaceGrantToast, shouldSurfaceActionToast } from "./notifications/security-gate.js";
+import { resolveInvocation, USAGE } from "./cli/invocation.js";
 
 // ─── Service Initialization ───────────────────────────────────────────────────
 // All credentials and connection settings are loaded from ~/.mailpouch.json
@@ -2023,6 +2024,14 @@ async function _startSettingsServerDaemon(): Promise<void> {
         const { scheme, stop } = await startSettingsServer(port, false, true /* quiet */, {
           onRestartRequested: () => setImmediate(() => gracefulShutdown("update_restart")),
           onShutdownRequested: () => setImmediate(() => gracefulShutdown("ui-shutdown").catch(() => process.exit(1))),
+          // Live snapshot for GET /api/status so `mailpouch status` reads the
+          // running instance's authoritative connection + agent state.
+          onStatus: () => ({
+            connected: sharedState.smtpStatus.connected,
+            account: config.smtp.username || "",
+            pendingCount: agentGrants.list({ status: "pending" }).length,
+            activeCount: agentGrants.list({ status: "active" }).length,
+          }),
         });
         _settingsStop    = stop;
         _settingsUrl     = `${scheme}://localhost:${port}`;
@@ -2204,35 +2213,57 @@ async function _initTray(): Promise<void> {
 }
 
 async function main() {
-  // `--version` short-circuits before any side effects. Used by tarball-smoke
-  // and routinely by users to identify the installed binary.
-  if (process.argv.includes("--version") || process.argv.includes("-v")) {
+  // Resolve the invocation up front. Known subcommands and --help/--version are
+  // handled and EXIT; an unknown positional command is an error and exits — it
+  // never falls through to boot a server. Only a bare or flag-only invocation
+  // (the MCP stdio child an MCP client spawns) reaches the server path below.
+  // This is the fix for `mailpouch status` / `--help` silently booting a second
+  // full server in the foreground beside the real daemon.
+  const invocation = resolveInvocation(process.argv);
+
+  if (invocation.kind === "help") {
+    process.stdout.write(`${USAGE}\n\nPaths:\n  config: ${getConfigPath()}\n  log:    ${getLogFilePath()}\n`);
+    process.exit(0);
+  }
+  if (invocation.kind === "version") {
+    // --version is used by tarball-smoke and routinely to identify the binary.
     process.stdout.write(`mailpouch v${_pkgVersion}\n`);
     process.exit(0);
   }
-
-  // `mailpouch agent <issue|list|revoke>` — provision/manage service accounts,
-  // then exit. Runs before any server side effects (no Bridge connect, no
-  // transport) so it's a quick offline admin command. Uses the module-scope
-  // grant + service-account stores already constructed above.
-  if (process.argv[2] === "agent") {
-    const { runAgentCli } = await import("./cli/agent-cli.js");
-    const code = await runAgentCli(process.argv.slice(3), { serviceAccounts, agentGrants });
-    process.exit(code);
+  if (invocation.kind === "unknown") {
+    process.stderr.write(`mailpouch: unknown command '${invocation.arg}'\n\n${USAGE}\n`);
+    process.exit(2);
   }
 
-  // `mailpouch setup …` writes Bridge credentials to ~/.mailpouch.json + keychain
-  // non-interactively (the agent/CI path; the wizard remains the default for
-  // humans). `mailpouch doctor` prints the install/connect diagnosis and exits.
-  // Both run offline — no Bridge connect, no transport — before any server side
-  // effects, mirroring the `agent` subcommand above.
-  if (process.argv[2] === "setup") {
-    const { runSetupCli } = await import("./cli/setup-cli.js");
-    process.exit(await runSetupCli(process.argv.slice(3)));
-  }
-  if (process.argv[2] === "doctor") {
-    const { runDoctorCli } = await import("./cli/doctor-cli.js");
-    process.exit(await runDoctorCli(process.argv.slice(3)));
+  // Offline admin subcommands run before any server side effects (no Bridge
+  // connect, no transport) and exit. `daemon` is the exception — it continues
+  // into the server path below in HTTP mode. Args are taken after the
+  // subcommand token so `mailpouch <cmd> [flags]` parses correctly.
+  if (invocation.kind === "subcommand" && invocation.name !== "daemon") {
+    const subIdx = process.argv.indexOf(invocation.name, 2);
+    const subArgs = subIdx >= 0 ? process.argv.slice(subIdx + 1) : [];
+    switch (invocation.name) {
+      case "agent": {
+        const { runAgentCli } = await import("./cli/agent-cli.js");
+        process.exit(await runAgentCli(subArgs, { serviceAccounts, agentGrants }));
+        break;
+      }
+      case "setup": {
+        const { runSetupCli } = await import("./cli/setup-cli.js");
+        process.exit(await runSetupCli(subArgs));
+        break;
+      }
+      case "doctor": {
+        const { runDoctorCli } = await import("./cli/doctor-cli.js");
+        process.exit(await runDoctorCli(subArgs));
+        break;
+      }
+      case "status": {
+        const { runStatusCli } = await import("./cli/status-cli.js");
+        process.exit(await runStatusCli(subArgs));
+        break;
+      }
+    }
   }
 
   // `mailpouch daemon [--host H] [--port P]` runs the shared HTTP daemon
@@ -2244,7 +2275,7 @@ async function main() {
     const i = process.argv.indexOf(flag);
     return i >= 0 ? process.argv[i + 1] : undefined;
   };
-  const daemonMode = process.argv[2] === "daemon";
+  const daemonMode = invocation.kind === "subcommand" && invocation.name === "daemon";
   const daemonHostOverride = daemonMode ? argVal("--host") : undefined;
   const daemonPortOverride = daemonMode ? argVal("--port") : undefined;
 

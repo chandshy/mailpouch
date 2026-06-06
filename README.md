@@ -9,12 +9,12 @@ The pitch in one line: if you picked Proton Mail because you didn't want a third
 It is real because the primitives are real: OAuth 2.1 with PKCE S256, RFC 7591 dynamic client registration, RFC 8707 resource indicators, RFC 9728 protected-resource metadata, and an OAuth `client_credentials` grant so headless agents authenticate too — every agent gets its own gated, revocable identity. Credentials live in the OS keychain. A local FTS5 index with BM25 ranking handles phrase, boolean, prefix, and column-filter queries so your search terms never leave your laptop. Desktop notifications use native `osascript` / `notify-send` / `powershell.exe` with no added dependency; webhook dispatch auto-detects CloudEvents 1.0, Slack, or Discord, signs with HMAC, and retries with eight-attempt exponential backoff. So how do you point it at your Bridge install and wire up a client?
 
 [![CI](https://github.com/chandshy/mailpouch/actions/workflows/ci.yml/badge.svg)](https://github.com/chandshy/mailpouch/actions/workflows/ci.yml)
-[![npm version](https://img.shields.io/badge/npm-v3.0.76-blue.svg)](https://www.npmjs.com/package/mailpouch)
+[![npm version](https://img.shields.io/badge/npm-v3.0.77-blue.svg)](https://www.npmjs.com/package/mailpouch)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D20.0.0-brightgreen.svg)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-6.0-blue.svg)](https://www.typescriptlang.org/)
 [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-1.29+-green.svg)](https://github.com/modelcontextprotocol/sdk)
-[![Tests](https://img.shields.io/badge/tests-2%2C180%20passing-brightgreen.svg)](#development)
+[![Tests](https://img.shields.io/badge/tests-2%2C205%20passing-brightgreen.svg)](#development)
 
 **Read, compose, and manage your encrypted Proton Mail inbox from any AI assistant — over stdio or remote HTTP — with human-controlled permissions.**
 
@@ -86,7 +86,7 @@ That's it. The sections below cover everything in depth.
 - **Multi-account** — configure more than one Proton / IMAP account; hot-swap the active account from the Settings UI with no server restart. Tools accept an optional `account_id` argument to route a single call to a specific account. See [`src/accounts/`](src/accounts/).
 - **Per-agent grants** — each MCP client (identified by its OAuth `client_id`) is gated by its own approvable grant, with optional folder allowlists, IP pins, per-tool rate caps, expiry, and account binding. Separate from the global preset and the escalation flow. See [`src/agents/`](src/agents/).
 - **Live notifications** — desktop toasts (no extra deps) and outbound webhooks (CloudEvents / Slack / Discord, HMAC-signed, retried) fire on grant-state changes. See [`src/notifications/`](src/notifications/).
-- **2,180 tests passing** (Vitest); minimal `any` usage in production source (private Node.js readline internals only).
+- **2,205 tests passing** (Vitest); minimal `any` usage in production source (private Node.js readline internals only).
 
 **Documentation:** [HELP.md](HELP.md) (task-oriented how-tos) · [README_FIRST_AI.md](README_FIRST_AI.md) (agent API reference) · [docs/index.md](docs/index.md) (full index)
 
@@ -224,9 +224,11 @@ Then check the install end-to-end:
 ```bash
 npx -y mailpouch doctor          # human-readable diagnosis + next step; exit 0 when ready
 npx -y mailpouch doctor --json   # structured output for scripts
+npx -y mailpouch status          # is it running? ports, connection, approved agents (read-only)
+npx -y mailpouch --help          # all commands + flags + the config/log paths
 ```
 
-`doctor` reports the same state machine the always-available `setup_status` MCP tool returns: `unconfigured` → `bridge-unreachable` → `pending-approval` → `ready`, each with the exact action to advance.
+`doctor` reports the same state machine the always-available `setup_status` MCP tool returns: `unconfigured` → `bridge-unreachable` → `pending-approval` → `ready`, each with the exact action to advance. These commands **print and exit** — they never start a server, so they're safe to run alongside a live daemon. (Running `mailpouch` with no command starts the MCP stdio server, which is what your MCP client spawns.)
 
 ---
 
@@ -656,7 +658,7 @@ npm install
 
 npm run build          # compile TypeScript to dist/
 npm run dev            # watch mode (recompiles on save)
-npm run test           # run test suite (Vitest, 2,180 tests)
+npm run test           # run test suite (Vitest, 2,205 tests)
 npm run test:coverage  # coverage report
 npm run lint           # TypeScript type check (tsc --noEmit)
 npm run settings       # start standalone settings UI (after build)

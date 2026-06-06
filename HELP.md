@@ -40,6 +40,21 @@ Fill these in on the Setup tab, click **Save Configuration**, then **Test Connec
 
 Prefer the command line? `npx -y mailpouch setup --username you@proton.me --password-stdin` writes the same config, and `npx -y mailpouch doctor` verifies it.
 
+### CLI commands
+
+Run any of these as `npx -y mailpouch <command>` — the `npx -y` form works even when the global `mailpouch` bin isn't on your `PATH`, and these commands **print and exit** (they never start a server):
+
+| Command | What it does |
+|---|---|
+| `mailpouch --help` / `-h` | List all commands + flags; prints the config and log file paths |
+| `mailpouch status [--json]` | Is mailpouch running (PID, ports), connection state, approved-agent counts, Bridge reachability — read-only |
+| `mailpouch doctor [--json]` | Diagnose the install/connection and print the next step (exit 0 when ready) |
+| `mailpouch setup …` | Configure Bridge credentials non-interactively |
+| `mailpouch agent <issue\|list\|revoke>` | Manage headless service accounts |
+| `mailpouch daemon [--host H] [--port P]` | Run the shared HTTP daemon (forces HTTP transport) |
+
+Running `mailpouch` with **no command** starts the MCP server on stdio — that's what an MCP client (e.g. Claude Desktop) spawns; you don't run it by hand. An unrecognized command prints an error and exits rather than starting a server.
+
 **Wire up Claude Desktop** — this form works whether or not mailpouch is globally installed:
 
 ```json

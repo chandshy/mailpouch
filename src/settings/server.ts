@@ -236,6 +236,15 @@ export interface ServerSecurityOptions {
    * `process.exit(0)`, which bypasses tray cleanup.
    */
   onShutdownRequested?: () => void;
+  /**
+   * Live status snapshot for GET /api/status. Lets `mailpouch status` (and any
+   * tooling) read the running instance's authoritative connection + agent state
+   * — something an offline probe can't determine. When omitted, /api/status
+   * returns `{ hasConfig, version }`; the live connection/account/agent fields
+   * are added only when this provider is supplied. (`hasConfig` is the only
+   * field the singleton probe relies on, so the shape stays back-compatible.)
+   */
+  onStatus?: () => { connected: boolean; account: string; pendingCount: number; activeCount: number };
 }
 
 // ── /agent-setup — integration reference for AI clients ─────────────────
@@ -776,8 +785,17 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
       }
 
       // ── GET /api/status ───────────────────────────────────────────────────
+      // `hasConfig` is the load-bearing field the singleton probe checks
+      // (src/index.ts) — keep it. The rest is the live snapshot `mailpouch
+      // status` surfaces; present only when the running instance supplied a
+      // status provider.
       if (method === "GET" && path === "/api/status") {
-        json(res, 200, { hasConfig: configExists() });
+        const live = secOpts.onStatus?.();
+        json(res, 200, {
+          hasConfig: configExists(),
+          version: _agentSetupPkgVersion,
+          ...(live ?? {}),
+        });
         return;
       }
 
@@ -2214,7 +2232,11 @@ export async function startSettingsServer(
   port  = 8766,
   lan   = false,
   quiet = false,
-  opts: { onRestartRequested?: () => void; onShutdownRequested?: () => void } = {},
+  opts: {
+    onRestartRequested?: () => void;
+    onShutdownRequested?: () => void;
+    onStatus?: () => { connected: boolean; account: string; pendingCount: number; activeCount: number };
+  } = {},
 ): Promise<{ scheme: "http" | "https"; stop: () => Promise<void> }> {
   const bindHost    = lan ? "0.0.0.0" : "127.0.0.1";
   const lanIP       = lan ? getPrimaryLanIP() : "";

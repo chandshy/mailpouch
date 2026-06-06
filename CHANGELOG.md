@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.77] — 2026-06-06
+
+### Fixed
+
+- **The CLI no longer boots a second server when you run an unrecognized command.** `mailpouch status`, `mailpouch --help`, and typos used to fall through and start a full MCP server in the foreground — it hung until killed (exit 143) and spawned a transient instance beside the real daemon. Invocation is now resolved up front (`src/cli/invocation.ts`): known subcommands and `--help`/`--version` print and exit; an unknown command errors with usage and exits 2; only a bare or flag-only invocation (the MCP stdio child a client spawns) starts the server.
+
+### Added
+
+- **`mailpouch status [--json]`** — fast, read-only operational view that never starts a server: whether an instance is already running (PID from the singleton lock + a probe of its `/api/status`), its connection state and approved-agent counts, Bridge reachability, and the config/log paths.
+- **`mailpouch --help` / `-h`** — usage listing every subcommand and flag, the PATH-proof `npx -y mailpouch <command>` form, and the resolved config/log paths.
+- `GET /api/status` now includes `version`, `connected`, `account`, `pendingCount`, `activeCount` (backward-compatible — the load-bearing `hasConfig` field is unchanged) so `status` can read a running instance's authoritative live state.
+
 ## [3.0.76] — 2026-06-05
 
 ### Changed
