@@ -5,11 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [3.0.76] — 2026-06-05
 
 ### Changed
 
 - **Quieter desktop notifications — new "Surface security messages" debug toggle** (`surfaceSecurityNotifications`, default off). The informational security toasts — post-decision grant lifecycle (approved / denied / **revoked** / expired) and a per-action notification for each non-read-only tool mailpouch runs (send / move / delete / …) — now go to the **debug log** by default instead of popping a toast. Enable the toggle (Settings → Setup, or `surfaceSecurityNotifications: true` in `~/.mailpouch.json`) to surface them as toasts for debugging. The actionable "agent awaiting approval" prompt is **not** gated by this — it always fires (subject to `desktopNotificationsEnabled`) so the human approval gate keeps working. Read-only tool calls and errored/no-op actions never notify. Gating logic is the pure, unit-tested `src/notifications/security-gate.ts`.
+
+### Dependencies
+
+- Bump `imapflow` 1.3.5 → 1.3.6 (patch, within range; 0 vulnerabilities).
 
 ## [3.0.75] — 2026-06-05
 
