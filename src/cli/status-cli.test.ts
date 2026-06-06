@@ -76,7 +76,7 @@ describe("mailpouch status CLI", () => {
 
   it("exits 1 when not running and the install isn't ready", async () => {
     isolateConfig();
-    const h = harness({ pid: null, payload: null, diag: diag({ state: "unconfigured", connected: undefined }) });
+    const h = harness({ pid: null, payload: null, diag: diag({ state: "unconfigured" }) });
     const code = await runStatusCli([], h.deps);
     expect(code).toBe(1);
     expect(h.out.join("\n")).toMatch(/mailpouch doctor/);

@@ -240,7 +240,9 @@ export interface ServerSecurityOptions {
    * Live status snapshot for GET /api/status. Lets `mailpouch status` (and any
    * tooling) read the running instance's authoritative connection + agent state
    * — something an offline probe can't determine. When omitted, /api/status
-   * returns just `{ hasConfig }` (the back-compat singleton-probe shape).
+   * returns `{ hasConfig, version }`; the live connection/account/agent fields
+   * are added only when this provider is supplied. (`hasConfig` is the only
+   * field the singleton probe relies on, so the shape stays back-compatible.)
    */
   onStatus?: () => { connected: boolean; account: string; pendingCount: number; activeCount: number };
 }
