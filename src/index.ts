@@ -133,6 +133,7 @@ import { tracer } from "./utils/tracer.js";
 import { allToolDefs, allHandlers, escalationHandlers, describeRequestEscalation } from "./tools/registry.js";
 import type { ToolCallContext, ToolSharedState } from "./tools/types.js";
 import { gatherSetupStatus } from "./diagnostics/setup-status.js";
+import { shouldSurfaceGrantToast, shouldSurfaceActionToast } from "./notifications/security-gate.js";
 
 // ─── Service Initialization ───────────────────────────────────────────────────
 // All credentials and connection settings are loaded from ~/.mailpouch.json
@@ -316,9 +317,16 @@ agentNotifications.subscribe((ev) => {
     };
     const title = titleByKind[ev.kind] ?? "mailpouch";
     const body = `${ev.grant.clientName}`;
-    // Fire-and-forget — notifier failures never touch the caller.
-    void desktopNotifier.notify({ title, body, sound: ev.kind === "grant-created" ? "Glass" : undefined })
-      .catch(() => { /* logged inside notifier */ });
+    // "grant-created" is the actionable approval gate — always surface it. The
+    // post-decision events (approved/denied/revoked/expired) are informational;
+    // route them to the debug log unless "Surface security messages" is enabled.
+    if (shouldSurfaceGrantToast(ev.kind, cfg ?? {})) {
+      // Fire-and-forget — notifier failures never touch the caller.
+      void desktopNotifier.notify({ title, body, sound: ev.kind === "grant-created" ? "Glass" : undefined })
+        .catch(() => { /* logged inside notifier */ });
+    } else {
+      logger.debug(`Security notification (toast suppressed; enable "Surface security messages" to show): ${ev.kind} — ${body}`, "Notifications");
+    }
   }
   // Webhooks: dispatch to every enabled endpoint in parallel.
   const endpoints = cfg?.webhooks ?? [];
@@ -559,6 +567,38 @@ function activeToolTier(): ReturnType<typeof parseToolTier> {
   if (envTier) return parseToolTier(envTier);
   const cfg = loadConfig();
   return parseToolTier(cfg?.toolTier);
+}
+
+// Tools annotated read-only never fire a per-action security toast — reads
+// (get_emails, search, status, …) would be pure noise. Built once from the
+// registry so it tracks the annotations automatically.
+const READONLY_TOOLS: ReadonlySet<string> = new Set(
+  allToolDefs()
+    .filter((d) => (d.annotations as { readOnlyHint?: boolean } | undefined)?.readOnlyHint === true)
+    .map((d) => d.name),
+);
+
+/**
+ * Per-action security notification (debug aid). Always debug-logs the action;
+ * surfaces a desktop toast ONLY for a successful, non-read-only tool call when
+ * "Surface security messages" (surfaceSecurityNotifications) is enabled and
+ * desktop notifications aren't disabled. Fire-and-forget.
+ */
+function notifyActionPerformed(
+  tool: string,
+  caller: CallerContext | undefined,
+  result: { isError?: boolean },
+  cfg: { surfaceSecurityNotifications?: boolean; desktopNotificationsEnabled?: boolean },
+): void {
+  // Guard the noisy cases up front; reads and errored/no-op calls never notify.
+  if (result.isError === true || READONLY_TOOLS.has(tool)) return;
+  const who = caller?.clientName ? ` · ${caller.clientName}` : "";
+  logger.debug(`Action performed: ${tool}${who}`, "Notifications");
+  if (shouldSurfaceActionToast({ isReadOnly: false, isError: false, cfg })) {
+    void desktopNotifier
+      .notify({ title: "mailpouch — action", body: `${tool}${who}` })
+      .catch(() => { /* logged inside notifier */ });
+  }
 }
 
 function registerHandlers(server: Server): void {
@@ -955,7 +995,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       MAX_SUBJECT_LENGTH,
       state: sharedState,
     };
-    return await handler(ctx);
+    const result = await handler(ctx);
+    // Per-action security notification (debug aid) — debug-logs always; toasts
+    // only when "Surface security messages" is enabled. Uses the one config
+    // snapshot already loaded for this call's gate chain.
+    notifyActionPerformed(name, caller, result, configSnapshot);
+    return result;
   } catch (error: unknown) {
     logger.error(`Tool failed: ${name}`, "MCPServer", error);
     const msg = safeErrorMessage(error);
