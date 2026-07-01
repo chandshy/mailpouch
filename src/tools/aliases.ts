@@ -1,6 +1,8 @@
 /**
  * SimpleLogin alias tools: alias_list, alias_create_random,
- * alias_create_custom, alias_toggle, alias_delete, alias_get_activity.
+ * alias_create_custom, alias_toggle, alias_delete, alias_get_activity,
+ * and reverse-alias contacts: alias_list_contacts, alias_create_contact,
+ * alias_toggle_contact, alias_delete_contact.
  */
 
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
@@ -163,6 +165,94 @@ export const defs: ToolDef[] = [
       },
     },
   },
+  {
+    name: "alias_list_contacts",
+    title: "List SimpleLogin Alias Contacts",
+    description: "List the reverse-alias contacts for a SimpleLogin alias. Each contact is an external address you can send *as* the alias to; the returned reverse_alias_address is what you put in To: to route a reply out through the alias (encrypted to the recipient's PGP key when set).",
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        aliasId: { type: "number" },
+        pageSize: { type: "number", description: "Max contacts to return (default 100, cap 1000)" },
+      },
+      required: ["aliasId"],
+    },
+    outputSchema: {
+      type: "object",
+      properties: {
+        contacts: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              id: { type: "number" },
+              contact: { type: "string" },
+              reverse_alias: { type: "string" },
+              reverse_alias_address: { type: "string" },
+              block_forward: { type: "boolean" },
+            },
+          },
+        },
+      },
+    },
+  },
+  {
+    name: "alias_create_contact",
+    title: "Create SimpleLogin Alias Contact",
+    description: "Create (or fetch, if it already exists) a reverse-alias contact so you can send FROM a SimpleLogin alias TO an external address. Send your reply to the returned reverse_alias_address. `contact` is the recipient as \"email@example.com\" or \"Name <email@example.com>\".",
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        aliasId: { type: "number" },
+        contact: { type: "string", description: "External recipient: \"email@example.com\" or \"Name <email@example.com>\"" },
+      },
+      required: ["aliasId", "contact"],
+    },
+    outputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "number" },
+        contact: { type: "string" },
+        reverse_alias: { type: "string" },
+        reverse_alias_address: { type: "string" },
+        existed: { type: "boolean" },
+      },
+    },
+  },
+  {
+    name: "alias_toggle_contact",
+    title: "Block/Unblock SimpleLogin Alias Contact",
+    description: "Block or unblock a reverse-alias contact from forwarding. Blocking stops mail to/from that contact without deleting the reverse-alias. Returns the new block_forward state.",
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        contactId: { type: "number" },
+      },
+      required: ["contactId"],
+    },
+    outputSchema: {
+      type: "object",
+      properties: { block_forward: { type: "boolean" } },
+    },
+  },
+  {
+    name: "alias_delete_contact",
+    title: "Delete SimpleLogin Alias Contact",
+    description: "Permanently delete a reverse-alias contact. Irreversible — prefer alias_toggle_contact to just block. Destructive: requires { confirmed: true }.",
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+    inputSchema: {
+      type: "object",
+      properties: {
+        contactId: { type: "number" },
+        confirmed: { type: "boolean", description: "Must be true to execute." },
+      },
+      required: ["contactId"],
+    },
+    outputSchema: ACTION_RESULT_SCHEMA,
+  },
 ];
 
 export const handlers: Record<string, ToolHandler> = {
@@ -246,6 +336,62 @@ export const handlers: Record<string, ToolHandler> = {
     const pageSize = clampOptionalInt(args.pageSize, 50, 1, 1000);
     const activities = await simpleloginService.getAliasActivities(args.aliasId, pageSize);
     return ok({ activities });
+  },
+
+  alias_list_contacts: async (ctx) => {
+    const { args, simpleloginService, ok } = ctx;
+    if (!simpleloginService.isConfigured()) {
+      throw new McpError(ErrorCode.InvalidRequest, "SimpleLogin API key is not configured. Set simpleloginApiKey in Settings → Aliases.");
+    }
+    if (typeof args.aliasId !== "number") {
+      throw new McpError(ErrorCode.InvalidParams, "aliasId must be a number.");
+    }
+    const pageSize = clampOptionalInt(args.pageSize, 100, 1, 1000);
+    const contacts = await simpleloginService.listContacts(args.aliasId, pageSize);
+    return ok({ contacts });
+  },
+
+  alias_create_contact: async (ctx) => {
+    const { args, simpleloginService, ok } = ctx;
+    if (!simpleloginService.isConfigured()) {
+      throw new McpError(ErrorCode.InvalidRequest, "SimpleLogin API key is not configured. Set simpleloginApiKey in Settings → Aliases.");
+    }
+    if (typeof args.aliasId !== "number") {
+      throw new McpError(ErrorCode.InvalidParams, "aliasId must be a number.");
+    }
+    const contact = requireNonEmptyString(args.contact, "contact");
+    const created = await simpleloginService.createContact(args.aliasId, contact);
+    return ok({
+      id: created.id,
+      contact: created.contact,
+      reverse_alias: created.reverse_alias,
+      reverse_alias_address: created.reverse_alias_address,
+      existed: created.existed ?? false,
+    });
+  },
+
+  alias_toggle_contact: async (ctx) => {
+    const { args, simpleloginService, ok } = ctx;
+    if (!simpleloginService.isConfigured()) {
+      throw new McpError(ErrorCode.InvalidRequest, "SimpleLogin API key is not configured. Set simpleloginApiKey in Settings → Aliases.");
+    }
+    if (typeof args.contactId !== "number") {
+      throw new McpError(ErrorCode.InvalidParams, "contactId must be a number.");
+    }
+    const result = await simpleloginService.toggleContact(args.contactId);
+    return ok({ block_forward: result.block_forward });
+  },
+
+  alias_delete_contact: async (ctx) => {
+    const { args, simpleloginService, ok } = ctx;
+    if (!simpleloginService.isConfigured()) {
+      throw new McpError(ErrorCode.InvalidRequest, "SimpleLogin API key is not configured. Set simpleloginApiKey in Settings → Aliases.");
+    }
+    if (typeof args.contactId !== "number") {
+      throw new McpError(ErrorCode.InvalidParams, "contactId must be a number.");
+    }
+    await simpleloginService.deleteContact(args.contactId);
+    return ok({ success: true });
   },
 };
 
