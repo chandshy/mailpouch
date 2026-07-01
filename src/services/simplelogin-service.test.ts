@@ -249,6 +249,22 @@ describe("SimpleLoginService", () => {
     });
   });
 
+  describe("updateAlias", () => {
+    it("sends PATCH (not PUT) to /api/aliases/:id with only the given fields", async () => {
+      let capturedUrl = "", capturedMethod = "", capturedBody = "";
+      globalThis.fetch = mockFetch((url, init) => {
+        capturedUrl = url; capturedMethod = init.method ?? "GET"; capturedBody = String(init.body ?? "");
+        return { status: 200, body: "" };
+      }) as unknown as typeof globalThis.fetch;
+
+      const svc = new SimpleLoginService("sl-key");
+      await svc.updateAlias(99, { note: "renamed", mailbox_ids: [3, 4] });
+      expect(capturedMethod).toBe("PATCH");
+      expect(capturedUrl).toContain("/api/aliases/99");
+      expect(JSON.parse(capturedBody)).toEqual({ note: "renamed", mailbox_ids: [3, 4] });
+    });
+  });
+
   describe("reverse-alias contacts", () => {
     it("lists contacts, paginating until an empty page", async () => {
       const pages: Record<string, unknown> = {

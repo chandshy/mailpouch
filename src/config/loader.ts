@@ -138,6 +138,7 @@ export function buildPermissions(preset: PermissionPreset): ServerConfig["permis
     tools["alias_create_random"].rateLimit = 50;
     tools["alias_create_custom"].rateLimit = 50;
     tools["alias_toggle"].rateLimit = 100;
+    tools["alias_update"].rateLimit = 100;
     tools["alias_delete"].rateLimit = 20;
     tools["alias_create_contact"].rateLimit = 50;
     tools["alias_toggle_contact"].rateLimit = 100;

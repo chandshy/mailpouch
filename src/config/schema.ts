@@ -34,7 +34,7 @@ export const ALL_TOOLS = [
   // Bridge & server control
   "start_bridge", "shutdown_server", "restart_server",
   // SimpleLogin aliases (Proton-owned; optional — requires API key)
-  "alias_list", "alias_create_random", "alias_create_custom",
+  "alias_list", "alias_create_random", "alias_create_custom", "alias_update",
   "alias_toggle", "alias_delete", "alias_get_activity",
   "alias_list_contacts", "alias_create_contact", "alias_toggle_contact", "alias_delete_contact",
   // Proton Pass (optional — requires pass-cli and a Personal Access Token)
@@ -127,7 +127,7 @@ export const TOOL_CATEGORIES: Record<string, ToolCategory> = {
     label: "SimpleLogin Aliases",
     description: "Create and manage SimpleLogin aliases (Proton-owned alias service; requires API key)",
     tools: [
-      "alias_list", "alias_create_random", "alias_create_custom",
+      "alias_list", "alias_create_random", "alias_create_custom", "alias_update",
       "alias_toggle", "alias_delete", "alias_get_activity",
       "alias_list_contacts", "alias_create_contact", "alias_toggle_contact", "alias_delete_contact",
     ],

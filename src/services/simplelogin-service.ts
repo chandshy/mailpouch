@@ -244,12 +244,17 @@ export class SimpleLoginService {
     return collected.slice(0, pageSize);
   }
 
+  /**
+   * Update an existing alias. SimpleLogin defines this as PATCH
+   * /api/aliases/:id (not PUT) — see docs/api.md "Update alias info". Any
+   * subset of the fields may be sent; omitted fields are left unchanged.
+   */
   async updateAlias(
     aliasId: number,
-    patch: { name?: string; note?: string; mailbox_ids?: number[]; disable_pgp?: boolean },
+    patch: { name?: string; note?: string; mailbox_ids?: number[]; disable_pgp?: boolean; pinned?: boolean },
   ): Promise<void> {
     await this.request(`/api/aliases/${aliasId}`, {
-      method: "PUT",
+      method: "PATCH",
       body: JSON.stringify(patch),
     });
   }
