@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.78] — 2026-07-01
+
+### Added
+
+- **SimpleLogin alias management is now first-class.** Beyond the existing create/toggle/delete/activity tools, mailpouch can now: send *from* an alias via **reverse-alias contacts** (`alias_list_contacts` / `alias_create_contact` / `alias_toggle_contact` / `alias_delete_contact`) — the path that reaches a recipient's PGP key; **update an alias in place** (`alias_update` — display name, note, delivery mailboxes, PGP, pinned); and manage the supporting surfaces (`alias_list_mailboxes`, `alias_create_mailbox`, `alias_delete_mailbox`, `alias_list_domains`, `alias_options`). Eleven new tools; all request/response shapes verified against SimpleLogin's public API docs.
+- **`pass_totp`** — dedicated Proton Pass TOTP/2FA-code retrieval (`item totp`), audit-logged and confirm-gated like `pass_get`.
+- **Per-call `account_id` on every tool's inputSchema.** Strict-schema MCP clients (e.g. Claude Code) strip undeclared arguments, so the multi-account routing added in B1 was unreachable from them; every served tool now advertises the optional `account_id` it already honored.
+
+### Fixed
+
+- **The Proton Pass integration was calling a CLI surface that doesn't exist** and would have failed against a real install (latent — `pass-cli` isn't required to be present, and the tests mock it). Corrected and **verified against the official `pass-cli` 2.2.1**: global `--json` → per-subcommand `--output json`; `list` → `item list`; `get --id` → `item view --item-id`; the non-existent `search` → a client-side filter over `item list`; and the PAT env var `PROTON_PASS_PAT` → **`PROTON_PASS_PERSONAL_ACCESS_TOKEN`** (the name the CLI actually reads). Note: the JSON *output shape* and `--share-id` handling still need one validation pass against an authenticated `pass-cli` session before the Pass tools are relied upon.
+- **SimpleLogin alias update used `PUT`; the API defines it as `PATCH`.** Would have failed against the live API.
+- Flaky live-Bridge `safe-bridge` e2e — it searched All Mail by the shared run token and could move the wrong message; now searches by the unique seeded subject.
+
+### Security
+
+- **nodemailer 8 → 9** — resolves the high-severity `raw`-option arbitrary-file-read / SSRF advisory (GHSA). mailpouch never uses the message-level `raw` option, so no behavior change.
+- **hono → 4.12.27** (transitive, via `@modelcontextprotocol/sdk`) — clears five hono advisories (CORS, body-limit, `serve-static` path traversal, Lambda adapters).
+
+### Dependencies
+
+- imapflow 1.3.6 → 1.4.3, mailparser 3.9.9 → 3.9.12, better-sqlite3 → 12.11.1; @types/node 26, vitest / @vitest/coverage-v8 4.1.9; `actions/checkout` v6 → v7 across all workflows. `npm audit`: 0 vulnerabilities.
+
 ## [3.0.77] — 2026-06-06
 
 ### Fixed
