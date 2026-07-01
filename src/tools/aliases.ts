@@ -1,8 +1,10 @@
 /**
  * SimpleLogin alias tools: alias_list, alias_create_random,
  * alias_create_custom, alias_update, alias_toggle, alias_delete,
- * alias_get_activity, and reverse-alias contacts: alias_list_contacts,
- * alias_create_contact, alias_toggle_contact, alias_delete_contact.
+ * alias_get_activity; reverse-alias contacts: alias_list_contacts,
+ * alias_create_contact, alias_toggle_contact, alias_delete_contact; and
+ * mailboxes/domains/options: alias_list_mailboxes, alias_create_mailbox,
+ * alias_delete_mailbox, alias_list_domains, alias_options.
  */
 
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
@@ -272,6 +274,125 @@ export const defs: ToolDef[] = [
     },
     outputSchema: ACTION_RESULT_SCHEMA,
   },
+  {
+    name: "alias_list_mailboxes",
+    title: "List SimpleLogin Mailboxes",
+    description: "List the mailboxes (destination addresses) on the SimpleLogin account. Use the returned ids with alias_update / alias_create_custom to route an alias's mail. `verified: false` means the mailbox can't receive mail yet.",
+    annotations: { readOnlyHint: true },
+    inputSchema: { type: "object", properties: {} },
+    outputSchema: {
+      type: "object",
+      properties: {
+        mailboxes: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              id: { type: "number" },
+              email: { type: "string" },
+              default: { type: "boolean" },
+              verified: { type: "boolean" },
+              nb_alias: { type: "number" },
+            },
+          },
+        },
+      },
+    },
+  },
+  {
+    name: "alias_create_mailbox",
+    title: "Add SimpleLogin Mailbox",
+    description: "Add a new destination mailbox to SimpleLogin. NOTE: SimpleLogin emails a verification link to the address; the mailbox stays unusable (verified:false) until a human clicks it — the agent cannot complete verification.",
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+    inputSchema: {
+      type: "object",
+      properties: {
+        email: { type: "string", description: "Email address of the new mailbox" },
+      },
+      required: ["email"],
+    },
+    outputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "number" },
+        email: { type: "string" },
+        verified: { type: "boolean" },
+        default: { type: "boolean" },
+      },
+    },
+  },
+  {
+    name: "alias_delete_mailbox",
+    title: "Delete SimpleLogin Mailbox",
+    description: "Delete a destination mailbox. Optionally transfer its aliases to another mailbox (transferAliasesTo = that mailbox id); omit to delete those aliases too. The default mailbox cannot be deleted. Destructive: requires { confirmed: true }.",
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+    inputSchema: {
+      type: "object",
+      properties: {
+        mailboxId: { type: "number" },
+        transferAliasesTo: { type: "number", description: "Mailbox id to move this mailbox's aliases to; omit to delete them" },
+        confirmed: { type: "boolean", description: "Must be true to execute." },
+      },
+      required: ["mailboxId"],
+    },
+    outputSchema: ACTION_RESULT_SCHEMA,
+  },
+  {
+    name: "alias_list_domains",
+    title: "List SimpleLogin Custom Domains",
+    description: "List the custom domains registered on the SimpleLogin account, including catch-all state and which mailboxes they deliver to.",
+    annotations: { readOnlyHint: true },
+    inputSchema: { type: "object", properties: {} },
+    outputSchema: {
+      type: "object",
+      properties: {
+        domains: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              id: { type: "number" },
+              domain_name: { type: "string" },
+              is_verified: { type: "boolean" },
+              catch_all: { type: "boolean" },
+              nb_alias: { type: "number" },
+            },
+          },
+        },
+      },
+    },
+  },
+  {
+    name: "alias_options",
+    title: "Get SimpleLogin Alias Options",
+    description: "Fetch the signed suffixes and prefix suggestion needed to build a valid custom alias. Pass a suffix's signedSuffix into alias_create_custom. Optionally scope to a hostname.",
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        hostname: { type: "string", description: "Optional hostname to scope suggestions to" },
+      },
+    },
+    outputSchema: {
+      type: "object",
+      properties: {
+        can_create: { type: "boolean" },
+        prefix_suggestion: { type: "string" },
+        suffixes: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              suffix: { type: "string" },
+              signed_suffix: { type: "string" },
+              is_custom: { type: "boolean" },
+              is_premium: { type: "boolean" },
+            },
+          },
+        },
+      },
+    },
+  },
 ];
 
 export const handlers: Record<string, ToolHandler> = {
@@ -432,6 +553,57 @@ export const handlers: Record<string, ToolHandler> = {
     }
     await simpleloginService.deleteContact(args.contactId);
     return ok({ success: true });
+  },
+
+  alias_list_mailboxes: async (ctx) => {
+    const { simpleloginService, ok } = ctx;
+    if (!simpleloginService.isConfigured()) {
+      throw new McpError(ErrorCode.InvalidRequest, "SimpleLogin API key is not configured. Set simpleloginApiKey in Settings → Aliases.");
+    }
+    const mailboxes = await simpleloginService.listMailboxes();
+    return ok({ mailboxes });
+  },
+
+  alias_create_mailbox: async (ctx) => {
+    const { args, simpleloginService, ok } = ctx;
+    if (!simpleloginService.isConfigured()) {
+      throw new McpError(ErrorCode.InvalidRequest, "SimpleLogin API key is not configured. Set simpleloginApiKey in Settings → Aliases.");
+    }
+    const email = requireNonEmptyString(args.email, "email");
+    const mb = await simpleloginService.createMailbox(email);
+    return ok({ id: mb.id, email: mb.email, verified: mb.verified ?? false, default: mb.default ?? false });
+  },
+
+  alias_delete_mailbox: async (ctx) => {
+    const { args, simpleloginService, ok } = ctx;
+    if (!simpleloginService.isConfigured()) {
+      throw new McpError(ErrorCode.InvalidRequest, "SimpleLogin API key is not configured. Set simpleloginApiKey in Settings → Aliases.");
+    }
+    if (typeof args.mailboxId !== "number") {
+      throw new McpError(ErrorCode.InvalidParams, "mailboxId must be a number.");
+    }
+    const transfer = typeof args.transferAliasesTo === "number" ? args.transferAliasesTo : undefined;
+    await simpleloginService.deleteMailbox(args.mailboxId, transfer);
+    return ok({ success: true });
+  },
+
+  alias_list_domains: async (ctx) => {
+    const { simpleloginService, ok } = ctx;
+    if (!simpleloginService.isConfigured()) {
+      throw new McpError(ErrorCode.InvalidRequest, "SimpleLogin API key is not configured. Set simpleloginApiKey in Settings → Aliases.");
+    }
+    const domains = await simpleloginService.listCustomDomains();
+    return ok({ domains });
+  },
+
+  alias_options: async (ctx) => {
+    const { args, simpleloginService, ok } = ctx;
+    if (!simpleloginService.isConfigured()) {
+      throw new McpError(ErrorCode.InvalidRequest, "SimpleLogin API key is not configured. Set simpleloginApiKey in Settings → Aliases.");
+    }
+    const hostname = typeof args.hostname === "string" ? args.hostname : undefined;
+    const options = await simpleloginService.getAliasOptions(hostname);
+    return ok(options as unknown as Record<string, unknown>);
   },
 };
 

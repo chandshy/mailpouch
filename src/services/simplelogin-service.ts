@@ -56,6 +56,27 @@ export interface SimpleLoginContact {
   last_email_sent_timestamp?: number | null;
 }
 
+export interface SimpleLoginMailbox {
+  id: number;
+  email: string;
+  default?: boolean;
+  verified?: boolean;
+  nb_alias?: number;
+  creation_timestamp?: number;
+}
+
+export interface SimpleLoginCustomDomain {
+  id: number;
+  domain_name: string;
+  is_verified?: boolean;
+  catch_all?: boolean;
+  random_prefix_generation?: boolean;
+  nb_alias?: number;
+  name?: string | null;
+  mailboxes?: Array<{ id: number; email: string }>;
+  creation_timestamp?: number;
+}
+
 export interface AliasCreateRandomOptions {
   /** "uuid" = long random hex; "word" = readable word-pairs. */
   mode?: "uuid" | "word";
@@ -303,5 +324,47 @@ export class SimpleLoginService {
   /** Block or unblock a contact from forwarding. Returns the new block state. */
   async toggleContact(contactId: number): Promise<{ block_forward: boolean }> {
     return this.request(`/api/contacts/${contactId}/toggle`, { method: "POST" });
+  }
+
+  /** List the mailboxes (destination addresses) on the account. */
+  async listMailboxes(): Promise<SimpleLoginMailbox[]> {
+    const body = await this.request<{ mailboxes?: SimpleLoginMailbox[] }>(`/api/v2/mailboxes`);
+    return body.mailboxes ?? [];
+  }
+
+  /**
+   * Add a mailbox. SimpleLogin sends a verification email to `email`; the
+   * mailbox is unusable (`verified: false`) until the user clicks that link —
+   * something an agent cannot do, so surface `verified` to the caller.
+   */
+  async createMailbox(email: string): Promise<SimpleLoginMailbox> {
+    return this.request<SimpleLoginMailbox>(`/api/mailboxes`, {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    });
+  }
+
+  /**
+   * Delete a mailbox. `transferAliasesTo` (a mailbox id) moves this mailbox's
+   * aliases there; omit (or -1) to delete those aliases too. The default
+   * mailbox cannot be deleted (SimpleLogin returns 400).
+   */
+  async deleteMailbox(mailboxId: number, transferAliasesTo?: number): Promise<void> {
+    const init: RequestInit = { method: "DELETE" };
+    if (transferAliasesTo !== undefined) {
+      init.body = JSON.stringify({ transfer_aliases_to: transferAliasesTo });
+    }
+    await this.request(`/api/mailboxes/${mailboxId}`, init);
+  }
+
+  /** List the account's custom domains. */
+  async listCustomDomains(): Promise<SimpleLoginCustomDomain[]> {
+    const body = await this.request<{ custom_domains?: SimpleLoginCustomDomain[] } | SimpleLoginCustomDomain[]>(
+      `/api/custom_domains`,
+    );
+    // Defensive: the endpoint has been documented both as `{ custom_domains: [...] }`
+    // and as a bare array across SimpleLogin versions.
+    if (Array.isArray(body)) return body;
+    return body.custom_domains ?? [];
   }
 }
