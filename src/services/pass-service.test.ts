@@ -95,6 +95,20 @@ describe("PassService", () => {
     expect(capturedArgs).toEqual(["item", "list", "Work", "--output", "json"]);
   });
 
+  it("passes the PAT via PROTON_PASS_PERSONAL_ACCESS_TOKEN (the name pass-cli reads)", async () => {
+    let capturedEnv: Record<string, string> | undefined;
+    spawn.mockImplementation((_cli, _args: string[], opts: { env?: Record<string, string> }) => {
+      capturedEnv = opts?.env;
+      const c = makeFakeChild();
+      setImmediate(() => { c.stdout.emit("data", Buffer.from("[]")); c.emit("close", 0); });
+      return c;
+    });
+    const svc = new PassService({ personalAccessToken: "pst_secret::key", auditLogPath: auditPath });
+    await svc.listItems();
+    expect(capturedEnv?.PROTON_PASS_PERSONAL_ACCESS_TOKEN).toBe("pst_secret::key");
+    expect(capturedEnv?.PROTON_PASS_PAT).toBeUndefined(); // the wrong, old name
+  });
+
   it("searchItems filters `item list` client-side (no CLI search subcommand)", async () => {
     let capturedArgs: string[] = [];
     spawn.mockImplementation((_cli, args: string[]) => {

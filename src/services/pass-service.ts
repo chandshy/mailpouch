@@ -177,7 +177,9 @@ export class PassService {
             // home dir so pass-cli finds its config/session regardless of OS.
             HOME: process.env.HOME ?? homedir(),
             USERPROFILE: process.env.USERPROFILE ?? homedir(),
-            PROTON_PASS_PAT: this.pat,
+            // The official CLI reads the PAT from PROTON_PASS_PERSONAL_ACCESS_TOKEN
+            // (verified against pass-cli 2.2.1 — NOT the shorter PROTON_PASS_PAT).
+            PROTON_PASS_PERSONAL_ACCESS_TOKEN: this.pat,
             // Locale/charset hints — pass-cli emits JSON; without these
             // some libcs default to ASCII and mangle non-ASCII content.
             LANG: process.env.LANG ?? "C.UTF-8",
