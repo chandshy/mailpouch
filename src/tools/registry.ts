@@ -30,6 +30,56 @@ import * as escalation from "./escalation.js";
 import type { ToolDef, ToolHandler } from "./types.js";
 import type { EscalationHandler } from "./escalation.js";
 
+/**
+ * Optional `account_id` parameter advertised on every tool's inputSchema.
+ *
+ * The dispatcher in `src/index.ts` already reads `args.account_id` and
+ * routes the call to the matching account's IMAP/SMTP services (added in
+ * B1 / PR #60, shipped via PR #63). Strict-schema MCP clients — Claude
+ * Code's typed function-call interface is the immediate example — strip
+ * arguments not declared in `inputSchema.properties` before forwarding
+ * the JSON-RPC call, so without this declaration the runtime routing is
+ * unreachable from those clients and every call silently runs against
+ * `activeAccountId`.
+ *
+ * Advertising the parameter shape does NOT leak the configured account
+ * list, which remains operator-controlled via the settings UI by
+ * deliberate choice (see `src/settings/server.js` discovery copy).
+ */
+const ACCOUNT_ID_SCHEMA_FIELD = {
+  type: "string",
+  description:
+    "Optional account ID to route this call to (multi-account configs). " +
+    "Omit to use the active account. Configured account IDs are listed in " +
+    "the settings UI (Accounts tab).",
+} as const;
+
+/**
+ * Inject the optional `account_id` field into a tool's inputSchema.
+ *
+ * Spread order preserves any existing `account_id` declaration on the
+ * tool (none today) and any sibling fields — only the property map is
+ * widened. Tools that omit `inputSchema` altogether get the minimal
+ * `{ type: "object", properties: { account_id } }` shape.
+ */
+function withAccountIdField(def: ToolDef): ToolDef {
+  const schema = (def.inputSchema ?? { type: "object", properties: {} }) as {
+    type?: string;
+    properties?: Record<string, unknown>;
+    [k: string]: unknown;
+  };
+  return {
+    ...def,
+    inputSchema: {
+      ...schema,
+      properties: {
+        account_id: ACCOUNT_ID_SCHEMA_FIELD,
+        ...(schema.properties ?? {}),
+      },
+    },
+  };
+}
+
 /** Ordered ListTools definitions. */
 export function allToolDefs(): ToolDef[] {
   return [
@@ -47,7 +97,7 @@ export function allToolDefs(): ToolDef[] {
     ...reading.defsLate,
     ...diagnostics.defs,
     ...escalation.defs,
-  ];
+  ].map(withAccountIdField);
 }
 
 /** Tool-name-keyed dispatch table for the (post-gate) CallTool handlers. */
