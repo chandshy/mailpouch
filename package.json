@@ -89,10 +89,10 @@
   ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "~1.29.0",
-    "better-sqlite3": "^12.9.0",
-    "imapflow": "~1.3.1",
-    "mailparser": "~3.9.8",
-    "nodemailer": "~8.0.7"
+    "better-sqlite3": "^12.11.1",
+    "imapflow": "~1.4.3",
+    "mailparser": "~3.9.12",
+    "nodemailer": "~9.0.1"
   },
   "optionalDependencies": {
     "@napi-rs/keyring": "~1.3.0",
@@ -100,12 +100,12 @@
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
-    "@types/node": "^25.6.0",
+    "@types/node": "^26.0.1",
     "@types/nodemailer": "^8.0.0",
-    "@vitest/coverage-v8": "^4.1.8",
+    "@vitest/coverage-v8": "^4.1.9",
     "simple-git-hooks": "^2.13.1",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.8"
+    "vitest": "^4.1.9"
   },
   "simple-git-hooks": {
     "pre-push": "npm run preship:fast"
@@ -128,7 +128,7 @@
     "scripts/install-hooks.mjs"
   ],
   "overrides": {
-    "hono": ">=4.12.14",
+    "hono": ">=4.12.25",
     "@hono/node-server": ">=1.19.13",
     "path-to-regexp": ">=8.4.2",
     "fast-uri": ">=3.1.2"
