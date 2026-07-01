@@ -91,21 +91,46 @@ describe("PassService", () => {
     });
     const svc = new PassService({ personalAccessToken: "pat", auditLogPath: auditPath });
     await svc.listItems("Work");
-    expect(capturedArgs).toEqual(["--json", "list", "--vault", "Work"]);
+    // Official CLI: `item list [VAULT_NAME] --output json` (vault positional).
+    expect(capturedArgs).toEqual(["item", "list", "Work", "--output", "json"]);
   });
 
-  it("searchItems sends --query and parses the result", async () => {
-    spawn.mockImplementation(() => {
+  it("passes the PAT via PROTON_PASS_PERSONAL_ACCESS_TOKEN (the name pass-cli reads)", async () => {
+    let capturedEnv: Record<string, string> | undefined;
+    spawn.mockImplementation((_cli, _args: string[], opts: { env?: Record<string, string> }) => {
+      capturedEnv = opts?.env;
+      const c = makeFakeChild();
+      setImmediate(() => { c.stdout.emit("data", Buffer.from("[]")); c.emit("close", 0); });
+      return c;
+    });
+    const svc = new PassService({ personalAccessToken: "pst_secret::key", auditLogPath: auditPath });
+    await svc.listItems();
+    expect(capturedEnv?.PROTON_PASS_PERSONAL_ACCESS_TOKEN).toBe("pst_secret::key");
+    expect(capturedEnv?.PROTON_PASS_PAT).toBeUndefined(); // the wrong, old name
+  });
+
+  it("searchItems filters `item list` client-side (no CLI search subcommand)", async () => {
+    let capturedArgs: string[] = [];
+    spawn.mockImplementation((_cli, args: string[]) => {
+      capturedArgs = args;
       const c = makeFakeChild();
       setImmediate(() => {
-        c.stdout.emit("data", Buffer.from(JSON.stringify([{ id: "x", type: "login", name: "Acme" }])));
+        c.stdout.emit("data", Buffer.from(JSON.stringify([
+          { id: "x", type: "login", name: "Acme Corp" },
+          { id: "y", type: "login", name: "Gmail", url: "https://mail.google.com" },
+        ])));
         c.emit("close", 0);
       });
       return c;
     });
     const svc = new PassService({ personalAccessToken: "pat", auditLogPath: auditPath });
     const res = await svc.searchItems("acme");
-    expect(res[0].name).toBe("Acme");
+    // Uses `item list`, not a (non-existent) search subcommand.
+    expect(capturedArgs).toEqual(["item", "list", "--output", "json"]);
+    expect(res).toHaveLength(1);
+    expect(res[0].name).toBe("Acme Corp");
+    // Case-insensitive across any string field (url match too):
+    expect(await svc.searchItems("google")).toHaveLength(1);
   });
 
   it("getItem parses a JSON object", async () => {
@@ -121,10 +146,44 @@ describe("PassService", () => {
       return c;
     });
     const svc = new PassService({ personalAccessToken: "pat", auditLogPath: auditPath });
+    let capturedArgs: string[] = [];
+    spawn.mockImplementation((_cli, args: string[]) => {
+      capturedArgs = args;
+      const c = makeFakeChild();
+      setImmediate(() => {
+        c.stdout.emit("data", Buffer.from(JSON.stringify({
+          id: "i1", type: "login", name: "Gmail",
+          username: "me@example.com", fields: { password: "s3cret" },
+        })));
+        c.emit("close", 0);
+      });
+      return c;
+    });
     const item = await svc.getItem("i1");
+    // Official CLI: `item view --item-id <id> --output json`.
+    expect(capturedArgs).toEqual(["item", "view", "--item-id", "i1", "--output", "json"]);
     expect(item.id).toBe("i1");
     expect(item.username).toBe("me@example.com");
     expect(item.fields?.password).toBe("s3cret");
+  });
+
+  it("getTotp calls `item totp --item-id ... --output json` and audits as pass_totp", async () => {
+    let capturedArgs: string[] = [];
+    spawn.mockImplementation((_cli, args: string[]) => {
+      capturedArgs = args;
+      const c = makeFakeChild();
+      setImmediate(() => {
+        c.stdout.emit("data", Buffer.from(JSON.stringify({ code: "123456" })));
+        c.emit("close", 0);
+      });
+      return c;
+    });
+    const svc = new PassService({ personalAccessToken: "pat", auditLogPath: auditPath });
+    const totp = await svc.getTotp("i1");
+    expect(capturedArgs).toEqual(["item", "totp", "--item-id", "i1", "--output", "json"]);
+    expect(totp.code).toBe("123456");
+    const rows = readFileSync(auditPath, "utf-8").trim().split("\n").map((l) => JSON.parse(l));
+    expect(rows[rows.length - 1].tool).toBe("pass_totp");
   });
 
   it("propagates non-zero exit codes as errors AND audits the failure", async () => {

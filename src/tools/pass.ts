@@ -1,5 +1,5 @@
 /**
- * Proton Pass tools: pass_list, pass_search, pass_get.
+ * Proton Pass tools: pass_list, pass_search, pass_get, pass_totp.
  */
 
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
@@ -41,7 +41,7 @@ export const defs: ToolDef[] = [
   {
     name: "pass_search",
     title: "Search Proton Pass Items",
-    description: "Full-text search across Proton Pass item names, URLs, and notes. Returns summaries only; use pass_get to retrieve the decrypted content for a specific item.",
+    description: "Case-insensitive substring search across Proton Pass item summaries (name, URL, note, vault). Filtered client-side from the item list — returns summaries only; use pass_get to retrieve decrypted content for a specific item.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: "object",
@@ -82,6 +82,26 @@ export const defs: ToolDef[] = [
         url: { type: "string" },
       },
       required: ["id", "name", "type"],
+    },
+  },
+  {
+    name: "pass_totp",
+    title: "Get Proton Pass TOTP Code",
+    description: "Retrieve the current TOTP/2FA code for a Proton Pass item by ID. Reveals a live second factor — every call is audit-logged. Codes are time-limited; fetch immediately before use.",
+    annotations: { destructiveHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        item_id: { type: "string", description: "Item ID from pass_list or pass_search" },
+      },
+      required: ["item_id"],
+    },
+    outputSchema: {
+      type: "object",
+      properties: {
+        code: { type: "string", description: "The current TOTP code" },
+        totp: { type: "string", description: "The current TOTP code (alias field, CLI-shape dependent)" },
+      },
     },
   },
 ];
@@ -132,6 +152,24 @@ export const handlers: Record<string, ToolHandler> = {
     try {
       const item = await passService.getItem(itemId);
       return ok(item as unknown as Record<string, unknown>);
+    } catch (err: unknown) {
+      if (err instanceof PassCliUnavailableError) {
+        throw new McpError(ErrorCode.InvalidRequest, err.message);
+      }
+      throw err;
+    }
+  },
+
+  pass_totp: async (ctx) => {
+    const { args, passService, ok } = ctx;
+    if (!passService) {
+      throw new McpError(ErrorCode.InvalidRequest, "Proton Pass is not configured. Set passAccessToken in Settings → Pass.");
+    }
+    const itemId = typeof args.item_id === "string" ? args.item_id.trim() : "";
+    if (!itemId) throw new McpError(ErrorCode.InvalidParams, "item_id must be a non-empty string.");
+    try {
+      const totp = await passService.getTotp(itemId);
+      return ok(totp);
     } catch (err: unknown) {
       if (err instanceof PassCliUnavailableError) {
         throw new McpError(ErrorCode.InvalidRequest, err.message);

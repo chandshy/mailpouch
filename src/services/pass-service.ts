@@ -161,7 +161,10 @@ export class PassService {
         // ...process.env would hand a malicious or compromised pass-cli
         // every credential the parent holds (OAuth admin password,
         // SimpleLogin keys in tests, etc.).
-        child = spawn(this.cliPath, ["--json", ...args], {
+        // Output format is a per-subcommand flag (`--output json`), not a
+        // global `--json` — callers include it in `args`. See the official CLI
+        // reference: https://protonpass.github.io/pass-cli/commands/item/
+        child = spawn(this.cliPath, [...args], {
           stdio: ["ignore", "pipe", "pipe"],
           // CRED-013: pin cwd to the user's home rather than inheriting
           // process.cwd(). If mailpouch was launched from an attacker-writable
@@ -174,7 +177,9 @@ export class PassService {
             // home dir so pass-cli finds its config/session regardless of OS.
             HOME: process.env.HOME ?? homedir(),
             USERPROFILE: process.env.USERPROFILE ?? homedir(),
-            PROTON_PASS_PAT: this.pat,
+            // The official CLI reads the PAT from PROTON_PASS_PERSONAL_ACCESS_TOKEN
+            // (verified against pass-cli 2.2.1 — NOT the shorter PROTON_PASS_PAT).
+            PROTON_PASS_PERSONAL_ACCESS_TOKEN: this.pat,
             // Locale/charset hints — pass-cli emits JSON; without these
             // some libcs default to ASCII and mangle non-ASCII content.
             LANG: process.env.LANG ?? "C.UTF-8",
@@ -274,24 +279,48 @@ export class PassService {
     }
   }
 
+  /**
+   * Run `item list` and parse the summaries — WITHOUT auditing (callers audit
+   * under their own tool name). Vault is a positional `VAULT_NAME` argument per
+   * the official CLI: `pass-cli item list [VAULT_NAME] --output json`.
+   * ponytail: parseJsonArray assumes a top-level JSON array; the live CLI's
+   * `--output json` shape is unverified here (mocked tests can't catch a
+   * wrapper). Validate against an installed pass-cli before relying on it (#232).
+   */
+  private async rawList(vault?: string): Promise<PassItemSummary[]> {
+    const args = ["item", "list"];
+    if (vault) args.push(vault);
+    args.push("--output", "json");
+    return this.parseJsonArray<PassItemSummary>(await this.run(args));
+  }
+
   async listItems(vault?: string): Promise<PassItemSummary[]> {
-    const args = ["list"];
-    if (vault) args.push("--vault", vault);
     try {
-      const out = await this.run(args);
+      const items = await this.rawList(vault);
       this.audit({ tool: "pass_list", vault, ok: true });
-      return this.parseJsonArray<PassItemSummary>(out);
+      return items;
     } catch (err: unknown) {
       this.audit({ tool: "pass_list", vault, ok: false, error: (err as Error).message });
       throw err;
     }
   }
 
+  /**
+   * The official pass-cli has NO `search` subcommand, so we filter `item list`
+   * client-side across every string field present on each summary (name, url,
+   * note, vault, …). Case-insensitive substring match.
+   */
   async searchItems(query: string): Promise<PassItemSummary[]> {
     try {
-      const out = await this.run(["search", "--query", query]);
+      const items = await this.rawList();
+      const q = query.toLowerCase();
+      const matched = items.filter((it) =>
+        Object.values(it as unknown as Record<string, unknown>)
+          .filter((v): v is string => typeof v === "string")
+          .some((v) => v.toLowerCase().includes(q)),
+      );
       this.audit({ tool: "pass_search", ok: true });
-      return this.parseJsonArray<PassItemSummary>(out);
+      return matched;
     } catch (err: unknown) {
       this.audit({ tool: "pass_search", ok: false, error: (err as Error).message });
       throw err;
@@ -301,11 +330,28 @@ export class PassService {
   async getItem(itemId: string): Promise<PassItemDetail> {
     if (!itemId) throw new Error("itemId is required");
     try {
-      const out = await this.run(["get", "--id", itemId]);
+      const out = await this.run(["item", "view", "--item-id", itemId, "--output", "json"]);
       this.audit({ tool: "pass_get", itemId, ok: true });
       return this.parseJsonObject<PassItemDetail>(out);
     } catch (err: unknown) {
       this.audit({ tool: "pass_get", itemId, ok: false, error: (err as Error).message });
+      throw err;
+    }
+  }
+
+  /**
+   * Retrieve the current TOTP/2FA code for an item via `item totp`. Returns the
+   * raw parsed object from the CLI (code + validity window when provided).
+   * Audit-logged like getItem — it reveals a live second factor.
+   */
+  async getTotp(itemId: string): Promise<Record<string, unknown>> {
+    if (!itemId) throw new Error("itemId is required");
+    try {
+      const out = await this.run(["item", "totp", "--item-id", itemId, "--output", "json"]);
+      this.audit({ tool: "pass_totp", itemId, ok: true });
+      return this.parseJsonObject<Record<string, unknown>>(out);
+    } catch (err: unknown) {
+      this.audit({ tool: "pass_totp", itemId, ok: false, error: (err as Error).message });
       throw err;
     }
   }

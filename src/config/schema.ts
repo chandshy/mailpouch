@@ -38,7 +38,7 @@ export const ALL_TOOLS = [
   "alias_toggle", "alias_delete", "alias_get_activity",
   "alias_list_contacts", "alias_create_contact", "alias_toggle_contact", "alias_delete_contact",
   // Proton Pass (optional — requires pass-cli and a Personal Access Token)
-  "pass_list", "pass_search", "pass_get",
+  "pass_list", "pass_search", "pass_get", "pass_totp",
 ] as const;
 
 export type ToolName = (typeof ALL_TOOLS)[number];
@@ -136,7 +136,7 @@ export const TOOL_CATEGORIES: Record<string, ToolCategory> = {
   pass: {
     label: "Proton Pass",
     description: "Retrieve credentials from Proton Pass via pass-cli (requires a Personal Access Token).",
-    tools: ["pass_list", "pass_search", "pass_get"],
+    tools: ["pass_list", "pass_search", "pass_get", "pass_totp"],
     risk: "moderate",
   },
 };
