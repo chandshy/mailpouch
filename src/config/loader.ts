@@ -104,10 +104,13 @@ export function buildPermissions(preset: PermissionPreset): ServerConfig["permis
       ...TOOL_CATEGORIES.system.tools,
       "get_folders",
       "start_bridge",  // needed to bring Bridge up before reading
-      // SimpleLogin read-only surface: list + activity logs + contact list only.
+      // SimpleLogin read-only surface: lists + activity logs + options.
       "alias_list",
       "alias_get_activity",
       "alias_list_contacts",
+      "alias_list_mailboxes",
+      "alias_list_domains",
+      "alias_options",
     ]);
     for (const tool of ALL_TOOLS) {
       tools[tool].enabled = allowed.has(tool);
@@ -143,6 +146,8 @@ export function buildPermissions(preset: PermissionPreset): ServerConfig["permis
     tools["alias_create_contact"].rateLimit = 50;
     tools["alias_toggle_contact"].rateLimit = 100;
     tools["alias_delete_contact"].rateLimit = 20;
+    tools["alias_create_mailbox"].rateLimit = 20;
+    tools["alias_delete_mailbox"].rateLimit = 20;
     // Server lifecycle: allow a few per session.
     tools["shutdown_server"].rateLimit = 5;
     tools["restart_server"].rateLimit = 5;

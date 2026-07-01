@@ -249,6 +249,56 @@ describe("SimpleLoginService", () => {
     });
   });
 
+  describe("mailboxes & custom domains", () => {
+    it("listMailboxes unwraps the { mailboxes } envelope", async () => {
+      globalThis.fetch = mockFetch((url) => {
+        expect(url).toContain("/api/v2/mailboxes");
+        return { status: 200, body: { mailboxes: [{ id: 1, email: "a@b.c", default: true, verified: true }] } };
+      }) as unknown as typeof globalThis.fetch;
+      const svc = new SimpleLoginService("sl-key");
+      const mbs = await svc.listMailboxes();
+      expect(mbs).toHaveLength(1);
+      expect(mbs[0].email).toBe("a@b.c");
+    });
+
+    it("createMailbox POSTs { email }", async () => {
+      let method = "", body = "";
+      globalThis.fetch = mockFetch((_url, init) => {
+        method = init.method ?? "GET"; body = String(init.body ?? "");
+        return { status: 201, body: { id: 5, email: "new@x.y", verified: false, default: false } };
+      }) as unknown as typeof globalThis.fetch;
+      const svc = new SimpleLoginService("sl-key");
+      const mb = await svc.createMailbox("new@x.y");
+      expect(method).toBe("POST");
+      expect(JSON.parse(body)).toEqual({ email: "new@x.y" });
+      expect(mb.verified).toBe(false);
+    });
+
+    it("deleteMailbox sends transfer_aliases_to only when provided", async () => {
+      const calls: Array<{ url: string; method: string; body: string }> = [];
+      globalThis.fetch = mockFetch((url, init) => {
+        calls.push({ url, method: init.method ?? "GET", body: String(init.body ?? "") });
+        return { status: 200, body: {} };
+      }) as unknown as typeof globalThis.fetch;
+      const svc = new SimpleLoginService("sl-key");
+      await svc.deleteMailbox(9);
+      await svc.deleteMailbox(9, 3);
+      expect(calls[0].method).toBe("DELETE");
+      expect(calls[0].body).toBe("");                       // no body when omitted
+      expect(JSON.parse(calls[1].body)).toEqual({ transfer_aliases_to: 3 });
+    });
+
+    it("listCustomDomains handles both the wrapped and bare-array shapes", async () => {
+      globalThis.fetch = mockFetch(() => ({ status: 200, body: { custom_domains: [{ id: 1, domain_name: "ex.com" }] } })) as unknown as typeof globalThis.fetch;
+      const svc = new SimpleLoginService("sl-key");
+      expect(await svc.listCustomDomains()).toHaveLength(1);
+
+      globalThis.fetch = mockFetch(() => ({ status: 200, body: [{ id: 2, domain_name: "bare.com" }] })) as unknown as typeof globalThis.fetch;
+      const bare = await svc.listCustomDomains();
+      expect(bare[0].domain_name).toBe("bare.com");
+    });
+  });
+
   describe("updateAlias", () => {
     it("sends PATCH (not PUT) to /api/aliases/:id with only the given fields", async () => {
       let capturedUrl = "", capturedMethod = "", capturedBody = "";

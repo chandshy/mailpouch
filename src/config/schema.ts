@@ -37,6 +37,7 @@ export const ALL_TOOLS = [
   "alias_list", "alias_create_random", "alias_create_custom", "alias_update",
   "alias_toggle", "alias_delete", "alias_get_activity",
   "alias_list_contacts", "alias_create_contact", "alias_toggle_contact", "alias_delete_contact",
+  "alias_list_mailboxes", "alias_create_mailbox", "alias_delete_mailbox", "alias_list_domains", "alias_options",
   // Proton Pass (optional — requires pass-cli and a Personal Access Token)
   "pass_list", "pass_search", "pass_get", "pass_totp",
 ] as const;
@@ -130,6 +131,7 @@ export const TOOL_CATEGORIES: Record<string, ToolCategory> = {
       "alias_list", "alias_create_random", "alias_create_custom", "alias_update",
       "alias_toggle", "alias_delete", "alias_get_activity",
       "alias_list_contacts", "alias_create_contact", "alias_toggle_contact", "alias_delete_contact",
+      "alias_list_mailboxes", "alias_create_mailbox", "alias_delete_mailbox", "alias_list_domains", "alias_options",
     ],
     risk: "moderate",
   },

@@ -15,8 +15,8 @@ import {
 } from "./schema.js";
 
 describe("ALL_TOOLS", () => {
-  it("has exactly 79 entries", () => {
-    expect(ALL_TOOLS).toHaveLength(79);
+  it("has exactly 84 entries", () => {
+    expect(ALL_TOOLS).toHaveLength(84);
   });
 
   it("contains no duplicates", () => {
