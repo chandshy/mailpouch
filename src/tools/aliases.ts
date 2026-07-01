@@ -1,8 +1,8 @@
 /**
  * SimpleLogin alias tools: alias_list, alias_create_random,
- * alias_create_custom, alias_toggle, alias_delete, alias_get_activity,
- * and reverse-alias contacts: alias_list_contacts, alias_create_contact,
- * alias_toggle_contact, alias_delete_contact.
+ * alias_create_custom, alias_update, alias_toggle, alias_delete,
+ * alias_get_activity, and reverse-alias contacts: alias_list_contacts,
+ * alias_create_contact, alias_toggle_contact, alias_delete_contact.
  */
 
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
@@ -164,6 +164,25 @@ export const defs: ToolDef[] = [
         },
       },
     },
+  },
+  {
+    name: "alias_update",
+    title: "Update SimpleLogin Alias",
+    description: "Update an existing SimpleLogin alias in place: display name (shown in replies), note, which mailbox(es) receive its mail, PGP on/off, and pinned state. Provide only the fields you want to change; at least one is required. Use alias_list to find the aliasId and alias_list_mailboxes-equivalent workflow (mailbox_ids come from SimpleLogin's dashboard) to retarget delivery.",
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        aliasId: { type: "number" },
+        name: { type: "string", description: "Display name shown in replies (empty string clears it)" },
+        note: { type: "string", description: "Free-text note describing what this alias is for" },
+        mailboxIds: { type: "array", items: { type: "number" }, description: "Mailbox IDs that should receive this alias's mail (replaces the current set)" },
+        disablePgp: { type: "boolean", description: "true disables PGP encryption for forwards to the mailbox" },
+        pinned: { type: "boolean", description: "Pin the alias to the top of the SimpleLogin dashboard" },
+      },
+      required: ["aliasId"],
+    },
+    outputSchema: ACTION_RESULT_SCHEMA,
   },
   {
     name: "alias_list_contacts",
@@ -336,6 +355,27 @@ export const handlers: Record<string, ToolHandler> = {
     const pageSize = clampOptionalInt(args.pageSize, 50, 1, 1000);
     const activities = await simpleloginService.getAliasActivities(args.aliasId, pageSize);
     return ok({ activities });
+  },
+
+  alias_update: async (ctx) => {
+    const { args, simpleloginService, ok } = ctx;
+    if (!simpleloginService.isConfigured()) {
+      throw new McpError(ErrorCode.InvalidRequest, "SimpleLogin API key is not configured. Set simpleloginApiKey in Settings → Aliases.");
+    }
+    if (typeof args.aliasId !== "number") {
+      throw new McpError(ErrorCode.InvalidParams, "aliasId must be a number.");
+    }
+    const patch: { name?: string; note?: string; mailbox_ids?: number[]; disable_pgp?: boolean; pinned?: boolean } = {};
+    if (typeof args.name === "string") patch.name = args.name;
+    if (typeof args.note === "string") patch.note = args.note;
+    if (Array.isArray(args.mailboxIds)) patch.mailbox_ids = args.mailboxIds as number[];
+    if (typeof args.disablePgp === "boolean") patch.disable_pgp = args.disablePgp;
+    if (typeof args.pinned === "boolean") patch.pinned = args.pinned;
+    if (Object.keys(patch).length === 0) {
+      throw new McpError(ErrorCode.InvalidParams, "Provide at least one field to update (name, note, mailboxIds, disablePgp, or pinned).");
+    }
+    await simpleloginService.updateAlias(args.aliasId, patch);
+    return ok({ success: true });
   },
 
   alias_list_contacts: async (ctx) => {
