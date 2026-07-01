@@ -249,6 +249,74 @@ describe("SimpleLoginService", () => {
     });
   });
 
+  describe("reverse-alias contacts", () => {
+    it("lists contacts, paginating until an empty page", async () => {
+      const pages: Record<string, unknown> = {
+        "page_id=0": { contacts: [
+          { id: 1, contact: "a@ex.com", reverse_alias: "A <ra1@sl>", reverse_alias_address: "ra1@sl" },
+          { id: 2, contact: "b@ex.com", reverse_alias: "B <ra2@sl>", reverse_alias_address: "ra2@sl" },
+        ] },
+        "page_id=1": { contacts: [] },
+      };
+      const urls: string[] = [];
+      globalThis.fetch = mockFetch((url) => {
+        urls.push(url);
+        const key = url.includes("page_id=1") ? "page_id=1" : "page_id=0";
+        return { status: 200, body: pages[key] };
+      }) as unknown as typeof globalThis.fetch;
+
+      const svc = new SimpleLoginService("sl-key");
+      const contacts = await svc.listContacts(42);
+      expect(contacts).toHaveLength(2);
+      expect(contacts[0].reverse_alias_address).toBe("ra1@sl");
+      expect(urls[0]).toContain("/api/aliases/42/contacts?page_id=0");
+    });
+
+    it("creates a contact and returns the reverse-alias address to send from", async () => {
+      let capturedUrl = "", capturedMethod = "", capturedBody = "";
+      globalThis.fetch = mockFetch((url, init) => {
+        capturedUrl = url; capturedMethod = init.method ?? "GET"; capturedBody = String(init.body ?? "");
+        return { status: 201, body: {
+          id: 7, contact: "ext@ex.com", reverse_alias: "Ext <ra7@sl>", reverse_alias_address: "ra7@sl", existed: false,
+        } };
+      }) as unknown as typeof globalThis.fetch;
+
+      const svc = new SimpleLoginService("sl-key");
+      const c = await svc.createContact(42, "Name <ext@ex.com>");
+      expect(capturedMethod).toBe("POST");
+      expect(capturedUrl).toContain("/api/aliases/42/contacts");
+      expect(JSON.parse(capturedBody)).toEqual({ contact: "Name <ext@ex.com>" });
+      expect(c.reverse_alias_address).toBe("ra7@sl");
+    });
+
+    it("toggles a contact's block state via /api/contacts/:id/toggle", async () => {
+      let capturedUrl = "", capturedMethod = "";
+      globalThis.fetch = mockFetch((url, init) => {
+        capturedUrl = url; capturedMethod = init.method ?? "GET";
+        return { status: 200, body: { block_forward: true } };
+      }) as unknown as typeof globalThis.fetch;
+
+      const svc = new SimpleLoginService("sl-key");
+      const r = await svc.toggleContact(7);
+      expect(capturedMethod).toBe("POST");
+      expect(capturedUrl).toContain("/api/contacts/7/toggle");
+      expect(r.block_forward).toBe(true);
+    });
+
+    it("deletes a contact via DELETE /api/contacts/:id", async () => {
+      let capturedUrl = "", capturedMethod = "";
+      globalThis.fetch = mockFetch((url, init) => {
+        capturedUrl = url; capturedMethod = init.method ?? "GET";
+        return { status: 200, body: { deleted: true } };
+      }) as unknown as typeof globalThis.fetch;
+
+      const svc = new SimpleLoginService("sl-key");
+      await svc.deleteContact(7);
+      expect(capturedMethod).toBe("DELETE");
+      expect(capturedUrl).toContain("/api/contacts/7");
+    });
+  });
+
   describe("baseUrl normalization", () => {
     it("strips trailing slashes from the base URL", async () => {
       let capturedUrl = "";

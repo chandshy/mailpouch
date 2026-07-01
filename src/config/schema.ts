@@ -36,6 +36,7 @@ export const ALL_TOOLS = [
   // SimpleLogin aliases (Proton-owned; optional — requires API key)
   "alias_list", "alias_create_random", "alias_create_custom",
   "alias_toggle", "alias_delete", "alias_get_activity",
+  "alias_list_contacts", "alias_create_contact", "alias_toggle_contact", "alias_delete_contact",
   // Proton Pass (optional — requires pass-cli and a Personal Access Token)
   "pass_list", "pass_search", "pass_get",
 ] as const;
@@ -128,6 +129,7 @@ export const TOOL_CATEGORIES: Record<string, ToolCategory> = {
     tools: [
       "alias_list", "alias_create_random", "alias_create_custom",
       "alias_toggle", "alias_delete", "alias_get_activity",
+      "alias_list_contacts", "alias_create_contact", "alias_toggle_contact", "alias_delete_contact",
     ],
     risk: "moderate",
   },

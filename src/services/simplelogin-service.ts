@@ -39,6 +39,23 @@ export interface SimpleLoginActivity {
   reverse_alias?: string;
 }
 
+export interface SimpleLoginContact {
+  id: number;
+  /** The external email address this reverse-alias forwards to. */
+  contact: string;
+  /** Display form, e.g. "Name <ra+xxx@simplelogin.co>". */
+  reverse_alias: string;
+  /** The raw reverse-alias address to put in To: when sending as the alias. */
+  reverse_alias_address: string;
+  /** POST only: true when the contact already existed (idempotent create). */
+  existed?: boolean;
+  block_forward?: boolean;
+  creation_date?: string;
+  creation_timestamp?: number;
+  last_email_sent_date?: string | null;
+  last_email_sent_timestamp?: number | null;
+}
+
 export interface AliasCreateRandomOptions {
   /** "uuid" = long random hex; "word" = readable word-pairs. */
   mode?: "uuid" | "word";
@@ -235,5 +252,51 @@ export class SimpleLoginService {
       method: "PUT",
       body: JSON.stringify(patch),
     });
+  }
+
+  /**
+   * List the reverse-alias contacts for an alias. Each contact is an external
+   * address you can send *as* this alias to; `reverse_alias_address` is the
+   * To: address that routes the reply out through SimpleLogin (and encrypts to
+   * the recipient's PGP key when one is configured).
+   */
+  async listContacts(aliasId: number, pageSize = 100): Promise<SimpleLoginContact[]> {
+    const collected: SimpleLoginContact[] = [];
+    let page = 0;
+    // SimpleLogin returns { contacts: SimpleLoginContact[] }; empty array = end.
+    while (collected.length < pageSize) {
+      const body = await this.request<{ contacts?: SimpleLoginContact[] }>(
+        `/api/aliases/${aliasId}/contacts?page_id=${page}`,
+      );
+      const batch = body.contacts ?? [];
+      if (batch.length === 0) break;
+      collected.push(...batch);
+      if (collected.length >= pageSize) break;
+      page += 1;
+      if (page >= 50) break;
+    }
+    return collected.slice(0, pageSize);
+  }
+
+  /**
+   * Create (or fetch, if it already exists) a reverse-alias contact. `contact`
+   * is the external recipient as "email@example.com" or "Name <email@…>".
+   * Returns `reverse_alias_address` — the To: address to send to so the message
+   * goes out from the alias. `existed: true` means the contact was already present.
+   */
+  async createContact(aliasId: number, contact: string): Promise<SimpleLoginContact> {
+    return this.request<SimpleLoginContact>(`/api/aliases/${aliasId}/contacts`, {
+      method: "POST",
+      body: JSON.stringify({ contact }),
+    });
+  }
+
+  async deleteContact(contactId: number): Promise<void> {
+    await this.request(`/api/contacts/${contactId}`, { method: "DELETE" });
+  }
+
+  /** Block or unblock a contact from forwarding. Returns the new block state. */
+  async toggleContact(contactId: number): Promise<{ block_forward: boolean }> {
+    return this.request(`/api/contacts/${contactId}/toggle`, { method: "POST" });
   }
 }
