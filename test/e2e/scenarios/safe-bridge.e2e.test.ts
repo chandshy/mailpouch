@@ -177,7 +177,7 @@ describe("safe-bridge.e2e — non-destructive Bridge audit (scratch-scoped)", ()
     // All Mail indexing can lag a moment after APPEND — poll for OUR message.
     let amUids: number[] = [];
     for (let i = 0; i < 12 && amUids.length === 0; i++) {
-      amUids = await h.imap.searchSubject("All Mail", token);
+      amUids = await h.imap.searchSubject("All Mail", seed.subject);
       if (amUids.length === 0) await new Promise((r) => setTimeout(r, 500));
     }
     if (amUids.length === 0) {
