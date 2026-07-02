@@ -74,7 +74,7 @@ jobs:
           # npm returns E404 ("Not Found - PUT .../<package>") when the token
           # cannot publish this package. Treat that as a non-fatal skip so this
           # release workflow doesn't fail for an external registry permission issue.
-          if [ "${PUBLISH_STATUS}" -ne 0 ] && echo "${PUBLISH_OUTPUT}" | grep -Eq "E404|code E404"; then
+          if [ "${PUBLISH_STATUS}" -ne 0 ] && echo "${PUBLISH_OUTPUT}" | grep -q "E404"; then
             echo "::warning::Skipping npm publish for ${NAME}@${VERSION} because the registry returned E404 (token/package permission mismatch)."
           elif [ "${PUBLISH_STATUS}" -ne 0 ]; then
             exit "${PUBLISH_STATUS}"
