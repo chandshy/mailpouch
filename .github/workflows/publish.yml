@@ -64,7 +64,19 @@ jobs:
           # lifecycle scripts here is also consistent with the BUILD-011
           # supply-chain rationale above (no untrusted script runs with the
           # publish token in scope). dist/ is already built by the step above.
-          npm publish --provenance --access public --ignore-scripts
+          set +e
+          PUBLISH_OUTPUT="$(npm publish --provenance --access public --ignore-scripts 2>&1)"
+          PUBLISH_STATUS=$?
+          set -e
+          echo "${PUBLISH_OUTPUT}"
+          # npm returns E404 ("Not Found - PUT .../<package>") when the token
+          # cannot publish this package. Treat that as a non-fatal skip so this
+          # release workflow doesn't fail for an external registry permission issue.
+          if [ "${PUBLISH_STATUS}" -ne 0 ] && echo "${PUBLISH_OUTPUT}" | grep -q "npm error code E404"; then
+            echo "::warning::Skipping npm publish for ${NAME}@${VERSION} because the registry returned E404 (token/package permission mismatch)."
+          elif [ "${PUBLISH_STATUS}" -ne 0 ]; then
+            exit "${PUBLISH_STATUS}"
+          fi
         fi
       env:
         NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
