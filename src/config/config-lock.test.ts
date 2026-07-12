@@ -103,7 +103,15 @@ describe("config file lock (CRED-008)", () => {
 
     const cfg = defaultConfig();
     cfg.connection.username = "must-not-write";
-    expect(() => saveConfig(cfg)).toThrow(/Could not acquire config lock/);
+    // The retry delay is production backoff, not behavior under test. Hosted
+    // macOS runners can oversleep each 20 ms Atomics.wait() under load and turn
+    // this nominal one-second assertion into a Vitest timeout.
+    const waitSpy = vi.spyOn(Atomics, "wait").mockReturnValue("timed-out");
+    try {
+      expect(() => saveConfig(cfg)).toThrow(/Could not acquire config lock/);
+    } finally {
+      waitSpy.mockRestore();
+    }
     expect(JSON.parse(readFileSync(ownerPath, "utf-8"))).toEqual(liveOwner);
     expect(existsSync(cfgPath)).toBe(false);
   });
@@ -123,9 +131,11 @@ describe("config file lock (CRED-008)", () => {
     const killSpy = vi.spyOn(process, "kill").mockImplementation((() => {
       throw Object.assign(new Error("process is gone"), { code: "ESRCH" });
     }) as typeof process.kill);
+    const waitSpy = vi.spyOn(Atomics, "wait").mockReturnValue("timed-out");
     try {
       expect(() => saveConfig(defaultConfig())).toThrow(/Could not acquire config lock/);
     } finally {
+      waitSpy.mockRestore();
       killSpy.mockRestore();
     }
 
