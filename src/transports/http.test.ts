@@ -636,7 +636,11 @@ describe("HTTP transport", () => {
         expect(status).toBe(200);
         // A successful login re-activated the grant in the running store.
         expect(grants.get(account.clientId)?.status).toBe("active");
-      });
+      // This is deliberately a full socket + crypto + durable-store round trip.
+      // Windows CI can spend several seconds in Defender-scanned fsync/rename
+      // calls under the full parallel suite, so keep the coverage and give this
+      // integration case a budget above Vitest's 5 s unit-test default.
+      }, 15_000);
     });
 
     it("serves RFC 9728 oauth-protected-resource metadata", async () => {
