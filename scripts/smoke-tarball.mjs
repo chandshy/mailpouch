@@ -15,6 +15,7 @@ import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { spawnShellFreeSync } from "./lib/cross-platform-spawn.mjs";
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const pkg = JSON.parse(await readFile(join(ROOT, "package.json"), "utf-8"));
@@ -25,20 +26,25 @@ const stagingDir = await mkdtemp(join(tmpdir(), "preship-pack-"));
 const installDir = await mkdtemp(join(tmpdir(), "preship-smoke-"));
 let exitCode = 0;
 try {
-  const packRes = spawnSync("npm", ["pack", "--pack-destination", stagingDir, "--silent"], {
+  const packRes = spawnShellFreeSync("npm", ["pack", "--pack-destination", stagingDir, "--silent", "--json"], {
     cwd: ROOT,
     encoding: "utf-8",
   });
   // BUILD-007: every early-exit path throws so the catch/finally below runs
   // the staging/install cleanup and the single `exitCode` accumulator owns the
   // process exit code — no bare `process.exit(1)` that skips cleanup.
-  if (packRes.status !== 0) {
-    throw new Error(`npm pack failed (exit ${packRes.status}): ${packRes.stderr || packRes.stdout}`);
+  if (packRes.error || packRes.status !== 0) {
+    throw new Error(`npm pack failed (exit ${packRes.status}): ${packRes.error?.message || packRes.stderr || packRes.stdout}`);
   }
-  const tgzName = packRes.stdout.trim().split("\n").pop();
-  if (!tgzName) {
-    throw new Error(`npm pack produced no tarball name`);
+  let packReport;
+  try {
+    const parsed = JSON.parse(packRes.stdout);
+    packReport = Array.isArray(parsed) ? parsed[0] : parsed;
+  } catch (error) {
+    throw new Error(`npm pack returned invalid JSON metadata: ${error.message}`);
   }
+  const tgzName = packReport?.filename;
+  if (typeof tgzName !== "string" || !tgzName) throw new Error("npm pack produced no tarball filename");
   const tgzPath = join(stagingDir, tgzName);
   if (!existsSync(tgzPath)) {
     throw new Error(`Tarball missing: ${tgzPath}`);
@@ -47,7 +53,7 @@ try {
   // 2. Install the tarball into a fresh dir. `--no-package-lock` keeps the
   //    install lean; `--omit=optional` avoids architecture-specific native
   //    deps that aren't installable on every runner.
-  const installRes = spawnSync(
+  const installRes = spawnShellFreeSync(
     "npm",
     [
       "install",
@@ -60,8 +66,8 @@ try {
     ],
     { encoding: "utf-8", timeout: 120_000 }
   );
-  if (installRes.status !== 0) {
-    throw new Error(`npm install <tarball> failed (exit ${installRes.status}): ${installRes.stderr || installRes.stdout}`);
+  if (installRes.error || installRes.status !== 0) {
+    throw new Error(`npm install <tarball> failed (exit ${installRes.status}): ${installRes.error?.message || installRes.stderr || installRes.stdout}`);
   }
 
   // 3. Verify the package entry exists, then execute every installed bin shim.
@@ -90,8 +96,8 @@ try {
       // direct exec, so it also catches a lost executable bit/shebang.
       shell: process.platform === "win32",
     });
-    if (versionRes.status !== 0) {
-      throw new Error(`${name} --version failed (exit ${versionRes.status}): ${versionRes.stderr || versionRes.stdout}`);
+    if (versionRes.error || versionRes.status !== 0) {
+      throw new Error(`${name} --version failed (exit ${versionRes.status}): ${versionRes.error?.message || versionRes.stderr || versionRes.stdout}`);
     }
     const out = (versionRes.stdout || "").trim();
     if (!out.includes(PKG_VERSION)) {
@@ -105,14 +111,14 @@ try {
   // from the source checkout. The generated state stays inside installDir and
   // is removed by the existing finally block.
   const installedPackageDir = join(installDir, "node_modules", pkg.name);
-  const initLoopRes = spawnSync("npm", ["run", "--silent", "improve", "--", "init"], {
+  const initLoopRes = spawnShellFreeSync("npm", ["run", "--silent", "improve", "--", "init"], {
     cwd: installedPackageDir,
     encoding: "utf-8",
     timeout: 15_000,
   });
-  if (initLoopRes.status !== 0) {
+  if (initLoopRes.error || initLoopRes.status !== 0) {
     throw new Error(
-      `installed npm run improve -- init failed (exit ${initLoopRes.status}): ${initLoopRes.stderr || initLoopRes.stdout}`
+      `installed npm run improve -- init failed (exit ${initLoopRes.status}): ${initLoopRes.error?.message || initLoopRes.stderr || initLoopRes.stdout}`
     );
   }
   const loopSnapshot = join(installedPackageDir, ".improvement-loop", "snapshot.json");
@@ -120,14 +126,14 @@ try {
     throw new Error(`Installed improvement loop did not create its snapshot: ${loopSnapshot}`);
   }
 
-  const loopStatusRes = spawnSync(
+  const loopStatusRes = spawnShellFreeSync(
     "npm",
     ["run", "--silent", "improve:status", "--", "--json"],
     { cwd: installedPackageDir, encoding: "utf-8", timeout: 15_000 },
   );
-  if (loopStatusRes.status !== 0) {
+  if (loopStatusRes.error || loopStatusRes.status !== 0) {
     throw new Error(
-      `installed npm run improve:status failed (exit ${loopStatusRes.status}): ${loopStatusRes.stderr || loopStatusRes.stdout}`
+      `installed npm run improve:status failed (exit ${loopStatusRes.status}): ${loopStatusRes.error?.message || loopStatusRes.stderr || loopStatusRes.stdout}`
     );
   }
   try {
@@ -142,19 +148,12 @@ try {
   // 4. Verify packed files include the native-tray JS shim (BUILD-006). The
   //    --version path short-circuits before tray load, so we can't rely on
   //    "it booted" to prove the tray shim shipped. Probe the tar listing
-  //    directly: the published tarball must contain native/tray/index.js.
+  //    directly from npm pack's JSON metadata: the published tarball must
+  //    contain native/tray/index.js. This avoids requiring an external `tar`
+  //    executable on otherwise-supported Windows development machines.
   //    Failure paths here `throw` so the existing catch/finally chain runs
   //    the staging/install cleanup (BUILD-007: all early-exit branches above
   //    now `throw` too, so cleanup always runs).
-  const tgzListRes = spawnSync("tar", ["-tzf", join(stagingDir, tgzName)], {
-    encoding: "utf-8",
-    timeout: 15_000,
-  });
-  if (tgzListRes.status !== 0) {
-    throw new Error(
-      `tar -tzf <tarball> failed (exit ${tgzListRes.status}): ${tgzListRes.stderr || tgzListRes.stdout}`
-    );
-  }
   const REQUIRED_PACKED_FILES = [
     "package/native/tray/index.js",
     "package/native/tray/index.d.ts",
@@ -162,8 +161,13 @@ try {
     "package/dist/settings-main.js",
     "package/dist/utils/tray.js",
     "package/scripts/improvement-loop.mjs",
+    "package/scripts/lib/cross-platform-spawn.mjs",
   ];
-  const packedFiles = new Set(tgzListRes.stdout.split("\n").map((s) => s.trim()));
+  const packedFiles = new Set(
+    (Array.isArray(packReport?.files) ? packReport.files : [])
+      .map(file => typeof file?.path === "string" ? `package/${file.path.replaceAll("\\", "/")}` : "")
+      .filter(Boolean),
+  );
   const missing = REQUIRED_PACKED_FILES.filter((p) => !packedFiles.has(p));
   if (missing.length > 0) {
     throw new Error(

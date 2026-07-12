@@ -24,10 +24,11 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import process from "node:process";
+import { spawnShellFree, terminateProcessTree } from "./lib/cross-platform-spawn.mjs";
 
 const LOOP_DIRECTORY = ".improvement-loop";
 const AUDITS_DIRECTORY = "audits";
@@ -561,11 +562,6 @@ function workspaceFingerprint(root) {
   return `git:${sha256(Buffer.concat([head, Buffer.from("\0"), Buffer.from(trackedFingerprint), Buffer.from("\0"), Buffer.from(untrackedFingerprint)]))}`;
 }
 
-function executable(command) {
-  if (process.platform === "win32" && (command === "npm" || command === "npx" || command === "node")) return `${command}.cmd`;
-  return command;
-}
-
 async function runCheck(check, root) {
   const [command, ...args] = check.command;
   const startedAt = Date.now();
@@ -584,7 +580,13 @@ async function runCheck(check, root) {
       resolveCheck({ exitCode, signal, timedOut, durationMs: Date.now() - startedAt });
     };
     try {
-      child = spawn(executable(command), args, { cwd: root, stdio: "inherit", shell: false });
+      child = spawnShellFree(command, args, {
+        cwd: root,
+        stdio: "inherit",
+        // A new POSIX process group lets timeout cleanup reach npm/vitest and
+        // every subprocess they launch. Windows uses taskkill /T below.
+        detached: process.platform !== "win32",
+      });
     } catch (error) {
       console.error(`Could not start ${check.label}: ${error instanceof Error ? error.message : String(error)}`);
       finish(-1);
@@ -594,13 +596,24 @@ async function runCheck(check, root) {
       console.error(`Could not start ${check.label}: ${error.message}`);
       finish(-1);
     });
-    child.once("close", (code, signal) => finish(code ?? -1, signal));
+    child.once("close", (code, signal) => {
+      // The group leader can exit before a signal-ignoring descendant. Make one
+      // final forceful tree pass before reporting a timed-out check complete.
+      if (timedOut) terminateProcessTree(child, { force: true });
+      finish(code ?? -1, signal);
+    });
     timeout = setTimeout(() => {
       timedOut = true;
       console.error(`Validation timed out: ${check.label}.`);
-      try { child.kill("SIGTERM"); } catch { /* child already exited */ }
+      if (process.platform === "win32") {
+        // taskkill /T /F must run while the parent PID still owns its tree;
+        // killing only the parent first can orphan descendants.
+        terminateProcessTree(child, { force: true });
+      } else {
+        terminateProcessTree(child);
+      }
       forceKill = setTimeout(() => {
-        try { child.kill("SIGKILL"); } catch { /* child already exited */ }
+        terminateProcessTree(child, { force: true });
       }, 5_000);
     }, check.timeoutMs);
   });

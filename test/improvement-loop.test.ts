@@ -91,6 +91,27 @@ afterEach(() => {
 });
 
 describe("improvement-loop runner", () => {
+  it("executes node, npm, and npx validation argv without platform shell shims", () => {
+    const root = createRoot();
+    expectOk(run(root, "init"));
+    const item = makeItem("LOOP-PORTABLE");
+    item.validation = [
+      { label: "node", command: ["node", "-e", "process.exit(0)"], timeoutMs: 15_000 },
+      { label: "npm", command: ["npm", "--version"], timeoutMs: 15_000 },
+      { label: "npx", command: ["npx", "--version"], timeoutMs: 15_000 },
+    ];
+    const audit = writeAudit(root, "portable.json", [item]);
+    expectOk(run(root, "re-audit", "--audit", audit, "--summary", "Portable validation audit."));
+    expectOk(run(root, "import", audit, "--approve-commands"));
+    expectOk(run(root, "begin", item.id));
+    expectOk(run(root, "validate", item.id));
+    expect(readSnapshot(root).state.lastValidation).toMatchObject({
+      itemId: item.id,
+      ok: true,
+      checks: [{ label: "node" }, { label: "npm" }, { label: "npx" }],
+    });
+  });
+
   it("uses a v2 snapshot, audited imports, fresh validation, and a hashed re-audit", () => {
     const root = createRoot();
     expectOk(run(root, "init"));
@@ -233,6 +254,34 @@ describe("improvement-loop runner", () => {
     const validation = readSnapshot(root).state.lastValidation;
     expect(validation.ok).toBe(false);
     expect(validation.checks[0].timedOut).toBe(true);
+  });
+
+  it("terminates descendants of a timed-out validation before they can mutate the workspace", async () => {
+    const root = createRoot();
+    expectOk(run(root, "init"));
+    const marker = join(root, "late-descendant-marker.txt");
+    const childScript = `setTimeout(() => require("node:fs").writeFileSync(${JSON.stringify(marker)}, "orphaned"), 2000)`;
+    const parentScript = [
+      'const { spawn } = require("node:child_process")',
+      `spawn(process.execPath, ["-e", ${JSON.stringify(childScript)}], { stdio: "ignore" })`,
+      "setTimeout(() => {}, 10000)",
+    ].join(";");
+    const audit = writeAudit(root, "timeout-tree.json", [
+      makeItem("LOOP-TREE", ["node", "-e", parentScript]),
+    ]);
+    expectOk(run(root, "re-audit", "--audit", audit, "--summary", "Timeout tree audit."));
+    expectOk(run(root, "import", audit, "--approve-commands"));
+    expectOk(run(root, "begin", "LOOP-TREE"));
+
+    expect(run(root, "validate", "LOOP-TREE").status).not.toBe(0);
+    await new Promise(resolveWait => setTimeout(resolveWait, 2_500));
+
+    expect(existsSync(marker)).toBe(false);
+    expect(readSnapshot(root).state.lastValidation).toMatchObject({
+      itemId: "LOOP-TREE",
+      ok: false,
+      checks: [{ timedOut: true }],
+    });
   });
 
   it("fails closed if a recorded audit artifact changes after import", () => {

@@ -14,20 +14,20 @@
 
 import { readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { spawnShellFreeSync } from "./lib/cross-platform-spawn.mjs";
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const INVENTORY = join(ROOT, "LICENSES.json");
 
-const res = spawnSync("npm", ["ls", "--all", "--json", "--omit=dev", "--long"], {
+const res = spawnShellFreeSync("npm", ["ls", "--all", "--json", "--omit=dev", "--long"], {
   encoding: "utf-8",
   cwd: ROOT,
   maxBuffer: 32 * 1024 * 1024,
 });
-if (res.status !== 0 && !res.stdout) {
-  console.error(`npm ls failed (exit ${res.status}): ${res.stderr}`);
+if (res.error || (res.status !== 0 && !res.stdout)) {
+  console.error(`npm ls failed (exit ${res.status}): ${res.error?.message || res.stderr}`);
   process.exit(1);
 }
 

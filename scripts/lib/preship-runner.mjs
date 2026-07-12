@@ -97,7 +97,7 @@ function formatFinal(results, totalMs) {
 
 // ─── Standardized step builder for spawning a subprocess ─────────────────────
 
-import { spawn } from "node:child_process";
+import { spawnShellFree } from "./cross-platform-spawn.mjs";
 
 /**
  * BUILD-017: secrets that no preship step needs but which would otherwise be
@@ -124,11 +124,17 @@ function buildChildEnv(extra, keepEnv = []) {
 export function spawnStep(cmd, args, opts = {}) {
   const { successWhen, env, cwd, summary, keepEnv } = opts;
   return new Promise((resolve) => {
-    const child = spawn(cmd, args, {
-      env: buildChildEnv(env, keepEnv),
-      cwd,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    let child;
+    try {
+      child = spawnShellFree(cmd, args, {
+        env: buildChildEnv(env, keepEnv),
+        cwd,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (err) {
+      resolve({ ok: false, summary: `failed to spawn: ${err.message}`, output: err.stack });
+      return;
+    }
     const chunks = [];
     child.stdout.on("data", (c) => chunks.push(c));
     child.stderr.on("data", (c) => chunks.push(c));

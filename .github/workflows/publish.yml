@@ -4,9 +4,51 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing v<package-version> tag to publish
+        required: true
+        type: string
 
 jobs:
+  verify-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      commit_sha: ${{ steps.release_ref.outputs.commit_sha }}
+
+    steps:
+    - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      with:
+        fetch-depth: 0
+        ref: ${{ github.event.release.tag_name || inputs.release_tag }}
+
+    - name: Verify release tag matches package and checked-out commit
+      id: release_ref
+      env:
+        RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
+      run: |
+        node scripts/check-release-ref.mjs "$RELEASE_TAG"
+        echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+    - name: Use Node.js
+      uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      with:
+        node-version: '20.x'
+        cache: 'npm'
+
+    - name: Install dependencies without lifecycle scripts
+      run: npm ci --ignore-scripts
+
+    - name: Rebuild trusted native dependencies
+      run: npm rebuild better-sqlite3 @napi-rs/keyring
+
+    - name: Run shared release verification
+      run: npm run preship:fast
+
   publish-npm:
+    needs: verify-release
     runs-on: ubuntu-latest
 
     permissions:
@@ -15,6 +57,8 @@ jobs:
 
     steps:
     - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      with:
+        ref: ${{ needs.verify-release.outputs.commit_sha }}
 
     - name: Use Node.js
       uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
@@ -70,9 +114,10 @@ jobs:
         NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   publish-gpr:
+    needs: verify-release
     runs-on: ubuntu-latest
-    # Run independently — does not depend on publish-npm so GitHub Packages
-    # always gets the release even if npm publish is skipped or fails.
+    # Both registries share the same verification gate, while publishing
+    # independently so one registry outage does not suppress the other.
 
     permissions:
       contents: read
@@ -80,6 +125,8 @@ jobs:
 
     steps:
     - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      with:
+        ref: ${{ needs.verify-release.outputs.commit_sha }}
 
     - name: Use Node.js
       uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0

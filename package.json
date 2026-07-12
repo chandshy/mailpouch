@@ -130,7 +130,8 @@
     "native/tray/index.d.ts",
     "native/tray/*.node",
     "scripts/install-hooks.mjs",
-    "scripts/improvement-loop.mjs"
+    "scripts/improvement-loop.mjs",
+    "scripts/lib/cross-platform-spawn.mjs"
   ],
   "overrides": {
     "hono": ">=4.12.25",
