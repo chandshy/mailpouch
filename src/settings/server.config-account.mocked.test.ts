@@ -412,6 +412,30 @@ describe("POST /api/config account-scoped connection saves", () => {
     }
   });
 
+  it("quarantines a failed clear when keychain-backed state may return later", async () => {
+    mocks.config!.credentialStorage = "keychain";
+    mocks.config!.connection = {
+      ...mocks.config!.connection,
+      simpleloginApiKey: "temporary-config-fallback",
+    };
+    mocks.deleteAuxiliaryCredentials.mockResolvedValue(false);
+    mocks.isKeychainAvailable.mockResolvedValue(false);
+    const server = createSettingsServer({ port: 8765, lan: false, accessToken: null, scheme: "http" });
+    const { port, close } = await listen(server);
+    try {
+      const response = await saveConnection(port, await csrfFrom(port), {
+        clearSimpleloginApiKey: true,
+      });
+      expect(response.status).toBe(503);
+      expect(mocks.disableAuxiliaryServices).toHaveBeenCalledTimes(1);
+      const saved = mocks.saveConfig.mock.lastCall![0] as ServerConfig;
+      expect(saved.keychainAuxiliaryCredentialsQuarantined).toEqual({ simpleloginApiKey: true });
+      expect(saved.connection.simpleloginApiKey).toBe("temporary-config-fallback");
+    } finally {
+      close();
+    }
+  });
+
   it("fails an explicit auxiliary-secret clear when its keychain entry cannot be deleted", async () => {
     mocks.deleteAuxiliaryCredentials.mockResolvedValue(false);
     const server = createSettingsServer({ port: 8765, lan: false, accessToken: null, scheme: "http" });
@@ -426,13 +450,59 @@ describe("POST /api/config account-scoped connection saves", () => {
       expect(response.status).toBe(503);
       expect(mocks.deleteAuxiliaryCredentials).toHaveBeenCalledWith({ passAccessToken: true, simpleloginApiKey: true });
       expect(mocks.updateAccount).not.toHaveBeenCalled();
-      expect(mocks.saveConfig).not.toHaveBeenCalled();
+      expect(mocks.saveConfig).toHaveBeenCalledTimes(1);
+      expect((mocks.saveConfig.mock.lastCall![0] as ServerConfig).keychainAuxiliaryCredentialsQuarantined)
+        .toEqual({ passAccessToken: true, simpleloginApiKey: true });
       expect(mocks.refreshAuxiliaryServices).not.toHaveBeenCalled();
       // A keychain batch can remove one secret and still return false for the
       // other. The daemon must immediately drop both old in-memory clients
       // instead of leaving a partially-cleared credential usable until restart.
       expect(mocks.disableAuxiliaryServices).toHaveBeenCalledTimes(1);
       expect(mocks.manager!.rebuildFromRegistryAsync).not.toHaveBeenCalled();
+    } finally {
+      close();
+    }
+  });
+
+  it("durably quarantines and disables integrations after a failed keychain rotation", async () => {
+    mocks.config!.credentialStorage = "keychain";
+    mocks.saveAuxiliaryCredentials.mockResolvedValue(false);
+    mocks.isKeychainAvailable.mockResolvedValue(true);
+    const server = createSettingsServer({ port: 8765, lan: false, accessToken: null, scheme: "http" });
+    const { port, close } = await listen(server);
+    try {
+      const response = await saveConnection(port, await csrfFrom(port), {
+        simpleloginApiKey: "replacement-key",
+      });
+      expect(response.status).toBe(503);
+      expect(response.body.error).toContain("Could not save auxiliary credentials");
+      expect(mocks.updateAccount).not.toHaveBeenCalled();
+      expect(mocks.refreshAuxiliaryServices).not.toHaveBeenCalled();
+      expect(mocks.disableAuxiliaryServices).toHaveBeenCalledTimes(1);
+      expect(mocks.saveConfig).toHaveBeenCalledTimes(1);
+      const saved = mocks.saveConfig.mock.lastCall![0] as ServerConfig;
+      expect(saved.keychainAuxiliaryCredentialsQuarantined).toEqual({ simpleloginApiKey: true });
+      expect(saved.connection.simpleloginApiKey).not.toBe("replacement-key");
+    } finally {
+      close();
+    }
+  });
+
+  it("clears a durable auxiliary quarantine only after a verified retry", async () => {
+    mocks.config!.credentialStorage = "keychain";
+    mocks.config!.keychainAuxiliaryCredentialsQuarantined = { simpleloginApiKey: true };
+    const server = createSettingsServer({ port: 8765, lan: false, accessToken: null, scheme: "http" });
+    const { port, close } = await listen(server);
+    try {
+      const response = await saveConnection(port, await csrfFrom(port), {
+        simpleloginApiKey: "verified-replacement",
+      });
+      expect(response.status).toBe(200);
+      expect(mocks.saveAuxiliaryCredentials).toHaveBeenCalledWith("", "verified-replacement");
+      const saved = mocks.saveConfig.mock.lastCall![0] as ServerConfig;
+      expect(saved.keychainAuxiliaryCredentialsQuarantined).toBeUndefined();
+      expect(saved.connection.simpleloginApiKey).toBeUndefined();
+      expect(mocks.refreshAuxiliaryServices).toHaveBeenCalledTimes(1);
     } finally {
       close();
     }

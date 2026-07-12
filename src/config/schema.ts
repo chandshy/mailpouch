@@ -388,6 +388,15 @@ export interface ServerConfig {
    * A successful reset is the explicit recovery path and removes this marker.
    */
   keychainMailboxCredentialsQuarantined?: boolean;
+  /**
+   * Per-integration fail-closed markers for an auxiliary keychain mutation
+   * that may have succeeded only partially. Quarantined entries are ignored
+   * from both keychain and config until a later verified save or clear.
+   */
+  keychainAuxiliaryCredentialsQuarantined?: {
+    passAccessToken?: true;
+    simpleloginApiKey?: true;
+  };
   /** Where credentials are stored: "keychain" (OS keychain), "encrypted-file" (AES-256-GCM in config), or "config" (plaintext in config — legacy). */
   credentialStorage?: "keychain" | "encrypted-file" | "config";
   /** Tuneable response-size guards — see ResponseLimits. */

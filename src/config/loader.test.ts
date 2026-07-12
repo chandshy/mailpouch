@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { join } from "path";
 import { homedir } from "os";
-import { buildPermissions, defaultConfig, getConfigPath, configExists, loadConfig, saveConfig, loadCredentialsFromKeychain, saveConfigWithCredentials, migrateCredentials } from "./loader.js";
+import { buildPermissions, defaultConfig, getConfigPath, configExists, loadConfig, saveConfig, loadCredentialsFromKeychain, loadAuxiliaryCredentialsFromKeychain, saveConfigWithCredentials, migrateCredentials } from "./loader.js";
 import { ALL_TOOLS, TOOL_CATEGORIES, DEFAULT_RESPONSE_LIMITS } from "./schema.js";
 import { CredentialEncryption } from "../crypto/credential-encryption.js";
 
@@ -33,10 +33,12 @@ vi.mock("../security/keychain.js", () => ({
   isKeychainAvailable: vi.fn(),
   loadCredentials: vi.fn(),
   saveCredentials: vi.fn(),
+  loadAuxiliaryCredentials: vi.fn(),
+  saveAuxiliaryCredentials: vi.fn(),
   migrateFromConfig: vi.fn(),
 }));
 
-import { loadCredentials as mockLoadKeychainCredentials, saveCredentials as mockSaveKeychainCredentials, migrateFromConfig as mockMigrateFromConfig } from "../security/keychain.js";
+import { loadCredentials as mockLoadKeychainCredentials, saveCredentials as mockSaveKeychainCredentials, loadAuxiliaryCredentials as mockLoadAuxiliaryCredentials, saveAuxiliaryCredentials as mockSaveKeychainAuxCredentials, migrateFromConfig as mockMigrateFromConfig } from "../security/keychain.js";
 
 // Import mocked fs functions for use in tests
 import { existsSync, readFileSync, writeFileSync, renameSync } from "fs";
@@ -474,6 +476,24 @@ describe("loadConfig", () => {
     expect(loadConfig()!.configResetGeneration).toBe(12);
   });
 
+  it("preserves only valid per-secret auxiliary keychain quarantines", () => {
+    mockedExistsSync.mockReturnValue(true);
+    mockedReadFileSync.mockReturnValue(JSON.stringify({
+      configVersion: 3,
+      connection: {},
+      permissions: { preset: "read_only", tools: {} },
+      keychainAuxiliaryCredentialsQuarantined: {
+        passAccessToken: true,
+        simpleloginApiKey: "yes",
+        unknown: true,
+      },
+    }) as unknown as Buffer);
+
+    expect(loadConfig()!.keychainAuxiliaryCredentialsQuarantined).toEqual({
+      passAccessToken: true,
+    });
+  });
+
   it("fails closed to generation zero for malformed configResetGeneration values", () => {
     mockedExistsSync.mockReturnValue(true);
     for (const value of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1, "4", null]) {
@@ -533,6 +553,30 @@ describe("loadConfig", () => {
       expect(cfg!.credentialStorage).toBe(value);
     }
   });
+
+  it("reports config storage when plaintext auxiliary or account credentials coexist with encryption", () => {
+    process.env.MAILPOUCH_MACHINE_SECRET = "test-machine-secret-deterministic";
+    mockedExistsSync.mockReturnValue(true);
+    const encrypted = CredentialEncryption.encrypt("encrypted-password");
+    const cases = [
+      {
+        connection: { passwordEncrypted: encrypted, passAccessToken: "plaintext-pass-token" },
+      },
+      {
+        connection: { passwordEncrypted: encrypted },
+        accounts: [{ id: "a", password: "plaintext-account-password" }],
+      },
+    ];
+    for (const extra of cases) {
+      mockedReadFileSync.mockReturnValue(JSON.stringify({
+        configVersion: 3,
+        permissions: { preset: "read_only", tools: {} },
+        credentialStorage: "keychain",
+        ...extra,
+      }) as unknown as Buffer);
+      expect(loadConfig()!.credentialStorage).toBe("config");
+    }
+  });
 });
 
 // ─── saveConfig ────────────────────────────────────────────────────────────────
@@ -580,6 +624,48 @@ describe("loadCredentialsFromKeychain", () => {
     mockedLoad.mockResolvedValue({ password: "kc-pass", smtpToken: "kc-token" });
     const result = await loadCredentialsFromKeychain();
     expect(result).toEqual({ password: "kc-pass", smtpToken: "kc-token", storage: "keychain" });
+  });
+
+  it("merges a keychain password with the newer encrypted fallback for a failed SMTP write", async () => {
+    process.env.MAILPOUCH_MACHINE_SECRET = "test-machine-secret-deterministic";
+    mockedLoad.mockResolvedValue({ password: "new-keychain-pass", smtpToken: "stale-keychain-token" });
+    mockedExistsSync.mockReturnValue(true);
+    mockedReadFileSync.mockReturnValue(JSON.stringify({
+      configVersion: 3,
+      connection: {
+        smtpHost: "localhost", smtpPort: 1025, imapHost: "localhost", imapPort: 1143,
+        username: "u", password: "", smtpToken: "",
+        smtpTokenEncrypted: CredentialEncryption.encrypt("new-fallback-token"),
+        bridgeCertPath: "", debug: false,
+      },
+      permissions: { preset: "full", tools: {} },
+    }) as unknown as Buffer);
+
+    expect(await loadCredentialsFromKeychain()).toEqual({
+      password: "new-keychain-pass",
+      smtpToken: "new-fallback-token",
+      storage: "encrypted-file",
+    });
+  });
+
+  it("prefers a retained plaintext field over its stale keychain entry after partial migration", async () => {
+    mockedLoad.mockResolvedValue({ password: "new-keychain-pass", smtpToken: "stale-keychain-token" });
+    mockedExistsSync.mockReturnValue(true);
+    mockedReadFileSync.mockReturnValue(JSON.stringify({
+      configVersion: 3,
+      connection: {
+        smtpHost: "localhost", smtpPort: 1025, imapHost: "localhost", imapPort: 1143,
+        username: "u", password: "", smtpToken: "new-config-token",
+        bridgeCertPath: "", debug: false,
+      },
+      permissions: { preset: "full", tools: {} },
+    }) as unknown as Buffer);
+
+    expect(await loadCredentialsFromKeychain()).toEqual({
+      password: "new-keychain-pass",
+      smtpToken: "new-config-token",
+      storage: "config",
+    });
   });
 
   it("does not rehydrate a stale legacy keychain credential after reset quarantined it", async () => {
@@ -699,10 +785,73 @@ describe("loadCredentialsFromKeychain", () => {
   });
 });
 
+describe("loadAuxiliaryCredentialsFromKeychain", () => {
+  const mockedExistsSync = vi.mocked(existsSync);
+  const mockedReadFileSync = vi.mocked(readFileSync);
+  const mockedLoadAuxiliary = vi.mocked(mockLoadAuxiliaryCredentials);
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    mockedExistsSync.mockReturnValue(true);
+  });
+
+  function configWith(connection: Record<string, unknown>, quarantine?: Record<string, unknown>): string {
+    return JSON.stringify({
+      configVersion: 3,
+      connection,
+      permissions: { preset: "read_only", tools: {} },
+      ...(quarantine ? { keychainAuxiliaryCredentialsQuarantined: quarantine } : {}),
+    });
+  }
+
+  it("merges a keychain Pass token with a config-backed SimpleLogin key", async () => {
+    mockedLoadAuxiliary.mockResolvedValue({ passAccessToken: "pass-keychain", simpleloginApiKey: "" });
+    mockedReadFileSync.mockReturnValue(configWith({ simpleloginApiKey: "sl-config" }) as unknown as Buffer);
+
+    expect(await loadAuxiliaryCredentialsFromKeychain()).toEqual({
+      passAccessToken: "pass-keychain",
+      simpleloginApiKey: "sl-config",
+      storage: "keychain",
+    });
+  });
+
+  it("keeps a newer config replacement ahead of a stale same-field keychain value", async () => {
+    mockedLoadAuxiliary.mockResolvedValue({
+      passAccessToken: "stale-pass-keychain",
+      simpleloginApiKey: "stale-sl-keychain",
+    });
+    mockedReadFileSync.mockReturnValue(configWith({
+      passAccessToken: "new-pass-config",
+      simpleloginApiKey: "new-sl-config",
+    }) as unknown as Buffer);
+
+    expect(await loadAuxiliaryCredentialsFromKeychain()).toEqual({
+      passAccessToken: "new-pass-config",
+      simpleloginApiKey: "new-sl-config",
+      storage: "config",
+    });
+  });
+
+  it("suppresses only a quarantined secret across both durable stores", async () => {
+    mockedLoadAuxiliary.mockResolvedValue({ passAccessToken: "stale-pass", simpleloginApiKey: "sl-keychain" });
+    mockedReadFileSync.mockReturnValue(configWith(
+      { passAccessToken: "pass-config", simpleloginApiKey: "sl-config" },
+      { passAccessToken: true },
+    ) as unknown as Buffer);
+
+    expect(await loadAuxiliaryCredentialsFromKeychain()).toEqual({
+      passAccessToken: "",
+      simpleloginApiKey: "sl-config",
+      storage: "config",
+    });
+  });
+});
+
 // ─── saveConfigWithCredentials ─────────────────────────────────────────────────
 
 describe("saveConfigWithCredentials", () => {
   const mockedSave = vi.mocked(mockSaveKeychainCredentials);
+  const mockedSaveAuxiliary = vi.mocked(mockSaveKeychainAuxCredentials);
   const mockedWriteFileSync = vi.mocked(writeFileSync);
   const mockedRenameSync = vi.mocked(renameSync);
 
@@ -715,7 +864,7 @@ describe("saveConfigWithCredentials", () => {
   });
 
   it("stores credentials in keychain and blanks them in config file when keychain succeeds", async () => {
-    mockedSave.mockResolvedValue(true);
+    mockedSave.mockResolvedValue({ passwordStored: true, smtpTokenStored: true });
     const cfg = defaultConfig();
     cfg.connection.password = "secret";
     cfg.connection.smtpToken = "token";
@@ -729,7 +878,7 @@ describe("saveConfigWithCredentials", () => {
   });
 
   it("encrypts to config file when keychain save fails", async () => {
-    mockedSave.mockResolvedValue(false);
+    mockedSave.mockResolvedValue({ passwordStored: false, smtpTokenStored: false });
     const cfg = defaultConfig();
     cfg.connection.password = "secret";
     const result = await saveConfigWithCredentials(cfg);
@@ -741,6 +890,38 @@ describe("saveConfigWithCredentials", () => {
     expect(cfg.connection.passwordEncrypted?.algorithm).toBe("aes-256-gcm");
     expect(mockedWriteFileSync.mock.calls.filter(([target]) => typeof target === "string")).toHaveLength(1);
     expect(mockedRenameSync).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a failed sibling authoritative in encrypted fallback after a partial keychain save", async () => {
+    mockedSave.mockResolvedValue({ passwordStored: true, smtpTokenStored: false });
+    const cfg = defaultConfig();
+    cfg.connection.password = "new-password";
+    cfg.connection.smtpToken = "new-token";
+
+    const result = await saveConfigWithCredentials(cfg);
+
+    expect(result).toBe("encrypted-file");
+    expect(cfg.credentialStorage).toBe("encrypted-file");
+    expect(cfg.connection.password).toBe("");
+    expect(cfg.connection.passwordEncrypted).toBeUndefined();
+    expect(cfg.connection.smtpToken).toBe("");
+    expect(cfg.connection.smtpTokenEncrypted).toBeDefined();
+    expect(CredentialEncryption.decrypt(cfg.connection.smtpTokenEncrypted!)).toBe("new-token");
+  });
+
+  it("reports config storage when an auxiliary keychain save fails and plaintext remains", async () => {
+    mockedSave.mockResolvedValue({ passwordStored: true, smtpTokenStored: true });
+    mockedSaveAuxiliary.mockResolvedValue(false);
+    const cfg = defaultConfig();
+    cfg.connection.password = "bridge-password";
+    cfg.connection.passAccessToken = "plaintext-pass-token";
+
+    const result = await saveConfigWithCredentials(cfg);
+
+    expect(result).toBe("config");
+    expect(cfg.credentialStorage).toBe("config");
+    expect(cfg.connection.password).toBe("");
+    expect(cfg.connection.passAccessToken).toBe("plaintext-pass-token");
   });
 });
 

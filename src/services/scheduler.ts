@@ -547,8 +547,22 @@ export class SchedulerService {
         // SMTP-002: flip to "sending" + persist BEFORE the await so a
         // concurrent cancel() can distinguish "still pending" from
         // "already on the wire" and return the in_flight signal.
+        const preSendSnapshot = this.snapshot();
         item.status = "sending";
-        this.persist();
+        try {
+          // This transition is a delivery fence, not a best-effort history
+          // update. If it does not reach disk, sending now could leave the
+          // durable record as "pending" and duplicate the message after a
+          // crash/restart. Restore memory and fail the tick before SMTP.
+          this.persistOrRollback(preSendSnapshot);
+        } catch (err) {
+          logger.error(
+            "Scheduled email not sent because its in-flight state could not be persisted",
+            "Scheduler",
+            { id: item.id, accountId: item.accountId, err },
+          );
+          throw err;
+        }
         try {
           const result = await smtpService.sendEmail(item.options);
           // SMTP-001: a cancel() landing between the await and this assignment
@@ -683,6 +697,30 @@ export class SchedulerService {
       this.writeItems(this.items);
     } catch (err: unknown) {
       logger.warn("Failed to persist scheduled emails", "Scheduler", err);
+    }
+  }
+
+  /** Deep-enough immutable snapshot for status/retry persistence rollback. */
+  private snapshot(): StoredScheduledEmail[] {
+    return this.items.map(item => ({ ...item }));
+  }
+
+  /**
+   * Persist a safety-critical state transition or restore the prior in-memory
+   * queue and rethrow. Unlike persist(), this must never degrade to logging:
+   * callers use it as a fence before an irreversible SMTP send begins.
+   */
+  private persistOrRollback(snapshot: StoredScheduledEmail[]): void {
+    try {
+      // Do not prune after the caller has changed a pending record to
+      // "sending". Pending work is retained regardless of age, but the history
+      // policy would classify that same record as terminal-ish and drop it
+      // after 30 days before SMTP even begins. The post-send persist path can
+      // prune safely once an outcome exists.
+      this.writeItems(this.items);
+    } catch (err) {
+      this.items = snapshot;
+      throw err;
     }
   }
 

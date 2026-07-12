@@ -158,6 +158,21 @@ describe("resetConfiguration", () => {
     });
   });
 
+  it("durably quarantines both auxiliary entries when reset cannot verify their deletion", async () => {
+    mocks.deleteAuxiliaryCredentials.mockResolvedValue(false);
+
+    const result = await resetConfiguration();
+
+    expect(result.credentialsCleared).toBe(false);
+    expect(result.mailboxCredentialsCleared).toBe(true);
+    expect(result.credentialCleanup.auxiliaryCredentialsCleared).toBe(false);
+    expect(mocks.config?.keychainMailboxCredentialsQuarantined).toBeUndefined();
+    expect(mocks.config?.keychainAuxiliaryCredentialsQuarantined).toEqual({
+      passAccessToken: true,
+      simpleloginApiKey: true,
+    });
+  });
+
   it("increments the reset generation on every reset instead of reusing one", async () => {
     mocks.config!.configResetGeneration = 4;
 

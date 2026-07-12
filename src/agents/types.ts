@@ -38,6 +38,13 @@ export interface GrantConditions {
   maxCallsPerHourByTool?: Partial<Record<ToolName, number>>;
   /** Which account the grant is bound to. Undefined = default active account. */
   accountId?: string;
+  /**
+   * Opaque mailbox identity captured when an account-bound grant is approved.
+   * Account IDs are mutable registry labels; authorization also compares this
+   * fingerprint so repointing the same ID at another mailbox cannot transfer
+   * the old grant's authority.
+   */
+  accountIdentity?: string;
 }
 
 export interface AgentGrant {

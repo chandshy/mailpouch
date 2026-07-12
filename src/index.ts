@@ -239,8 +239,11 @@ async function refreshAuxiliaryServicesFromConfig(): Promise<void> {
     // was pending. Its snapshot is authoritative.
     if (generation !== auxiliaryServiceRefreshGeneration) return;
 
-    const effectiveSimpleloginKey = auxCreds?.simpleloginApiKey || cn.simpleloginApiKey || "";
-    const effectivePassPat = auxCreds?.passAccessToken || cn.passAccessToken || "";
+    // The loader merges keychain/config per integration and applies durable
+    // partial-write quarantine. Falling back again here would bypass that
+    // quarantine and resurrect the credential it deliberately suppressed.
+    const effectiveSimpleloginKey = auxCreds?.simpleloginApiKey ?? "";
+    const effectivePassPat = auxCreds?.passAccessToken ?? "";
     const source = auxCreds?.storage ?? "config";
 
     // Always replace, even with empty values: that is what makes an explicit
@@ -1039,6 +1042,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       args: args as Record<string, unknown>,
       callerIp: caller.ip,
       targetAccountId: requestedAccountId,
+      targetAccountIdentity: routedAccountIdentity,
       globalPreset,
     }, { reserveHourlyToolSlot: false, snapshot: grantSnapshot });
     if (!grantResult.allowed) {
@@ -1164,6 +1168,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       args: args as Record<string, unknown>,
       callerIp: caller.ip,
       targetAccountId: requestedAccountId,
+      targetAccountIdentity: routedAccountIdentity,
       globalPreset,
     }, { snapshot: grantSnapshot });
     if (!reservationResult.allowed) {
@@ -1429,6 +1434,7 @@ function requireReadSurfaceAccess(
     args,
     callerIp: caller.ip,
     targetAccountId: activeAccountId,
+    targetAccountIdentity: accountIdentity,
     globalPreset: configSnapshot.permissions.preset,
   }, { reserveHourlyToolSlot: false, snapshot: grantSnapshot });
   if (!grantResult.allowed) {
@@ -1474,6 +1480,7 @@ function requireReadSurfaceAccess(
     args,
     callerIp: caller.ip,
     targetAccountId: activeAccountId,
+    targetAccountIdentity: accountIdentity,
     globalPreset: configSnapshot.permissions.preset,
   }, { snapshot: reservationSnapshot });
   if (!reservationResult.allowed) {
@@ -2406,12 +2413,11 @@ async function runBridgeWatchdogTick(generation: number): Promise<void> {
       // launchProtonBridge reset the counter → it succeeded.
       try {
         if (!isCurrentBridgeWatchdog(generation, services)) return;
-        await services.imap.connect(
-          bridgeConfig.imap.host, bridgeConfig.imap.port,
-          bridgeConfig.imap.username, bridgeConfig.imap.password,
-          bridgeConfig.imap.bridgeCertPath, bridgeConfig.imap.secure,
-          bridgeConfig.imap.allowInsecureBridge ?? false,
-        );
+        // Reconnect through AccountManager's per-account queue/version fence.
+        // A same-ID credential or certificate edit can race this watchdog;
+        // the manager retires a stale winner before starting IDLE with the
+        // current spec, while a direct service.connect() could resurrect it.
+        await accountManager.connectAccount(services.spec.id);
         if (isCurrentBridgeWatchdog(generation, services)) {
           logger.info("IMAP reconnected after Bridge restart", "MCPServer");
         }

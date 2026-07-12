@@ -381,6 +381,19 @@ export function loadConfig(): ServerConfig | null {
       && parsed.configResetGeneration >= 0
         ? parsed.configResetGeneration
         : 0;
+    const rawAuxiliaryQuarantine = parsed.keychainAuxiliaryCredentialsQuarantined;
+    const preservedAuxiliaryQuarantine = rawAuxiliaryQuarantine
+      && typeof rawAuxiliaryQuarantine === "object"
+      && !Array.isArray(rawAuxiliaryQuarantine)
+        ? {
+            ...((rawAuxiliaryQuarantine as { passAccessToken?: unknown }).passAccessToken === true
+              ? { passAccessToken: true as const }
+              : {}),
+            ...((rawAuxiliaryQuarantine as { simpleloginApiKey?: unknown }).simpleloginApiKey === true
+              ? { simpleloginApiKey: true as const }
+              : {}),
+          }
+        : {};
     // credentialStorage drives the settings UI's "where are my secrets
     // kept?" badge. Derive it from observed state rather than trusting the
     // persisted value — an attacker editing the config file could otherwise
@@ -391,11 +404,22 @@ export function loadConfig(): ServerConfig | null {
       CredentialEncryption.isValidEncrypted(mergedConnection.passwordEncrypted) ||
       CredentialEncryption.isValidEncrypted(mergedConnection.smtpTokenEncrypted);
     const hasPlaintext =
-      !!mergedConnection.password || !!mergedConnection.smtpToken;
-    if (hasEncryptedBlob) {
-      preservedCredentialStorage = "encrypted-file";
-    } else if (hasPlaintext) {
+      !!mergedConnection.password ||
+      !!mergedConnection.smtpToken ||
+      !!mergedConnection.remoteBearerToken ||
+      !!mergedConnection.remoteOauthAdminPassword ||
+      !!mergedConnection.passAccessToken ||
+      !!mergedConnection.simpleloginApiKey ||
+      (Array.isArray(parsed.accounts) && parsed.accounts.some(account =>
+        !!account && typeof account === "object" && !!(account.password || account.smtpToken)
+      ));
+    // Report the least-protected credential present. A plaintext auxiliary or
+    // account fallback must remain visible even when a sibling bridge field is
+    // encrypted or keychain-backed.
+    if (hasPlaintext) {
       preservedCredentialStorage = "config";
+    } else if (hasEncryptedBlob) {
+      preservedCredentialStorage = "encrypted-file";
     } else if (
       parsed.credentialStorage === "keychain" ||
       parsed.credentialStorage === "encrypted-file" ||
@@ -427,6 +451,9 @@ export function loadConfig(): ServerConfig | null {
       // rehydrated after restart.
       keychainMailboxCredentialsQuarantined: parsed.keychainMailboxCredentialsQuarantined === true
         ? true
+        : undefined,
+      keychainAuxiliaryCredentialsQuarantined: Object.keys(preservedAuxiliaryQuarantine).length > 0
+        ? preservedAuxiliaryQuarantine
         : undefined,
       tosAcknowledged: parsed.tosAcknowledged,
       settingsPort: preservedSettingsPort,
@@ -856,24 +883,27 @@ export async function loadCredentialsFromKeychain(): Promise<{
   // can still configure a new mailbox without first trusting that old entry.
   const keychainQuarantined = config?.keychainMailboxCredentialsQuarantined === true;
 
-  // 1. Try keychain first unless reset quarantined the mailbox namespace.
+  // Load keychain fields unless reset quarantined the mailbox namespace. They
+  // are merged below with config fallbacks one field at a time: a keyring can
+  // accept one credential write and reject its sibling, leaving an older value
+  // in the failed entry that must not override the newer config fallback.
+  let keychainCreds: { password: string; smtpToken: string } | null = null;
   if (!keychainQuarantined) {
-    const keychainCreds = await loadKeychainCredentials();
-    if (keychainCreds && (keychainCreds.password || keychainCreds.smtpToken)) {
-      tags.hasPassword = !!keychainCreds.password;
-      tags.hasSmtpToken = !!keychainCreds.smtpToken;
-      tags.storage = "keychain";
-      return { ...keychainCreds, storage: "keychain" as const };
-    }
+    keychainCreds = await loadKeychainCredentials();
   }
 
-  // 2. Try encrypted-file storage
+  let password = "";
+  let smtpToken = "";
+  let passwordSource: "keychain" | "encrypted-file" | "config" | null = null;
+  let smtpTokenSource: "keychain" | "encrypted-file" | "config" | null = null;
+
+  // Config fields are authoritative fallbacks for their individual credential.
+  // Their presence records that this exact field failed to reach the keychain;
+  // any keychain sibling may still be used independently.
   if (config) {
     const hasEncryptedPassword = CredentialEncryption.isValidEncrypted(config.connection.passwordEncrypted);
     const hasEncryptedToken    = CredentialEncryption.isValidEncrypted(config.connection.smtpTokenEncrypted);
     if (hasEncryptedPassword || hasEncryptedToken) {
-      let password = "";
-      let smtpToken = "";
       // CRED-010: track GCM auth failures. A well-formed encrypted blob whose
       // decrypt() throws is an authenticated-decryption failure — the IV/tag/
       // ciphertext don't agree with the key (machine-id changed, downgrade, or
@@ -886,6 +916,7 @@ export async function loadCredentialsFromKeychain(): Promise<{
         try {
           // isValidEncrypted confirmed algorithm === "aes-256-gcm"; cast is safe.
           password = CredentialEncryption.decrypt(config.connection.passwordEncrypted as Parameters<typeof CredentialEncryption.decrypt>[0]);
+          passwordSource = "encrypted-file";
         } catch (err) {
           decryptFailed = true;
           logger.error(
@@ -898,6 +929,7 @@ export async function loadCredentialsFromKeychain(): Promise<{
       if (hasEncryptedToken) {
         try {
           smtpToken = CredentialEncryption.decrypt(config.connection.smtpTokenEncrypted as Parameters<typeof CredentialEncryption.decrypt>[0]);
+          smtpTokenSource = "encrypted-file";
         } catch (err) {
           decryptFailed = true;
           logger.error(
@@ -906,12 +938,6 @@ export async function loadCredentialsFromKeychain(): Promise<{
             err,
           );
         }
-      }
-      if (password || smtpToken) {
-        tags.hasPassword = !!password;
-        tags.hasSmtpToken = !!smtpToken;
-        tags.storage = "encrypted-file";
-        return { password, smtpToken, storage: "encrypted-file" as const };
       }
       // Fail closed: a valid-shaped encrypted blob that failed to decrypt must
       // not degrade to plaintext from this same file. Return a DISTINCT
@@ -925,18 +951,38 @@ export async function loadCredentialsFromKeychain(): Promise<{
         return { password: "", smtpToken: "", storage: "decrypt-failed" as const };
       }
     }
+
+    // Plaintext is the legacy/headless fallback. Do not let a stale keychain
+    // entry replace it when this exact field was retained after a failed write.
+    if (!hasEncryptedPassword && config.connection.password) {
+      password = config.connection.password;
+      passwordSource = "config";
+    }
+    if (!hasEncryptedToken && config.connection.smtpToken) {
+      smtpToken = config.connection.smtpToken;
+      smtpTokenSource = "config";
+    }
   }
 
-  // 3. Fall back to plaintext config (legacy / migration path)
-  if (config && (config.connection.password || config.connection.smtpToken)) {
-    tags.hasPassword = !!config.connection.password;
-    tags.hasSmtpToken = !!config.connection.smtpToken;
-    tags.storage = "config";
-    return {
-      password: config.connection.password,
-      smtpToken: config.connection.smtpToken,
-      storage: "config" as const,
-    };
+  if (!passwordSource && keychainCreds?.password) {
+    password = keychainCreds.password;
+    passwordSource = "keychain";
+  }
+  if (!smtpTokenSource && keychainCreds?.smtpToken) {
+    smtpToken = keychainCreds.smtpToken;
+    smtpTokenSource = "keychain";
+  }
+
+  if (passwordSource || smtpTokenSource) {
+    const storage = passwordSource === "config" || smtpTokenSource === "config"
+      ? "config" as const
+      : passwordSource === "encrypted-file" || smtpTokenSource === "encrypted-file"
+        ? "encrypted-file" as const
+        : "keychain" as const;
+    tags.hasPassword = !!password;
+    tags.hasSmtpToken = !!smtpToken;
+    tags.storage = storage;
+    return { password, smtpToken, storage };
   }
 
   tags.hasPassword = false;
@@ -957,39 +1003,62 @@ export async function saveConfigWithCredentials(config: ServerConfig): Promise<"
   const simpleloginKey = config.connection.simpleloginApiKey;
 
   // 1. Try keychain
-  const keychainOk = await saveKeychainCredentials(password, smtpToken);
-  if (keychainOk) {
-    config.connection.password  = "";
-    config.connection.smtpToken = "";
+  const keychainResult = await saveKeychainCredentials(password, smtpToken);
+  const passwordStored = !password || keychainResult.passwordStored;
+  const smtpTokenStored = !smtpToken || keychainResult.smtpTokenStored;
+
+  if (keychainResult.passwordStored) {
+    config.connection.password = "";
     delete config.connection.passwordEncrypted;
+  } else if (password) {
+    config.connection.passwordEncrypted = CredentialEncryption.encrypt(password);
+    config.connection.password = "";
+  }
+  if (keychainResult.smtpTokenStored) {
+    config.connection.smtpToken = "";
     delete config.connection.smtpTokenEncrypted;
+  } else if (smtpToken) {
+    config.connection.smtpTokenEncrypted = CredentialEncryption.encrypt(smtpToken);
+    config.connection.smtpToken = "";
+  }
+
+  if (passwordStored && smtpTokenStored) {
     // CRED-001: route Pass PAT + SimpleLogin API key to keychain too.
-    // Best-effort: if the aux save fails, leave the fields on disk — the
-    // settings save reporting "keychain" stays honest for the bridge creds.
-    if (passPat || simpleloginKey) {
+    // Best-effort: if the aux save fails, leave the fields on disk and report
+    // config storage so the UI does not hide that plaintext fallback.
+    let auxiliaryStored = !(passPat || simpleloginKey);
+    if (!auxiliaryStored) {
       const auxOk = await saveKeychainAuxCredentials(passPat ?? "", simpleloginKey ?? "");
       if (auxOk) {
         config.connection.passAccessToken = "";
         config.connection.simpleloginApiKey = "";
+        auxiliaryStored = true;
       }
     }
-    config.credentialStorage = "keychain";
+    const hasOtherPlaintext = !!(
+      config.connection.remoteBearerToken
+      || config.connection.remoteOauthAdminPassword
+      || config.accounts?.some(account => account.password || account.smtpToken)
+    );
+    config.credentialStorage = auxiliaryStored && !hasOtherPlaintext ? "keychain" : "config";
     saveConfig(config);
-    return "keychain";
+    return config.credentialStorage;
   }
 
-  // 2. Encrypt and store in config file (keychain unavailable)
-  if (password) {
-    config.connection.passwordEncrypted  = CredentialEncryption.encrypt(password);
-    config.connection.password = "";
-  }
-  if (smtpToken) {
-    config.connection.smtpTokenEncrypted = CredentialEncryption.encrypt(smtpToken);
-    config.connection.smtpToken = "";
-  }
-  config.credentialStorage = "encrypted-file";
+  // 2. At least one individual keychain write failed. Its encrypted-file
+  // fallback was staged above while any successful sibling remains keychain-
+  // backed. Report the weakest storage in use instead of claiming full keychain
+  // protection for a mixed save.
+  const hasOtherPlaintext = !!(
+    config.connection.remoteBearerToken
+    || config.connection.remoteOauthAdminPassword
+    || config.connection.passAccessToken
+    || config.connection.simpleloginApiKey
+    || config.accounts?.some(account => account.password || account.smtpToken)
+  );
+  config.credentialStorage = hasOtherPlaintext ? "config" : "encrypted-file";
   saveConfig(config);
-  return "encrypted-file";
+  return config.credentialStorage;
 }
 
 /**
@@ -1004,18 +1073,29 @@ export async function loadAuxiliaryCredentialsFromKeychain(): Promise<{
   storage: "keychain" | "config";
 } | null> {
   const fromKeychain = await loadKeychainAuxCredentials();
-  if (fromKeychain) {
-    return { ...fromKeychain, storage: "keychain" as const };
-  }
   const config = loadConfig();
-  if (config && (config.connection.passAccessToken || config.connection.simpleloginApiKey)) {
-    return {
-      passAccessToken: config.connection.passAccessToken ?? "",
-      simpleloginApiKey: config.connection.simpleloginApiKey ?? "",
-      storage: "config" as const,
-    };
-  }
-  return null;
+  const quarantine = config?.keychainAuxiliaryCredentialsQuarantined;
+  // Merge each integration independently. One may live in the keychain while
+  // the other remains in the owner-only config. Treating the pair as one unit
+  // silently disabled the config-backed integration.
+  const passFromKeychain = quarantine?.passAccessToken ? "" : fromKeychain?.passAccessToken ?? "";
+  const simpleloginFromKeychain = quarantine?.simpleloginApiKey ? "" : fromKeychain?.simpleloginApiKey ?? "";
+  const passFromConfig = quarantine?.passAccessToken ? "" : config?.connection.passAccessToken ?? "";
+  const simpleloginFromConfig = quarantine?.simpleloginApiKey ? "" : config?.connection.simpleloginApiKey ?? "";
+  // A successful keychain save removes that exact config field. Therefore a
+  // non-empty config value is an intentional, newer fallback from a failed or
+  // unavailable keychain write and must take precedence over a stale entry
+  // that may become visible again after restart.
+  const passAccessToken = passFromConfig || passFromKeychain;
+  const simpleloginApiKey = simpleloginFromConfig || simpleloginFromKeychain;
+  const selectedKeychainValue = (!passFromConfig && !!passFromKeychain)
+    || (!simpleloginFromConfig && !!simpleloginFromKeychain);
+  if (!passAccessToken && !simpleloginApiKey) return null;
+  return {
+    passAccessToken,
+    simpleloginApiKey,
+    storage: selectedKeychainValue ? "keychain" : "config",
+  };
 }
 
 /**
@@ -1084,8 +1164,14 @@ export async function migrateCredentials(): Promise<boolean> {
   }
 
   // Try keychain first
-  const migratedToKeychain = await migrateFromConfig(config, saveConfig);
-  if (migratedToKeychain) {
+  // Stage keychain changes on the clone and persist once below. A keychain can
+  // accept one field and reject its sibling; migrateFromConfig therefore blanks
+  // only verified fields and leaves each failed field as plaintext for the
+  // encrypted fallback in this same atomic save.
+  const migratedToKeychain = await migrateFromConfig(config, () => { /* save once after fallback staging */ });
+  const hasRemainingPlaintext = !!(config.connection.password || config.connection.smtpToken);
+  if (migratedToKeychain && !hasRemainingPlaintext) {
+    saveConfig(config);
     tags.migrated = true;
     return true;
   }
@@ -1099,10 +1185,17 @@ export async function migrateCredentials(): Promise<boolean> {
     : undefined;
   config.connection.password  = "";
   config.connection.smtpToken = "";
-  config.credentialStorage = "encrypted-file";
+  const hasOtherPlaintext = !!(
+    config.connection.remoteBearerToken
+    || config.connection.remoteOauthAdminPassword
+    || config.connection.passAccessToken
+    || config.connection.simpleloginApiKey
+    || config.accounts?.some(account => account.password || account.smtpToken)
+  );
+  config.credentialStorage = hasOtherPlaintext ? "config" : "encrypted-file";
   saveConfig(config);
-  tags.migrated = true;
-  return true;
+  tags.migrated = migratedToKeychain || hasRemainingPlaintext;
+  return tags.migrated;
   });
   }); // end tracer.span('config.migrateCredentials')
 }

@@ -143,7 +143,10 @@ export async function readRegistryWithSecrets(): Promise<AccountRegistry> {
       return legacy;
     };
 
-    if (perAccount?.password) {
+    // A non-empty config field is an intentional fallback from a failed
+    // per-field keychain write and is therefore newer than any stale entry
+    // still present in that field's keychain slot. Hydrate only blank fields.
+    if (!acct.password && perAccount?.password) {
       acct.password = perAccount.password;
     } else if (!acct.password && acct.id === "primary") {
       // Back-compat: the pre-multi-account keychain entry had no per-account
@@ -151,7 +154,7 @@ export async function readRegistryWithSecrets(): Promise<AccountRegistry> {
       const l = await getLegacy();
       if (l?.password) acct.password = l.password;
     }
-    if (perAccount?.smtpToken) {
+    if (!acct.smtpToken && perAccount?.smtpToken) {
       acct.smtpToken = perAccount.smtpToken;
     } else if (!acct.smtpToken && acct.id === "primary") {
       const l = await getLegacy();
@@ -204,28 +207,21 @@ export async function writeRegistry(reg: AccountRegistry): Promise<void> {
       const password = a.password ?? "";
       const smtpToken = a.smtpToken ?? "";
       const hadSecrets = !!(password || smtpToken);
-      let keychainOk = false;
+      let passwordStored = false;
+      let smtpTokenStored = false;
       if (hadSecrets) {
-        keychainOk = await saveAccountCredentials(a.id, password, smtpToken);
-      } else {
-        keychainOk = true; // nothing to save, nothing to fall back to
+        const result = await saveAccountCredentials(a.id, password, smtpToken);
+        passwordStored = result.passwordStored;
+        smtpTokenStored = result.smtpTokenStored;
       }
       return {
-        // CRED-004: carry the real saveAccountCredentials result alongside the
-        // scrubbed spec instead of re-deriving keychain success from the
-        // scrubbed shape. The shape inference (`!password && !smtpToken`) was
-        // brittle — a future normalisation of empty fields to undefined would
-        // have silently flipped credentialStorage to "keychain" even on a
-        // plaintext-fallback host. `keychainSaved` is true only when this
-        // account actually had secrets AND the keychain accepted them.
-        keychainSaved: hadSecrets && keychainOk,
         spec: {
           ...a,
-          // Only blank the on-disk password when the keychain actually
-          // took it. Headless / no-libsecret hosts keep the legacy
-          // behavior (plaintext on disk, credentialStorage="config").
-          password: keychainOk ? "" : password,
-          smtpToken: keychainOk ? undefined : (smtpToken || undefined),
+          // Scrub each field only when that exact keychain write succeeded.
+          // A sibling failure keeps its new value as the authoritative config
+          // fallback instead of letting an older keychain value override it.
+          password: passwordStored ? "" : password,
+          smtpToken: smtpTokenStored ? undefined : (smtpToken || undefined),
         } as AccountSpec,
       };
     }),
@@ -235,14 +231,15 @@ export async function writeRegistry(reg: AccountRegistry): Promise<void> {
   cfg.accounts = scrubbedAccounts;
   cfg.activeAccountId = reg.activeAccountId;
 
-  // Mark storage method based on whether ANY account actually saved to the
-  // keychain (all-or-nothing per host; mixed mode isn't a supported
-  // deployment). CRED-004: decided from the actual per-account keychain
-  // result, not from inspecting the scrubbed on-disk shape.
+  // credentialStorage describes the least-protected credential that remains.
+  // A per-field keychain write can partially succeed, so mixed storage is a
+  // real fallback state even though it is not a normal deployment mode. If
+  // any account credential remains in the config, report "config" rather
+  // than presenting the partially-keychain-backed registry as fully secured.
   const anySecrets = reg.accounts.some(a => a.password || a.smtpToken);
-  const anyKeychain = scrubbed.some(s => s.keychainSaved);
+  const anyPlaintextCredential = scrubbedAccounts.some(a => a.password || a.smtpToken);
   if (anySecrets) {
-    cfg.credentialStorage = anyKeychain ? "keychain" : "config";
+    cfg.credentialStorage = anyPlaintextCredential ? "config" : "keychain";
   }
 
   // Mirror the *active* account's connection fields back into the

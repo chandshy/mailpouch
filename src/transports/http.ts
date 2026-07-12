@@ -159,10 +159,12 @@ async function readJsonBody(req: IncomingMessage, maxBytes = 1_048_576): Promise
  * the `ipPins` grant condition usable behind a local reverse proxy
  * (Caddy, nginx, Cloudflare Tunnel).
  *
- * XFF is comma-separated "client, proxy1, proxy2, …"; we take the
- * left-most token (the original client). When any parse step fails or
- * the direct peer is not loopback, fall back to the socket address —
- * never fail open to an attacker-controlled header.
+ * XFF is comma-separated "claimed-hop, …, peer-seen-by-proxy". With exactly
+ * one trusted local proxy, only the right-most token was appended/observed by
+ * that proxy; every token to its left may have arrived from the client. Taking
+ * the left-most value would let a remote caller spoof an IP-pinned grant.
+ * When parsing fails or the direct peer is not loopback, fall back to the
+ * socket address — never fail open to an attacker-controlled header.
  */
 export function clientIp(req: IncomingMessage): string {
   const direct = req.socket.remoteAddress ?? "0.0.0.0";
@@ -177,10 +179,12 @@ export function clientIp(req: IncomingMessage): string {
     direct === "::ffff:127.0.0.1";
   if (!isLoopback) return direct;
   const h = req.headers["x-forwarded-for"];
-  const raw = Array.isArray(h) ? h[0] : h;
-  if (!raw) return direct;
-  const first = raw.split(",")[0]?.trim();
-  return first && first.length > 0 ? first : direct;
+  if (!h) return direct;
+  const tokens = (Array.isArray(h) ? h : [h])
+    .flatMap(raw => raw.split(","))
+    .map(token => token.trim())
+    .filter(token => token.length > 0);
+  return tokens[tokens.length - 1] ?? direct;
 }
 
 /**

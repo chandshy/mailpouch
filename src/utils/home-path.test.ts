@@ -76,19 +76,27 @@ describe("profileHomeFile default-profile continuity", () => {
   const ENV = "MAILPOUCH_TEST_DEFAULT_PROFILE_PATH";
   let tempHome: string;
   let originalHome: string | undefined;
+  let originalUserProfile: string | undefined;
   let originalOverride: string | undefined;
 
   beforeEach(() => {
     tempHome = mkdtempSync(join(tmpdir(), "mailpouch-home-path-test-"));
     originalHome = process.env.HOME;
+    originalUserProfile = process.env.USERPROFILE;
     originalOverride = process.env[ENV];
     delete process.env[ENV];
     process.env.HOME = tempHome;
+    // os.homedir() reads USERPROFILE on Windows and HOME on POSIX. Keep both
+    // spellings aligned so these profile-identity tests exercise the same
+    // temporary home on every supported runner.
+    process.env.USERPROFILE = tempHome;
   });
 
   afterEach(() => {
     if (originalHome === undefined) delete process.env.HOME;
     else process.env.HOME = originalHome;
+    if (originalUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = originalUserProfile;
     if (originalOverride === undefined) delete process.env[ENV];
     else process.env[ENV] = originalOverride;
     if (tempHome) rmSync(tempHome, { recursive: true, force: true });
@@ -111,6 +119,7 @@ describe("profileHomeFile default-profile continuity", () => {
     mkdirSync(physicalHome);
     symlinkSync(physicalHome, homeAlias, "dir");
     process.env.HOME = homeAlias;
+    process.env.USERPROFILE = homeAlias;
 
     const physicalDefaultConfig = join(physicalHome, ".mailpouch.json");
     writeFileSync(physicalDefaultConfig, "{}");

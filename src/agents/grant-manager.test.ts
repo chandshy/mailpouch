@@ -173,18 +173,53 @@ describe("GrantManager.check", () => {
   });
 
   it("enforces account binding from the same fresh grant snapshot", () => {
+    const identityA = "a".repeat(64);
     store.createPending({ clientId: "pmc_1", clientName: "A" });
     store.approve({
       clientId: "pmc_1",
       preset: "full",
-      conditions: { accountId: "account-a" },
+      conditions: { accountId: "account-a", accountIdentity: identityA },
     });
     expect(mgr.check({
-      clientId: "pmc_1", tool: "get_emails", globalPreset: "full", targetAccountId: "account-a",
+      clientId: "pmc_1", tool: "get_emails", globalPreset: "full",
+      targetAccountId: "account-a", targetAccountIdentity: identityA,
     }).allowed).toBe(true);
     expect(mgr.check({
-      clientId: "pmc_1", tool: "get_emails", globalPreset: "full", targetAccountId: "account-b",
+      clientId: "pmc_1", tool: "get_emails", globalPreset: "full",
+      targetAccountId: "account-b", targetAccountIdentity: "b".repeat(64),
     })).toMatchObject({ allowed: false, reason: expect.stringMatching(/bound to account account-a/i) });
+  });
+
+  it("denies an account-bound grant after the same registry ID is repointed", () => {
+    const originalIdentity = "a".repeat(64);
+    const replacementIdentity = "b".repeat(64);
+    store.createPending({ clientId: "pmc_1", clientName: "A" });
+    store.approve({
+      clientId: "pmc_1",
+      preset: "full",
+      conditions: { accountId: "account-a", accountIdentity: originalIdentity },
+    });
+
+    const surfaces = ["get_emails", "get_folders"];
+    for (const tool of surfaces) {
+      expect(mgr.check({
+        clientId: "pmc_1", tool, globalPreset: "full",
+        targetAccountId: "account-a", targetAccountIdentity: originalIdentity,
+      }).allowed, tool).toBe(true);
+      expect(mgr.check({
+        clientId: "pmc_1", tool, globalPreset: "full",
+        targetAccountId: "account-a", targetAccountIdentity: replacementIdentity,
+      }), tool).toMatchObject({ allowed: false, reason: expect.stringMatching(/different mailbox identity.*reapproval/i) });
+    }
+  });
+
+  it("fails closed for legacy account-bound grants without an identity fingerprint", () => {
+    store.createPending({ clientId: "pmc_1", clientName: "A" });
+    store.approve({ clientId: "pmc_1", preset: "full", conditions: { accountId: "account-a" } });
+    expect(mgr.check({
+      clientId: "pmc_1", tool: "get_emails", globalPreset: "full",
+      targetAccountId: "account-a", targetAccountIdentity: "a".repeat(64),
+    })).toMatchObject({ allowed: false, reason: expect.stringMatching(/predates durable account identity.*reapprove/i) });
   });
 
   it("intersects grant preset with global preset (global wins when stricter)", () => {
@@ -193,6 +228,21 @@ describe("GrantManager.check", () => {
     // Global preset is read_only — delete_email is not in read_only.
     const r = mgr.check({ clientId: "pmc_1", tool: "delete_email", globalPreset: "read_only" });
     expect(r.allowed).toBe(false);
+  });
+
+  it("intersects non-nested presets per tool instead of selecting one by rank", () => {
+    store.createPending({ clientId: "pmc_1", clientName: "A" });
+    store.approve({ clientId: "pmc_1", preset: "send_only" });
+
+    // read_only includes analytics, while send_only deliberately does not.
+    // Picking read_only as the nominally "stricter" preset widened this grant.
+    expect(mgr.check({
+      clientId: "pmc_1", tool: "get_email_analytics", globalPreset: "read_only",
+    })).toMatchObject({ allowed: false, reason: expect.stringMatching(/preset intersection/i) });
+    // A reading tool present in both maps remains available.
+    expect(mgr.check({
+      clientId: "pmc_1", tool: "get_emails", globalPreset: "read_only",
+    }).allowed).toBe(true);
   });
 
   it("honors explicit tool allow override even when preset would deny", () => {
@@ -299,6 +349,26 @@ describe("GrantManager.check", () => {
     });
     const r = mgr.check({ clientId: "pmc_1", tool: "get_connection_status", globalPreset: "full" });
     expect(r.allowed).toBe(true);
+  });
+
+  it("fails closed for whole-mailbox analytics and folder metadata under a folder allowlist", () => {
+    store.createPending({ clientId: "pmc_1", clientName: "A" });
+    store.approve({
+      clientId: "pmc_1",
+      preset: "full",
+      conditions: { folderAllowlist: ["Folders/Work"] },
+    });
+
+    for (const tool of [
+      "get_email_stats", "get_email_analytics", "get_volume_trends", "get_contacts",
+      "get_correspondence_profile", "get_unread_count", "list_labels", "get_folders",
+      "sync_folders", "fts_rebuild", "fts_status",
+    ]) {
+      expect(mgr.check({ clientId: "pmc_1", tool, globalPreset: "full" }), tool).toMatchObject({
+        allowed: false,
+        reason: expect.stringMatching(/folder allowlist requires a folder/i),
+      });
+    }
   });
 
   // ── PERM-011: folder allowlist bypass via email-ID-scoped mutators ──────────

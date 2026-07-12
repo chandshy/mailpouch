@@ -172,6 +172,42 @@ export function readBodySafe(
 
 // ─── Origin / Referer validation ───────────────────────────────────────────────
 
+function isPrivateIpv4(hostname: string): boolean {
+  const octets = hostname.split(".").map(Number);
+  if (octets.length !== 4 || octets.some(octet => !Number.isInteger(octet) || octet < 0 || octet > 255)) {
+    return false;
+  }
+  return octets[0] === 10
+    || (octets[0] === 192 && octets[1] === 168)
+    || (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31);
+}
+
+/**
+ * Reject untrusted Host authorities before serving the shell or its CSRF token.
+ * Browser same-origin checks use the requested hostname, so accepting an
+ * attacker-controlled hostname that DNS-rebinds to loopback defeats CSRF.
+ */
+export function isValidSettingsHost(req: http.IncomingMessage, lan: boolean): boolean {
+  const raw = req.headers.host;
+  if (typeof raw !== "string" || raw.length === 0 || /[\x00-\x20\x7f]/.test(raw)) return false;
+  let hostname: string;
+  try {
+    hostname = new URL(`http://${raw}`).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+
+  if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]") return true;
+  if (!lan) return false;
+  if (isPrivateIpv4(hostname)) return true;
+  // URL.hostname retains brackets for IPv6 literals in Node. Admit only ULA
+  // and link-local ranges in LAN mode; public IPv6 authorities stay rejected.
+  const ipv6 = hostname.startsWith("[") && hostname.endsWith("]")
+    ? hostname.slice(1, -1)
+    : hostname;
+  return /^(?:f[cd][0-9a-f]{2}:|fe[89ab][0-9a-f]:)/i.test(ipv6);
+}
+
 /**
  * Returns true if the request's `Origin` or `Referer` header is consistent
  * with the settings server itself.

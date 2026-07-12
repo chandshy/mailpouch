@@ -7,6 +7,7 @@ import {
   sanitizeText,
   isValidEscalationTarget,
   isValidOrigin,
+  isValidSettingsHost,
   readBodySafe,
   generateAccessToken,
   hasValidAccessToken,
@@ -81,6 +82,27 @@ describe('RateLimiter', () => {
     expect(limiter.check('ip2')).toBe(true);
     expect(limiter.check('ip1')).toBe(false);
     expect(limiter.check('ip2')).toBe(false);
+  });
+});
+
+describe('isValidSettingsHost', () => {
+  function mockReq(host: string | undefined) {
+    return { headers: host === undefined ? {} : { host } } as unknown as import('http').IncomingMessage;
+  }
+
+  it('accepts loopback authorities and rejects DNS-rebinding hostnames', () => {
+    expect(isValidSettingsHost(mockReq('localhost:8765'), false)).toBe(true);
+    expect(isValidSettingsHost(mockReq('127.0.0.1:8765'), false)).toBe(true);
+    expect(isValidSettingsHost(mockReq('[::1]:8765'), false)).toBe(true);
+    expect(isValidSettingsHost(mockReq('evil.example:8765'), false)).toBe(false);
+    expect(isValidSettingsHost(mockReq(undefined), false)).toBe(false);
+  });
+
+  it('admits private numeric LAN authorities only in LAN mode', () => {
+    expect(isValidSettingsHost(mockReq('192.168.1.20:8765'), true)).toBe(true);
+    expect(isValidSettingsHost(mockReq('10.0.0.4:8765'), true)).toBe(true);
+    expect(isValidSettingsHost(mockReq('192.168.1.20:8765'), false)).toBe(false);
+    expect(isValidSettingsHost(mockReq('8.8.8.8:8765'), true)).toBe(false);
   });
 });
 

@@ -262,6 +262,8 @@ function validConditions(value: unknown): boolean {
   if (!isRecord(value)) return false;
   if (value.expiresAt !== undefined && (typeof value.expiresAt !== "string" || !Number.isFinite(Date.parse(value.expiresAt)))) return false;
   if (value.accountId !== undefined && typeof value.accountId !== "string") return false;
+  if (value.accountIdentity !== undefined && (typeof value.accountIdentity !== "string" || !/^[a-f0-9]{64}$/i.test(value.accountIdentity))) return false;
+  if (value.accountIdentity !== undefined && value.accountId === undefined) return false;
   if (value.folderAllowlist !== undefined && (!Array.isArray(value.folderAllowlist) || !value.folderAllowlist.every(folder => typeof folder === "string"))) return false;
   if (value.ipPins !== undefined && (!Array.isArray(value.ipPins) || !value.ipPins.every(ip => typeof ip === "string"))) return false;
   if (value.maxCallsPerHourByTool !== undefined) {

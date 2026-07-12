@@ -24,6 +24,7 @@ import { AgentGrantStore } from "../agents/grant-store.js";
 import { AgentAuditLog } from "../agents/audit.js";
 import { ServiceAccountStore } from "../agents/service-account-store.js";
 import { registerAgentServices } from "../agents/registry.js";
+import { readRegistry } from "../accounts/registry.js";
 
 interface Resp { status: number; headers: http.IncomingHttpHeaders; body: string; }
 
@@ -67,6 +68,19 @@ async function csrfFrom(port: number): Promise<string> {
 }
 
 describe("settings server CSP headers", () => {
+  it("rejects a DNS-rebinding Host before returning shell or CSRF content", async () => {
+    const srv = createSettingsServer({ port: 8765, lan: false, accessToken: null, scheme: "http" });
+    const { port, close } = await listen(srv);
+    try {
+      const res = await request(port, "GET", "/", { headers: { host: `evil.example:${port}` } });
+      expect(res.status).toBe(421);
+      expect(res.body).toContain("Host not permitted");
+      expect(res.body).not.toContain("csrf-token");
+    } finally {
+      close();
+    }
+  });
+
   it("UI-002: main UI script-src carries a nonce and no 'unsafe-inline'", async () => {
     const srv = createSettingsServer({ port: 8765, lan: false, accessToken: null, scheme: "http" });
     const { port, close } = await listen(srv);
@@ -92,6 +106,30 @@ describe("settings server CSP headers", () => {
       expect(res.body).not.toMatch(/<script\b/);
     } finally {
       close();
+    }
+  });
+});
+
+describe("settings server error disclosure", () => {
+  it("does not return filesystem errors or stack details to API callers", async () => {
+    const privatePath = mkdtempSync(join(tmpdir(), "mailpouch-log-directory-"));
+    const previousLogPath = process.env.MAILPOUCH_LOG_FILE;
+    process.env.MAILPOUCH_LOG_FILE = privatePath;
+    const srv = createSettingsServer({ port: 8765, lan: false, accessToken: null, scheme: "http" });
+    const { port, close } = await listen(srv);
+    try {
+      // Reading a directory as a log file fails with a platform-specific error
+      // containing an internal path. The API must expose only a stable message.
+      const res = await request(port, "GET", "/api/logs");
+      expect(res.status).toBe(500);
+      expect(JSON.parse(res.body)).toEqual({ error: "Could not read the log file." });
+      expect(res.body).not.toContain(privatePath);
+      expect(res.body).not.toMatch(/EISDIR|EPERM|at [A-Za-z].*\(/);
+    } finally {
+      close();
+      if (previousLogPath === undefined) delete process.env.MAILPOUCH_LOG_FILE;
+      else process.env.MAILPOUCH_LOG_FILE = previousLogPath;
+      rmSync(privatePath, { recursive: true, force: true });
     }
   });
 });
@@ -184,11 +222,11 @@ describe("LAN settings bootstrap session", () => {
   });
 });
 
-describe("UI-011: approve endpoint sanitizes conditions/toolOverrides", () => {
+describe("UI-011: approve endpoint validates conditions/toolOverrides", () => {
   const tmp = mkdtempSync(join(tmpdir(), "mp-grants-"));
   afterAll(() => rmSync(tmp, { recursive: true, force: true }));
 
-  it("strips prototype-pollution + unknown keys and rejects fractional caps before storing the grant", async () => {
+  it("rejects malformed or unknown conditions without widening the pending grant", async () => {
     const grants = new AgentGrantStore(join(tmp, "grants.json"));
     const audit = new AgentAuditLog({ path: join(tmp, "audit.jsonl") });
     registerAgentServices(grants, audit);
@@ -212,24 +250,16 @@ describe("UI-011: approve endpoint sanitizes conditions/toolOverrides", () => {
         headers: { "x-csrf-token": token, origin: `http://127.0.0.1:${port}`, "content-type": "application/json" },
         body: payload,
       });
-      expect(res.status).toBe(200);
+      expect(res.status).toBe(400);
 
       // Object.prototype must not have been polluted.
       expect(({} as Record<string, unknown>).isAdmin).toBeUndefined();
       expect(({} as Record<string, unknown>).polluted).toBeUndefined();
 
       const stored = grants.get("client_abc")!;
-      // Only the known tool survives; bogus + __proto__ dropped.
-      expect(stored.toolOverrides).toEqual({ get_emails: true });
-      // Only string folder entries survive; unknown condition keys dropped.
-      expect(stored.conditions?.folderAllowlist).toEqual(["INBOX"]);
-      // Zero deliberately means deny-all; fractional and over-max counts are
-      // invalid and must not reach GrantManager's fail-closed runtime validation.
-      expect(stored.conditions?.maxCallsPerHourByTool).toEqual({
-        get_emails: 0,
-        bulk_delete_emails: 1,
-      });
-      expect((stored.conditions as Record<string, unknown>).evilKey).toBeUndefined();
+      expect(stored.status).toBe("pending");
+      expect(stored.toolOverrides).toBeUndefined();
+      expect(stored.conditions).toBeUndefined();
     } finally {
       close();
     }
@@ -245,15 +275,16 @@ describe("UI-011: approve endpoint sanitizes conditions/toolOverrides", () => {
     const { port, close } = await listen(srv);
     try {
       const token = await csrfFrom(port);
+      const accountId = readRegistry().activeAccountId;
       const res = await request(port, "POST", "/api/agents/service-account", {
         headers: { "x-csrf-token": token, origin: `http://127.0.0.1:${port}`, "content-type": "application/json" },
         body: JSON.stringify({
           name: "capped cron",
           preset: "full",
           conditions: {
+            accountId,
             maxCallsPerHourByTool: {
               bulk_delete: 2,
-              get_emails: 10_001,
             },
           },
         }),
@@ -263,10 +294,65 @@ describe("UI-011: approve endpoint sanitizes conditions/toolOverrides", () => {
       expect(serviceAccounts.get(issued.clientId)?.conditions?.maxCallsPerHourByTool).toEqual({
         bulk_delete_emails: 2,
       });
+      expect(serviceAccounts.get(issued.clientId)?.conditions).toMatchObject({
+        accountId,
+        accountIdentity: expect.stringMatching(/^[a-f0-9]{64}$/),
+      });
       // The active grant mirrored for token use carries exactly the same cap.
       expect(grants.get(issued.clientId)?.conditions?.maxCallsPerHourByTool).toEqual({
         bulk_delete_emails: 2,
       });
+    } finally {
+      close();
+    }
+  });
+
+  it("binds an approved interactive grant to the configured mailbox identity", async () => {
+    const grants = new AgentGrantStore(join(tmp, "identity-grants.json"));
+    const audit = new AgentAuditLog({ path: join(tmp, "identity-audit.jsonl") });
+    registerAgentServices(grants, audit);
+    grants.createPending({ clientId: "client_identity", clientName: "Identity Test" });
+
+    const srv = createSettingsServer({ port: 8765, lan: false, accessToken: null, scheme: "http" });
+    const { port, close } = await listen(srv);
+    try {
+      const token = await csrfFrom(port);
+      const accountId = readRegistry().activeAccountId;
+      const res = await request(port, "POST", "/api/agents/client_identity/approve", {
+        headers: { "x-csrf-token": token, origin: `http://127.0.0.1:${port}`, "content-type": "application/json" },
+        body: JSON.stringify({ preset: "read_only", conditions: { accountId } }),
+      });
+      expect(res.status).toBe(200);
+      expect(grants.get("client_identity")?.conditions).toMatchObject({
+        accountId,
+        accountIdentity: expect.stringMatching(/^[a-f0-9]{64}$/),
+      });
+    } finally {
+      close();
+    }
+  });
+
+  it("does not issue a service credential when a requested restriction is malformed", async () => {
+    const grants = new AgentGrantStore(join(tmp, "invalid-service-grants.json"));
+    const audit = new AgentAuditLog({ path: join(tmp, "invalid-service-audit.jsonl") });
+    const serviceAccounts = new ServiceAccountStore(join(tmp, "invalid-service-accounts.json"));
+    registerAgentServices(grants, audit, serviceAccounts);
+
+    const srv = createSettingsServer({ port: 8765, lan: false, accessToken: null, scheme: "http" });
+    const { port, close } = await listen(srv);
+    try {
+      const token = await csrfFrom(port);
+      const res = await request(port, "POST", "/api/agents/service-account", {
+        headers: { "x-csrf-token": token, origin: `http://127.0.0.1:${port}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          name: "must stay capped",
+          preset: "full",
+          conditions: { maxCallsPerHourByTool: { send_email: "1" } },
+        }),
+      });
+      expect(res.status).toBe(400);
+      expect(serviceAccounts.list()).toEqual([]);
+      expect(grants.list()).toEqual([]);
     } finally {
       close();
     }

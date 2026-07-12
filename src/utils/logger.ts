@@ -89,23 +89,23 @@ export class Logger {
   debug(message: string, context: string = "System", data?: unknown): void {
     if (this.debugMode) {
       this.log("debug", message, context, data);
-      console.error(`${this.ts()} [DEBUG] [${context}] ${message}`, data || "");
+      console.error("%s", `${this.ts()} [DEBUG] [${context}] ${message}`, data || "");
     }
   }
 
   info(message: string, context: string = "System", data?: unknown): void {
     this.log("info", message, context, data);
-    console.error(`${this.ts()} [INFO] [${context}] ${message}`, data || "");
+    console.error("%s", `${this.ts()} [INFO] [${context}] ${message}`, data || "");
   }
 
   warn(message: string, context: string = "System", data?: unknown): void {
     this.log("warn", message, context, data);
-    console.error(`${this.ts()} [WARN] [${context}] ${message}`, data || "");
+    console.error("%s", `${this.ts()} [WARN] [${context}] ${message}`, data || "");
   }
 
   error(message: string, context: string = "System", error?: unknown): void {
     this.log("error", message, context, error);
-    console.error(`${this.ts()} [ERROR] [${context}] ${message}`, error || "");
+    console.error("%s", `${this.ts()} [ERROR] [${context}] ${message}`, error || "");
   }
 
   private log(

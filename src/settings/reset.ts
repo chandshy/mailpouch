@@ -138,6 +138,16 @@ export async function resetConfiguration(): Promise<ConfigurationResetResult> {
     if (keychainMailboxCredentialsQuarantined) {
       resetConfig.keychainMailboxCredentialsQuarantined = true;
     }
+    if (!credentialCleanup.auxiliaryCredentialsCleared) {
+      // The auxiliary delete API is intentionally a single batch verdict. A
+      // false result can mean one entry was removed before its sibling threw,
+      // so quarantine both names until a later verified save/clear. Without a
+      // durable marker, restart would rehydrate whichever stale entry remains.
+      resetConfig.keychainAuxiliaryCredentialsQuarantined = {
+        passAccessToken: true,
+        simpleloginApiKey: true,
+      };
+    }
     saveConfig(resetConfig);
 
     return {

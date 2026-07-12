@@ -10,11 +10,15 @@ import { SimpleIMAPService } from "./simple-imap-service.js";
 
 vi.mock("imapflow", () => {
   const ImapFlow = vi.fn(function () {
+    const listeners = new Map<string, (...args: unknown[]) => void>();
     return {
       connect: vi.fn().mockResolvedValue(undefined),
       logout: vi.fn().mockResolvedValue(undefined),
       list: vi.fn().mockResolvedValue([]),
-      on: vi.fn(),
+      on: vi.fn((event: string, listener: (...args: unknown[]) => void) => {
+        listeners.set(event, listener);
+      }),
+      emitForTest: (event: string, ...args: unknown[]) => listeners.get(event)?.(...args),
     };
   });
   return { ImapFlow };
@@ -78,6 +82,28 @@ describe("SimpleIMAPService.connect() bridgeCertPath handling", () => {
     await svc.connect("localhost", 1143, "user", "pass", "/path/to/cert.pem");
     expect(first.logout).toHaveBeenCalledTimes(1);
     expect(ctor.mock.results.length).toBe(2); // a fresh client was created after reaping
+  });
+
+  it("ignores delayed close/error events from a retired client after replacement connects", async () => {
+    statSync.mockReturnValue({ isDirectory: () => false });
+    readFileSync.mockReturnValue(Buffer.from("CERT_DATA"));
+    const { ImapFlow } = await import("imapflow");
+    const ctor = ImapFlow as unknown as ReturnType<typeof vi.fn>;
+    ctor.mockClear();
+
+    const svc = new SimpleIMAPService();
+    await svc.connect("localhost", 1143, "user", "pass", "/path/to/cert.pem");
+    const first = ctor.mock.results[0].value as { emitForTest: (event: string, ...args: unknown[]) => void };
+    await svc.connect("localhost", 1143, "user", "pass", "/path/to/cert.pem");
+    const second = ctor.mock.results[1].value;
+    expect((svc as any).client).toBe(second);
+    expect(svc.isActive()).toBe(true);
+
+    first.emitForTest("close");
+    first.emitForTest("error", new Error("retired socket"));
+
+    expect((svc as any).client).toBe(second);
+    expect(svc.isActive()).toBe(true);
   });
 
   it("resolves cert.pem inside a directory when statSync says it is a directory (lines 317-319)", async () => {

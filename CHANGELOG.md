@@ -31,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Ordinary settings saves retain undisclosed keychain-backed SimpleLogin and Pass secrets; explicit or partially failed clears disable affected live clients immediately.
 - Configuration reset clears mailbox, auxiliary, and remote secrets, refreshes live services independently, and reports any manual keychain cleanup required.
 - Canonical config-path resolution prevents symlink aliases from bypassing profile singleton and state isolation.
+- Cross-platform subprocess launch, installed-tarball inspection, and POSIX permission tests now behave correctly on Windows; timed-out validations terminate their full process tree.
+- Scheduler delivery aborts before SMTP when its in-flight state cannot be persisted, and retired IMAP clients can no longer change the state of a replacement connection.
 
 ### Security
 
@@ -38,6 +40,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - External grant or service-account revocation takes effect on the next bearer, tool, resource, or prompt authorization check; malformed authorization stores fail closed.
 - Webhook delivery resolves and pins public addresses per attempt, rejects private or special-use DNS results and redirects, and bounds DNS and network time to prevent SSRF, rebinding, and stalled deliveries.
 - Failed mailbox-keychain resets persist a restart-safe quarantine marker so stale credentials cannot be rehydrated after restart.
+- Mailbox and auxiliary credentials are persisted, hydrated, and quarantined per field, preventing partial keychain writes or clears from reviving stale secrets after restart.
+- Settings rejects DNS-rebinding Host headers, reverse-proxy IP pins use the trusted end of the forwarded chain, and API failures no longer expose stack-derived details or attacker-controlled logging formats.
+- Agent presets intersect per tool; malformed restrictions are rejected rather than widened; account-bound grants carry a mailbox fingerprint; whole-mailbox analytics and metadata fail closed for folder-restricted callers.
+- Grant, service-account, and escalation locks use owner records plus canonical physical paths, preventing both live-lock age reclamation and symlink-alias bypasses.
 - Destructive confirmation now also covers SimpleLogin contact/mailbox deletion and Proton Pass TOTP retrieval.
 - Account and permission settings payloads are strictly allowlisted and type-checked before persistence.
 
@@ -46,6 +52,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CI enforces a versioned coverage ratchet, strict unused-code checks, cross-platform installed-tarball execution of both bin shims, and a Windows Server 2022 native-build lane.
 - The tarball smoke test now proves the published improvement commands initialize and report status from the installed package.
 - Security-sensitive JSON stores use shared atomic owner-only writes, with expanded regression coverage for races, account identity changes, resets, revocation, folder scope, FTS ownership, and packaging.
+- Release publishing verifies the exact package-version tag, tests that commit once, and publishes the immutable verified SHA to both registries.
 
 ### Compatibility notes
 

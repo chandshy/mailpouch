@@ -1903,6 +1903,21 @@ describe("SimpleIMAPService.disconnect", () => {
     await expect(svc.disconnect()).resolves.toBeUndefined();
     expect((svc as any).client).toBeNull();
   });
+
+  it("detaches and closes a half-open client even when isConnected is false", async () => {
+    const svc = new SimpleIMAPService();
+    const close = vi.fn();
+    const logout = vi.fn();
+    (svc as any).isConnected = false;
+    (svc as any).client = { close, logout };
+
+    await svc.disconnect();
+
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(logout).not.toHaveBeenCalled();
+    expect((svc as any).client).toBeNull();
+    expect((svc as any).isConnected).toBe(false);
+  });
 });
 
 // ─── isActive ─────────────────────────────────────────────────────────────────

@@ -73,7 +73,7 @@ vi.mock("../security/keychain.js", () => ({
   // writeRegistry fall back to its plaintext-on-disk legacy path,
   // matching what these tests were originally written against.
   loadAccountCredentials: vi.fn(() => Promise.resolve(null)),
-  saveAccountCredentials: vi.fn(() => Promise.resolve(false)),
+  saveAccountCredentials: vi.fn(() => Promise.resolve({ passwordStored: false, smtpTokenStored: false })),
   deleteAccountCredentials: vi.fn(() => Promise.resolve(false)),
 }));
 
@@ -378,7 +378,7 @@ describe("accounts registry", () => {
     // adding an account via the Accounts tab dumped plaintext into
     // ~/.mailpouch.json.
     const keychain = await import("../security/keychain.js");
-    vi.mocked(keychain.saveAccountCredentials).mockResolvedValue(true);
+    vi.mocked(keychain.saveAccountCredentials).mockResolvedValue({ passwordStored: true, smtpTokenStored: false });
     seedConfig({});
     await createAccount({
       name: "Secret", providerType: "imap",
@@ -397,7 +397,7 @@ describe("accounts registry", () => {
 
   it("CRED-004: password-only account with keychain available is marked 'keychain'", async () => {
     const keychain = await import("../security/keychain.js");
-    vi.mocked(keychain.saveAccountCredentials).mockResolvedValue(true);
+    vi.mocked(keychain.saveAccountCredentials).mockResolvedValue({ passwordStored: true, smtpTokenStored: false });
     seedConfig({});
     await createAccount({
       name: "PwOnly", providerType: "imap",
@@ -414,7 +414,7 @@ describe("accounts registry", () => {
     // save FAILS keeps plaintext on disk — and must be reported as "config",
     // never "keychain". This guards the false-clean-badge regression.
     const keychain = await import("../security/keychain.js");
-    vi.mocked(keychain.saveAccountCredentials).mockResolvedValue(false);
+    vi.mocked(keychain.saveAccountCredentials).mockResolvedValue({ passwordStored: false, smtpTokenStored: false });
     seedConfig({});
     await createAccount({
       name: "FailHost", providerType: "imap",
@@ -426,6 +426,38 @@ describe("accounts registry", () => {
     expect(acct!.password).toBe("stays-on-disk");  // keychain failed → plaintext kept
     expect(acct!.smtpToken).toBeUndefined();        // empty token coerced to undefined
     expect(onDisk.credentialStorage).toBe("config"); // NOT keychain
+  });
+
+  it("preserves only the failed credential field in config after a partial keychain write", async () => {
+    const keychain = await import("../security/keychain.js");
+    vi.mocked(keychain.saveAccountCredentials).mockResolvedValue({
+      passwordStored: true,
+      smtpTokenStored: false,
+    });
+    seedConfig({});
+
+    const created = await createAccount({
+      name: "Partial", providerType: "imap",
+      smtpHost: "s", smtpPort: 1, imapHost: "i", imapPort: 1,
+      username: "u", password: "new-password", smtpToken: "new-config-token",
+    });
+
+    const onDisk = JSON.parse(diskByPath.get(CONFIG_PATH) ?? "{}") as ServerConfig;
+    const persisted = onDisk.accounts?.find(account => account.id === created.id);
+    expect(persisted).toMatchObject({ password: "", smtpToken: "new-config-token" });
+    expect(onDisk.credentialStorage).toBe("config");
+
+    // The token entry predates the failed rotation. Hydration must merge by
+    // field: use the newly-stored password, but retain the newer config token.
+    vi.mocked(keychain.loadAccountCredentials).mockResolvedValue({
+      password: "new-password",
+      smtpToken: "stale-keychain-token",
+    });
+    const hydrated = await readRegistryWithSecrets();
+    expect(hydrated.accounts.find(account => account.id === created.id)).toMatchObject({
+      password: "new-password",
+      smtpToken: "new-config-token",
+    });
   });
 
   // ─── CRED-005 — readRegistryWithSecrets fetches the keychain at most once ──
@@ -451,25 +483,23 @@ describe("accounts registry", () => {
     expect(reg.accounts.find(a => a.id === "primary")?.smtpToken).toBe("tok");
   });
 
-  it("the per-account keychain entry is AUTHORITATIVE — it overrides a stale pre-set legacy password", async () => {
+  it("keeps a non-empty config fallback ahead of stale per-account keychain fields", async () => {
     const keychain = await import("../security/keychain.js");
     vi.mocked(keychain.loadAccountCredentials).mockReset();
-    // The per-account keychain entry holds the FRESH password a Settings save wrote.
-    vi.mocked(keychain.loadAccountCredentials).mockResolvedValue({ password: "fresh-per-account", smtpToken: "fresh-tok" });
+    // These entries can be stale when a later per-field write failed.
+    vi.mocked(keychain.loadAccountCredentials).mockResolvedValue({ password: "stale-per-account", smtpToken: "stale-tok" });
     vi.mocked(keychain.loadCredentials).mockResolvedValue({ password: "stale-legacy", smtpToken: "stale-tok" });
-    // The spec already carries a stale legacy password from an older config.
-    // The fresh per-account entry must win, not be shadowed by this pre-set
-    // in-memory value.
+    // Non-empty fields are the new fallback values retained after that failure.
     seedConfig({
       accounts: [
-        { id: "primary", name: "A", providerType: "imap", smtpHost: "s", smtpPort: 1, imapHost: "i", imapPort: 1, username: "a", password: "stale-legacy", smtpToken: "stale-tok" },
+        { id: "primary", name: "A", providerType: "imap", smtpHost: "s", smtpPort: 1, imapHost: "i", imapPort: 1, username: "a", password: "new-config-password", smtpToken: "new-config-token" },
       ],
       activeAccountId: "primary",
     } as Partial<ServerConfig>);
 
     const reg = await readRegistryWithSecrets();
-    expect(reg.accounts.find(a => a.id === "primary")?.password).toBe("fresh-per-account");
-    expect(reg.accounts.find(a => a.id === "primary")?.smtpToken).toBe("fresh-tok");
+    expect(reg.accounts.find(a => a.id === "primary")?.password).toBe("new-config-password");
+    expect(reg.accounts.find(a => a.id === "primary")?.smtpToken).toBe("new-config-token");
   });
 
   it("falls back to the existing value when no per-account keychain entry exists (single-account safe)", async () => {

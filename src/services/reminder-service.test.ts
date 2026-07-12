@@ -261,7 +261,10 @@ describe("ReminderService", () => {
     expect(result).toMatchObject({ accountId: "account-a", quarantined: 1, removed: 1 });
     expect(result.backupPath).toMatch(/\.quarantine-.*\.bak$/);
     expect(readFileSync(result.backupPath!, "utf-8")).toBe(rawBefore);
-    expect(statSync(result.backupPath!).mode & 0o777).toBe(0o600);
+    // Windows does not expose POSIX permission bits through stat/chmod.
+    if (process.platform !== "win32") {
+      expect(statSync(result.backupPath!).mode & 0o777).toBe(0o600);
+    }
     expect(svc.listAll("account-a")).toEqual([]);
     expect(svc.listAll("account-b").map(reminder => reminder.id)).toEqual([b.id]);
     expect(JSON.parse(readFileSync(path, "utf-8")).reminders.map((reminder: { id: string }) => reminder.id)).not.toContain(a.id);
@@ -297,7 +300,9 @@ describe("ReminderService", () => {
 
     expect(backup).toBeTruthy();
     expect(readFileSync(join(dirname(path), backup!), "utf-8")).toBe(raw);
-    expect(statSync(join(dirname(path), backup!)).mode & 0o777).toBe(0o600);
+    if (process.platform !== "win32") {
+      expect(statSync(join(dirname(path), backup!)).mode & 0o777).toBe(0o600);
+    }
     expect(svc.listAll("account-a")).toEqual([]);
     expect(JSON.parse(readFileSync(path, "utf-8")).reminders).toEqual([]);
   });

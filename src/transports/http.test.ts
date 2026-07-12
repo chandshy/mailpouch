@@ -147,7 +147,7 @@ describe("clientIp — X-Forwarded-For trust model", () => {
 
   it("trusts XFF when the direct peer is loopback (IPv4)", () => {
     expect(clientIp(fakeReq("127.0.0.1", { "x-forwarded-for": "203.0.113.7, 10.0.0.1" })))
-      .toBe("203.0.113.7");
+      .toBe("10.0.0.1");
   });
 
   it("trusts XFF when the direct peer is IPv6 loopback", () => {
@@ -164,9 +164,21 @@ describe("clientIp — X-Forwarded-For trust model", () => {
       .toBe("203.0.113.7");
   });
 
-  it("takes the left-most token from a comma-separated XFF list", () => {
+  it("takes the right-most proxy-observed token from a comma-separated XFF list", () => {
     expect(clientIp(fakeReq("127.0.0.1", { "x-forwarded-for": "  198.51.100.5  , 10.0.0.1 " })))
-      .toBe("198.51.100.5");
+      .toBe("10.0.0.1");
+  });
+
+  it("does not let a spoofed left-most value satisfy an IP pin", () => {
+    expect(clientIp(fakeReq("127.0.0.1", {
+      "x-forwarded-for": "192.0.2.10, 203.0.113.77",
+    }))).toBe("203.0.113.77");
+  });
+
+  it("uses the right-most token across duplicate XFF header values", () => {
+    expect(clientIp(fakeReq("127.0.0.1", {
+      "x-forwarded-for": ["192.0.2.10", "203.0.113.77"],
+    }))).toBe("203.0.113.77");
   });
 
   it("falls back to the socket address when XFF is empty", () => {

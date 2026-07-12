@@ -27,6 +27,7 @@ import {
   RateLimiter,
   readBodySafe,
   isValidOrigin,
+  isValidSettingsHost,
   isValidChallengeId,
   clientIP,
   generateAccessToken,
@@ -74,7 +75,7 @@ import {
   saveAuxiliaryCredentials,
 } from "../security/keychain.js";
 import { getAgentGrantStore, getAgentAuditLog, getServiceAccountStore } from "../agents/registry.js";
-import { sanitizeGrantConditions } from "../agents/grant-conditions.js";
+import { validateGrantConditions } from "../agents/grant-conditions.js";
 import { notifications as agentNotifications } from "../agents/notifications.js";
 import {
   readRegistry,
@@ -84,6 +85,8 @@ import {
   setActiveAccount,
 } from "../accounts/registry.js";
 import { getAccountManager } from "../accounts/manager.js";
+import { accountIdentityFingerprint } from "../accounts/identity.js";
+import type { GrantConditions } from "../agents/types.js";
 import type { AccountSpecShape } from "../config/schema.js";
 import {
   disableAuxiliaryServices,
@@ -265,6 +268,24 @@ function applySettingsConfigPatch(current: ServerConfig, patch: SettingsConfigPa
   }
 
   return next;
+}
+
+type AuxiliaryCredentialTarget = "passAccessToken" | "simpleloginApiKey";
+
+function updateAuxiliaryCredentialQuarantine(
+  config: ServerConfig,
+  targets: readonly AuxiliaryCredentialTarget[],
+  quarantined: boolean,
+): ServerConfig {
+  const next = { ...(config.keychainAuxiliaryCredentialsQuarantined ?? {}) };
+  for (const target of targets) {
+    if (quarantined) next[target] = true;
+    else delete next[target];
+  }
+  return {
+    ...config,
+    keychainAuxiliaryCredentialsQuarantined: Object.keys(next).length > 0 ? next : undefined,
+  };
 }
 
 class StaleSettingsFormError extends Error {
@@ -473,6 +494,23 @@ function safeWebhookUrl(rawUrl: string): string {
   } catch {
     return "[redacted endpoint]";
   }
+}
+
+/** Attach the current mailbox identity to an account-scoped grant. */
+function bindGrantAccountIdentity(
+  conditions: GrantConditions | undefined,
+): { conditions?: GrantConditions } | { error: string } {
+  if (!conditions?.accountId) return { conditions };
+  const account = readRegistry().accounts.find(candidate => candidate.id === conditions.accountId);
+  if (!account) {
+    return { error: `conditions.accountId does not name a configured account: ${conditions.accountId}.` };
+  }
+  return {
+    conditions: {
+      ...conditions,
+      accountIdentity: accountIdentityFingerprint(account),
+    },
+  };
 }
 
 /** Strip credential fields before sending config to the browser. */
@@ -970,6 +1008,13 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
     const url    = new URL(req.url ?? "/", `http://localhost`);
     const path   = url.pathname;
     const method = req.method ?? "GET";
+
+    // Reject DNS-rebinding authorities before emitting the shell, CSRF token,
+    // CORS policy, or any settings data.
+    if (!isValidSettingsHost(req, lan)) {
+      json(res, 421, { error: "Host not permitted." });
+      return;
+    }
     const ip     = clientIP(req);
 
     // ── Security headers ────────────────────────────────────────────────────
@@ -1445,7 +1490,7 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
         let changedActiveAccountId: string | undefined;
         let activeAccountMissing = false;
         let staleSettingsForm = false;
-        let auxiliaryClearFailed = false;
+        let auxiliaryCredentialFailure: "clear" | "save" | undefined;
         let auxiliaryStoredToKeychain = false;
         let savedCredentialStorage: NonNullable<ServerConfig["credentialStorage"]> = "config";
         await withConfigWriteLockAsync(async () => {
@@ -1462,6 +1507,15 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
           const clearPassAccessToken = !!auxiliaryCredentialPatch?.clearPassAccessToken;
           const clearSimpleloginApiKey = !!auxiliaryCredentialPatch?.clearSimpleloginApiKey;
           const connectionPatch = configPatch.connection;
+          const clearTargets: AuxiliaryCredentialTarget[] = [
+            ...(clearPassAccessToken ? ["passAccessToken" as const] : []),
+            ...(clearSimpleloginApiKey ? ["simpleloginApiKey" as const] : []),
+          ];
+          const saveTargets: AuxiliaryCredentialTarget[] = [
+            ...(auxiliaryCredentialPatch?.passAccessToken ? ["passAccessToken" as const] : []),
+            ...(auxiliaryCredentialPatch?.simpleloginApiKey ? ["simpleloginApiKey" as const] : []),
+          ];
+          const clearedQuarantineTargets: AuxiliaryCredentialTarget[] = [];
 
           auxiliaryRuntimeRefreshNeeded = !!auxiliaryCredentialPatch?.passAccessToken
             || !!auxiliaryCredentialPatch?.simpleloginApiKey
@@ -1489,8 +1543,21 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
                 // config fallback instead; this is the supported headless/no-
                 // keychain storage mode.
                 const keychainAvailable = await isKeychainAvailable();
-                if (!allClearTargetsStoredInConfig || keychainAvailable) {
-                  auxiliaryClearFailed = true;
+                const alreadyQuarantined = clearTargets.some(
+                  target => current.keychainAuxiliaryCredentialsQuarantined?.[target] === true,
+                );
+                if (
+                  !allClearTargetsStoredInConfig
+                  || keychainAvailable
+                  || current.credentialStorage === "keychain"
+                  || alreadyQuarantined
+                ) {
+                  // A batch delete can remove one entry and fail on the next.
+                  // Persist a per-secret quarantine before returning so a
+                  // restart cannot rehydrate either uncertain credential.
+                  current = updateAuxiliaryCredentialQuarantine(current, clearTargets, true);
+                  saveConfig(current);
+                  auxiliaryCredentialFailure = "clear";
                   // deleteAuxiliaryCredentials is intentionally all-or-nothing
                   // from the caller's perspective, but an OS keychain can
                   // still have deleted one selected entry before reporting a
@@ -1513,7 +1580,57 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
                   "OS keychain unavailable; cleared only configuration-backed auxiliary credentials",
                   "SettingsServer",
                 );
+              } else {
+                clearedQuarantineTargets.push(...clearTargets);
               }
+            }
+          }
+
+          let patchForSave = configPatch;
+          if (saveTargets.length > 0) {
+            const stored = await saveAuxiliaryCredentials(
+              auxiliaryCredentialPatch?.passAccessToken ?? "",
+              auxiliaryCredentialPatch?.simpleloginApiKey ?? "",
+            );
+            if (stored) {
+              auxiliaryStoredToKeychain = true;
+              clearedQuarantineTargets.push(...saveTargets);
+              patchForSave = {
+                ...configPatch,
+                connection: {
+                  ...configPatch.connection,
+                  ...(auxiliaryCredentialPatch?.passAccessToken ? { passAccessToken: undefined } : {}),
+                  ...(auxiliaryCredentialPatch?.simpleloginApiKey ? { simpleloginApiKey: undefined } : {}),
+                },
+              };
+            } else {
+              const keychainAvailable = await isKeychainAvailable();
+              const mayHaveDurableKeychainState = current.credentialStorage === "keychain"
+                || saveTargets.some(
+                  target => current.keychainAuxiliaryCredentialsQuarantined?.[target] === true,
+                );
+              if (keychainAvailable || mayHaveDurableKeychainState) {
+                // setPassword can update one entry before a later entry throws.
+                // Persist the quarantine before any requested config/account
+                // mutation so restart remains fail-closed.
+                current = updateAuxiliaryCredentialQuarantine(current, saveTargets, true);
+                saveConfig(current);
+                auxiliaryCredentialFailure = "save";
+                try {
+                  await disableAuxiliaryServices();
+                } catch (error) {
+                  logger.warn(
+                    "Could not fail-close live auxiliary services after a partial credential-save failure",
+                    "SettingsServer",
+                    error,
+                  );
+                }
+                return;
+              }
+              logger.warn(
+                "OS keychain unavailable; storing auxiliary credentials in the owner-only configuration",
+                "SettingsServer",
+              );
             }
           }
 
@@ -1535,29 +1652,8 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
             current = loadConfigForSettingsWrite();
           }
 
-          let patchForSave = configPatch;
-          if (auxiliaryCredentialPatch?.passAccessToken || auxiliaryCredentialPatch?.simpleloginApiKey) {
-            const stored = await saveAuxiliaryCredentials(
-              auxiliaryCredentialPatch.passAccessToken ?? "",
-              auxiliaryCredentialPatch.simpleloginApiKey ?? "",
-            );
-            if (stored) {
-              auxiliaryStoredToKeychain = true;
-              // The keychain is now authoritative. Preserve every other
-              // validated field while removing plaintext auxiliary secrets
-              // from the config patch before it reaches disk.
-              patchForSave = {
-                ...configPatch,
-                connection: {
-                  ...configPatch.connection,
-                  ...(auxiliaryCredentialPatch.passAccessToken ? { passAccessToken: undefined } : {}),
-                  ...(auxiliaryCredentialPatch.simpleloginApiKey ? { simpleloginApiKey: undefined } : {}),
-                },
-              };
-            }
-          }
-
           current = applySettingsConfigPatch(current, patchForSave);
+          current = updateAuxiliaryCredentialQuarantine(current, clearedQuarantineTargets, false);
           if (activeAccountPatch) {
             // No Bridge credential is ever persisted through the legacy shared
             // connection object; account registry storage is authoritative.
@@ -1573,8 +1669,12 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
         if (staleSettingsForm) {
           json(res, 409, { error: "Configuration was reset after this form was loaded. Refresh settings and apply the change again." }); return;
         }
-        if (auxiliaryClearFailed) {
-          json(res, 503, { error: "Could not clear auxiliary credentials from the OS keychain. No configuration changes were saved." }); return;
+        if (auxiliaryCredentialFailure) {
+          const action = auxiliaryCredentialFailure === "clear" ? "clear" : "save";
+          json(res, 503, {
+            error: `Could not ${action} auxiliary credentials in the OS keychain. Requested settings changes were not saved; affected integrations remain disabled.`,
+          });
+          return;
         }
         if (activeAccountMissing) {
           json(res, 409, { error: "Active account changed before configuration could be saved." }); return;
@@ -1759,9 +1859,9 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
             bridgeProc.unref();
           }
         } catch (e: unknown) {
-          const msg = e instanceof Error ? e.message : String(e);
+          logger.error("Failed to launch Proton Bridge", "SettingsServer", e);
           json(res, 200, { launched: false, alreadyRunning: false, reachable: false,
-            error: `Failed to launch Bridge: ${msg}` });
+            error: "Failed to launch Bridge. Check the server log for details." });
           return;
         }
 
@@ -1887,11 +1987,11 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
           try { chmodSync(destPath, 0o600); } catch { /* platform may not support chmod */ }
           json(res, 200, { ok: true, path: destPath, size: Buffer.byteLength(text, "utf8") });
         } catch (e: unknown) {
-          const msg = e instanceof Error ? e.message : String(e);
           if ((e as { code?: string })?.code === "TOO_LARGE") {
             json(res, 413, { error: "Cert file too large (max 256 KB)." });
           } else {
-            json(res, 500, { error: `Failed to save certificate: ${msg}` });
+            logger.error("Failed to save the Bridge certificate", "SettingsServer", e);
+            json(res, 500, { error: "Failed to save the certificate. Check the server log for details." });
           }
         }
         return;
@@ -1962,8 +2062,8 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
 
           json(res, 200, { current, latest, updateAvailable, name });
         } catch (e: unknown) {
-          const msg = e instanceof Error ? e.message : String(e);
-          json(res, 500, { error: `Update check failed: ${msg}` });
+          logger.warn("Update check failed", "SettingsServer", e);
+          json(res, 500, { error: "Update check failed. Check the server log for details." });
         }
         return;
       }
@@ -2009,8 +2109,8 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
             setTimeout(() => secOpts.onRestartRequested!(), 400);
           }
         } catch (e: unknown) {
-          const msg = e instanceof Error ? e.message : String(e);
-          json(res, 200, { ok: false, error: msg });
+          logger.error("MailPouch update failed", "SettingsServer", e);
+          json(res, 200, { ok: false, error: "Update failed. Check the server log for details." });
         }
         return;
       }
@@ -2152,7 +2252,8 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
           });
           json(res, 200, { lines: slice, page: safePage, pages, total });
         } catch (e: unknown) {
-          json(res, 500, { error: e instanceof Error ? e.message : String(e) });
+          logger.warn("Could not read the MailPouch log", "SettingsServer", e);
+          json(res, 500, { error: "Could not read the log file." });
         }
         return;
       }
@@ -2165,7 +2266,8 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
           if (existsSync(logPath)) writeFileSync(logPath, "", "utf8");
           json(res, 200, { ok: true });
         } catch (e: unknown) {
-          json(res, 500, { error: e instanceof Error ? e.message : String(e) });
+          logger.warn("Could not clear the MailPouch log", "SettingsServer", e);
+          json(res, 500, { error: "Could not clear the log file." });
         }
         return;
       }
@@ -2270,9 +2372,18 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
             json(res, 400, { error: `Invalid preset '${preset}'. Must be one of: ${[...presets].join(", ")}.` });
             return;
           }
-          // Interactive and service-account grants share one strict condition
-          // sanitizer so a per-tool hourly cap cannot disappear on issuance.
-          const conditions = sanitizeGrantConditions(body.conditions);
+          // Access-control input is all-or-nothing: dropping one malformed
+          // restriction would silently issue a broader credential. Bind an
+          // account-scoped grant to the mailbox identity that exists now.
+          const parsedConditions = validateGrantConditions(body.conditions);
+          if (!parsedConditions.ok) {
+            json(res, 400, { error: parsedConditions.error }); return;
+          }
+          const boundConditions = bindGrantAccountIdentity(parsedConditions.conditions);
+          if ("error" in boundConditions) {
+            json(res, 400, { error: boundConditions.error }); return;
+          }
+          const conditions = boundConditions.conditions;
 
           const { account, clientSecret } = sa.issue({
             name,
@@ -2345,10 +2456,19 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
             toolOverrides = out as Partial<Record<ToolName, boolean>>;
           }
 
-          // Whitelist + normalize conditions once for every grant type. In
-          // particular, aliases collapse to canonical hourly-cap keys and zero
-          // remains a deliberate deny-all cap.
-          const conditions = sanitizeGrantConditions(body.conditions);
+          // Reject malformed restrictions instead of silently dropping them:
+          // an invalid folder/account/cap must never become unrestricted
+          // authority. Account bindings also capture the current mailbox
+          // identity so a same-ID registry repoint requires reapproval.
+          const parsedConditions = validateGrantConditions(body.conditions);
+          if (!parsedConditions.ok) {
+            json(res, 400, { error: parsedConditions.error }); return;
+          }
+          const boundConditions = bindGrantAccountIdentity(parsedConditions.conditions);
+          if ("error" in boundConditions) {
+            json(res, 400, { error: boundConditions.error }); return;
+          }
+          const conditions = boundConditions.conditions;
 
           const grant = grants.approve({
             clientId,
@@ -2594,7 +2714,8 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
 
           json(res, 200, { ok: true, configPath: claudeConfigPath, transport: built.transport, entry: built.entry, ...(built.coercedToHttp ? { coercedToHttp: true } : {}), ...(built.warning ? { warning: built.warning } : {}) });
         } catch (e: unknown) {
-          json(res, 200, { ok: false, error: e instanceof Error ? e.message : String(e) });
+          logger.warn("Could not write the Claude Desktop configuration", "SettingsServer", e);
+          json(res, 200, { ok: false, error: "Could not write the Claude Desktop configuration. Check the server log for details." });
         }
         return;
       }
@@ -2663,7 +2784,8 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
 
           json(res, 200, { ok: true, configPath: claudeConfigPath, transport: built.transport, entry: built.entry, ...(built.coercedToHttp ? { coercedToHttp: true } : {}), ...(built.warning ? { warning: built.warning } : {}) });
         } catch (e: unknown) {
-          json(res, 200, { ok: false, error: e instanceof Error ? e.message : String(e) });
+          logger.warn("Could not write the Claude Code configuration", "SettingsServer", e);
+          json(res, 200, { ok: false, error: "Could not write the Claude Code configuration. Check the server log for details." });
         }
         return;
       }

@@ -547,7 +547,7 @@ export class SimpleIMAPService {
         catch { try { (stale as unknown as { close?: () => void }).close?.(); } catch { /* already gone */ } }
       }
 
-      this.client = new ImapFlow({
+      const client = new ImapFlow({
         host,
         port,
         secure: useSecure,
@@ -559,22 +559,25 @@ export class SimpleIMAPService {
         tls: tlsOptions,
         connectionTimeout: 30000,
       });
+      this.client = client;
 
       // Setup connection event handlers (only if client has event emitter methods)
-      if (typeof this.client.on === 'function') {
-        this.client.on('close', () => {
+      if (typeof client.on === 'function') {
+        client.on('close', () => {
           logger.warn('IMAP connection closed', 'IMAPService');
-          this.isConnected = false;
+          // A retired client's socket can emit close after a replacement is
+          // already connected. Never let that stale event mutate new state.
+          if (this.client === client) this.isConnected = false;
         });
 
-        this.client.on('error', (err) => {
+        client.on('error', (err) => {
           logger.error('IMAP connection error', 'IMAPService', err);
-          this.isConnected = false;
+          if (this.client === client) this.isConnected = false;
         });
       }
 
-      await this.client.connect();
-      this.isConnected = true;
+      await client.connect();
+      if (this.client === client) this.isConnected = true;
 
       logger.info('IMAP connection established', 'IMAPService');
 
@@ -634,21 +637,42 @@ export class SimpleIMAPService {
   /** Log out and close the IMAP connection gracefully. */
   async disconnect(): Promise<void> {
     return tracer.span('imap.disconnect', {}, async () => {
-    if (this.client && this.isConnected) {
-      logger.debug('Disconnecting from IMAP server', 'IMAPService');
-      // IMAP-019: a rejected logout() (Bridge ungracefully closing the socket
-      // during shutdown is common) must NOT leave client/isConnected stale —
-      // ensureConnection() would then trust a dead socket. Always tear down.
+    const client = this.client;
+    const wasConnected = this.isConnected;
+
+    // Detach first and unconditionally. A failed or half-open ImapFlow client
+    // can exist while isConnected=false; retaining it keeps its socket/auth
+    // state reachable and lets retirement falsely claim cleanup succeeded.
+    this.client = null;
+    this.isConnected = false;
+    if (!client) return;
+
+    logger.debug('Disconnecting from IMAP server', 'IMAPService');
+    if (!wasConnected) {
+      // logout() expects an established session. Prefer ImapFlow's hard close
+      // for a connecting/failed client, falling back to logout for compatible
+      // test or alternate implementations that expose only that method.
       try {
-        await this.client.logout();
+        const close = (client as unknown as { close?: () => void }).close;
+        if (typeof close === 'function') close.call(client);
+        else await client.logout();
       } catch (error) {
-        logger.warn('IMAP logout() failed; forcing local disconnect', 'IMAPService', error);
-      } finally {
-        this.client = null;
-        this.isConnected = false;
+        logger.warn('IMAP half-open client close failed; local disconnect retained', 'IMAPService', error);
       }
       logger.info('IMAP disconnected', 'IMAPService');
+      return;
     }
+
+    // IMAP-019: a rejected logout() (Bridge ungracefully closing the socket
+    // during shutdown is common) must NOT leave client/isConnected stale.
+    try {
+      await client.logout();
+    } catch (error) {
+      logger.warn('IMAP logout() failed; forcing local disconnect', 'IMAPService', error);
+      try { (client as unknown as { close?: () => void }).close?.(); }
+      catch { /* local references are already detached */ }
+    }
+    logger.info('IMAP disconnected', 'IMAPService');
     }); // end tracer.span('imap.disconnect')
   }
 

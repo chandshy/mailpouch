@@ -38,6 +38,8 @@ export interface GrantCheckContext {
   callerIp?: string;
   /** Account the call will operate on; checked against conditions.accountId. */
   targetAccountId?: string;
+  /** Opaque identity of targetAccountId, checked against the approval-time binding. */
+  targetAccountIdentity?: string;
   /** The global config preset — the upper bound for the grant. */
   globalPreset: PermissionPreset;
 }
@@ -116,11 +118,29 @@ export class GrantManager {
       return { allowed: false, reason: `Grant for '${grant.clientName}' expired.` };
     }
 
-    if (grant.conditions?.accountId && grant.conditions.accountId !== ctx.targetAccountId) {
-      return {
-        allowed: false,
-        reason: `Grant for '${grant.clientName}' is bound to account ${grant.conditions.accountId}; call targeted ${ctx.targetAccountId ?? "(unknown)"}.`,
-      };
+    if (grant.conditions?.accountId) {
+      if (grant.conditions.accountId !== ctx.targetAccountId) {
+        return {
+          allowed: false,
+          reason: `Grant for '${grant.clientName}' is bound to account ${grant.conditions.accountId}; call targeted ${ctx.targetAccountId ?? "(unknown)"}.`,
+        };
+      }
+      // The registry ID alone is not an ownership boundary: an operator can
+      // edit that same ID to point at another mailbox while this daemon is
+      // stopped. Require the approval-time fingerprint on every call so old
+      // and legacy grants cannot silently transfer to the replacement mailbox.
+      if (!grant.conditions.accountIdentity) {
+        return {
+          allowed: false,
+          reason: `Grant for '${grant.clientName}' predates durable account identity binding; reapprove it for account ${grant.conditions.accountId}.`,
+        };
+      }
+      if (!ctx.targetAccountIdentity || grant.conditions.accountIdentity !== ctx.targetAccountIdentity) {
+        return {
+          allowed: false,
+          reason: `Grant for '${grant.clientName}' was approved for a different mailbox identity under account ${grant.conditions.accountId}; reapproval is required.`,
+        };
+      }
     }
 
     if (grant.conditions?.ipPins && grant.conditions.ipPins.length > 0) {
@@ -163,16 +183,18 @@ export class GrantManager {
       return { allowed: false, reason: `Tool '${tool}' is not in the custom grant surface for '${grant.clientName}' (custom grants allow only explicitly-overridden tools).` };
     }
 
-    // No override — apply the intersection of grant preset and global preset.
-    const effective = intersectPresets(grant.preset, normalizedCtx.globalPreset);
-    if (!this.globalAllows(effective, tool)) {
-      return { allowed: false, reason: `Tool '${tool}' is outside the effective preset '${effective}' for '${grant.clientName}'.` };
+    // No override — intersect the actual per-tool maps. Preset names are not a
+    // total order: send_only includes sending but omits analytics, while
+    // read_only includes analytics but omits sending. Choosing either preset
+    // by rank can therefore enable a tool absent from the other side.
+    if (!this.globalAllows(grant.preset, tool) || !this.globalAllows(normalizedCtx.globalPreset, tool)) {
+      return { allowed: false, reason: `Tool '${tool}' is outside the grant/global preset intersection for '${grant.clientName}'.` };
     }
 
     return this.applyHourlyRateCap(
       grant,
       tool,
-      this.checkFolderCondition(grant, normalizedCtx, effective),
+      this.checkFolderCondition(grant, normalizedCtx, grant.preset),
       reserveHourlyToolSlot,
     );
   }
@@ -730,12 +752,12 @@ function extractLegacyFolderArg(args: Record<string, unknown> | undefined): stri
  * source/destination policy.
  */
 const FOLDER_AGNOSTIC_TOOLS = new Set<string>([
-  "get_email_stats", "get_email_analytics", "get_volume_trends",
-  "get_contacts", "get_correspondence_profile",
-  "list_labels", "get_folders", "sync_folders",
-  "get_connection_status", "get_unread_count", "get_email_stats",
+  // Mail-derived analytics, folder/label listings, unread counts, and FTS
+  // status/rebuild are intentionally absent. Their handlers currently inspect
+  // whole-account INBOX/Sent data or expose every folder's metadata, so they
+  // must fail closed until they implement allowlist-aware filtering.
+  "get_connection_status",
   "clear_cache", "get_logs", "start_bridge", "shutdown_server", "restart_server",
-  "fts_rebuild", "fts_status",
   "list_scheduled_emails", "cancel_scheduled_email",
   "list_pending_reminders", "cancel_reminder", "check_reminders",
   "alias_list", "alias_create_random", "alias_create_custom",
@@ -745,26 +767,3 @@ const FOLDER_AGNOSTIC_TOOLS = new Set<string>([
   "schedule_email",
   "request_permission_escalation", "check_escalation_status",
 ]);
-
-/**
- * Intersect two presets — return the stricter of the two. Ordering is
- * read_only < send_only < supervised < full.
- *
- * PERM-013: `a` (the grant preset) is never "custom" here — check() short-
- * circuits a custom grant to its explicit toolOverrides before reaching this
- * function, because buildPermissions("custom") is all-enabled and carries no
- * real restriction. `b` (the global preset) may still be "custom"; it sorts at
- * the top of the rank (most permissive preset-level ceiling), and the live
- * per-tool custom config is enforced separately by the global permission gate
- * (PermissionManager.check), so a custom global cannot silently widen a grant.
- */
-function intersectPresets(a: PermissionPreset, b: PermissionPreset): PermissionPreset {
-  const rank: Record<PermissionPreset, number> = {
-    read_only: 0,
-    send_only: 1,
-    supervised: 2,
-    full: 3,
-    custom: 3,
-  };
-  return rank[a] <= rank[b] ? a : b;
-}

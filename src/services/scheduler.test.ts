@@ -5,7 +5,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { SchedulerService } from "./scheduler.js";
 import type { SMTPService } from "./smtp-service.js";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, readdirSync, statSync } from "fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync, readdirSync, statSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -161,6 +161,50 @@ describe("SchedulerService", () => {
     const item = svc.list().find(i => i.id === id)!;
     expect(item.status).toBe("sent");
     expect(smtp.sendEmail).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not send unless the in-flight transition is durably persisted", async () => {
+    const smtp = makeSMTP();
+    const svc = new SchedulerService(smtp, storePath);
+    const id = svc.schedule(makeOptions(), futureDate(120));
+
+    // Preserve the successfully-created queue record, then make the next
+    // adjacent-temp rename fail deterministically by replacing its destination
+    // with a directory. This models EACCES/ENOSPC/rename failures without
+    // platform-specific permission assumptions.
+    rmSync(storePath);
+    mkdirSync(storePath);
+    vi.advanceTimersByTime(121 * 1000);
+
+    await expect(svc.processDue()).rejects.toThrow();
+
+    expect(smtp.sendEmail).not.toHaveBeenCalled();
+    expect((svc as unknown as { items: Array<{ id: string; status: string }> }).items)
+      .toContainEqual(expect.objectContaining({ id, status: "pending" }));
+  });
+
+  it("retains an old overdue record while its durable send is in flight", async () => {
+    let resolveSend!: (value: { success: boolean; messageId: string }) => void;
+    const sendPromise = new Promise<{ success: boolean; messageId: string }>(resolve => { resolveSend = resolve; });
+    const smtp = { sendEmail: vi.fn().mockReturnValue(sendPromise) } as unknown as SMTPService;
+    const svc = new SchedulerService(smtp, storePath);
+    const id = svc.schedule(makeOptions(), futureDate(120));
+    const item = (svc as unknown as { items: Array<{ id: string; createdAt: string; scheduledAt: string }> })
+      .items.find(candidate => candidate.id === id)!;
+    item.createdAt = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString();
+    item.scheduledAt = new Date(Date.now() - 1_000).toISOString();
+    svc.stop();
+
+    const processing = svc.processDue();
+    await Promise.resolve();
+
+    expect(JSON.parse(readFileSync(storePath, "utf-8"))).toContainEqual(
+      expect.objectContaining({ id, status: "sending" }),
+    );
+    expect(svc.cancel(id)).toEqual({ ok: false, error: "in_flight" });
+
+    resolveSend({ success: true, messageId: "already-on-wire" });
+    await processing;
   });
 
   it("uses the rebound SMTP service for deliveries that start after an account switch", async () => {
@@ -558,7 +602,10 @@ describe("SchedulerService", () => {
     });
     expect(result.backupPath).toMatch(/\.quarantine-.*\.bak$/);
     expect(readFileSync(result.backupPath!, "utf-8")).toBe(rawBefore);
-    expect(statSync(result.backupPath!).mode & 0o777).toBe(0o600);
+    // Windows does not expose POSIX permission bits through stat/chmod.
+    if (process.platform !== "win32") {
+      expect(statSync(result.backupPath!).mode & 0o777).toBe(0o600);
+    }
     expect(svc.list("account-a")).toEqual([]);
     expect(svc.list("account-b").map(item => item.id)).toEqual([idB]);
     expect(JSON.parse(readFileSync(storePath, "utf-8")).map((item: { id: string }) => item.id)).not.toContain(idA);
@@ -612,7 +659,9 @@ describe("SchedulerService", () => {
     const backup = readdirSync(tmpDir).find(entry => entry.startsWith("scheduled.json.quarantine-") && entry.endsWith(".bak"));
     expect(backup).toBeTruthy();
     expect(readFileSync(join(tmpDir, backup!), "utf-8")).toBe(raw);
-    expect(statSync(join(tmpDir, backup!)).mode & 0o777).toBe(0o600);
+    if (process.platform !== "win32") {
+      expect(statSync(join(tmpDir, backup!)).mode & 0o777).toBe(0o600);
+    }
     expect(svc.list("account-a")).toEqual([]);
     expect(JSON.parse(readFileSync(storePath, "utf-8"))).toEqual([]);
     svc.stop();
