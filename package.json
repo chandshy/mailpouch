@@ -1,6 +1,6 @@
 {
   "name": "mailpouch",
-  "version": "3.1.0",
+  "version": "3.2.0",
   "description": "mailpouch — lean, permission-gated MCP access to Proton Mail via Proton Bridge, with up to 86 tools, resources, and prompts.",
   "type": "module",
   "main": "dist/index.js",
