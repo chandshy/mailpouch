@@ -61,7 +61,7 @@ export const defs: ToolDef[] = [
   {
     name: "pass_get",
     title: "Get Proton Pass Item",
-    description: "Retrieve a single Proton Pass item by ID, INCLUDING its decrypted secret fields (password, TOTP, note body). Every call is audit-logged. Prefer pass_list / pass_search for non-credential lookups.",
+    description: "Retrieve a single Proton Pass item by ID, INCLUDING its decrypted secret fields (password, TOTP, note body). Every call is audit-logged and requires { confirmed: true }. Prefer pass_list / pass_search for non-credential lookups.",
     annotations: { destructiveHint: true },
     inputSchema: {
       type: "object",
@@ -87,7 +87,7 @@ export const defs: ToolDef[] = [
   {
     name: "pass_totp",
     title: "Get Proton Pass TOTP Code",
-    description: "Retrieve the current TOTP/2FA code for a Proton Pass item by ID. Reveals a live second factor — every call is audit-logged. Codes are time-limited; fetch immediately before use.",
+    description: "Retrieve the current TOTP/2FA code for a Proton Pass item by ID. Reveals a live second factor — every call is audit-logged and requires { confirmed: true }. Codes are time-limited; fetch immediately before use.",
     annotations: { destructiveHint: true },
     inputSchema: {
       type: "object",

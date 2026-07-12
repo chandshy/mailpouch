@@ -19,7 +19,7 @@ import https from "https";
 import os from "os";
 import nodePath from "path";
 import { fileURLToPath } from "url";
-import { readFileSync, writeFileSync, renameSync, existsSync, statSync, openSync, readSync, closeSync, chmodSync } from "fs";
+import { readFileSync, writeFileSync, renameSync, existsSync, statSync, chmodSync } from "fs";
 import { spawn, spawnSync } from "child_process";
 import { Socket } from "net";
 import { randomBytes, timingSafeEqual } from "crypto";
@@ -28,11 +28,12 @@ import {
   readBodySafe,
   isValidOrigin,
   isValidChallengeId,
-  sanitizeText,
   clientIP,
   generateAccessToken,
   hasValidAccessToken,
   hasValidBootstrapToken,
+  SettingsBrowserSessionStore,
+  formatSettingsSessionCookie,
   tryGenerateSelfSignedCert,
   getPrimaryLanIP,
   GENERAL_RATE_LIMIT,
@@ -41,10 +42,11 @@ import {
   type TlsCredentials,
 } from "./security.js";
 import {
+  invalidateConfigCache,
   loadConfig,
   saveConfig,
-  saveConfigWithCredentials,
   getConfigPath,
+  withConfigWriteLockAsync,
   defaultConfig,
   buildPermissions,
   configExists,
@@ -54,6 +56,7 @@ import {
   ALL_TOOLS,
   PERMISSION_PRESETS,
   TOOL_CATEGORIES,
+  toolsForTier,
   type ServerConfig,
   type PermissionPreset,
   type ToolName,
@@ -63,12 +66,15 @@ import {
   approveEscalation,
   denyEscalation,
   getAuditLog,
-  type EscalationRecord,
-  type AuditEntry,
 } from "../permissions/escalation.js";
 import { getLogFilePath, logger } from "../utils/logger.js";
+import {
+  deleteAuxiliaryCredentials,
+  isKeychainAvailable,
+  saveAuxiliaryCredentials,
+} from "../security/keychain.js";
 import { getAgentGrantStore, getAgentAuditLog, getServiceAccountStore } from "../agents/registry.js";
-import type { GrantConditions } from "../agents/types.js";
+import { sanitizeGrantConditions } from "../agents/grant-conditions.js";
 import { notifications as agentNotifications } from "../agents/notifications.js";
 import {
   readRegistry,
@@ -79,6 +85,10 @@ import {
 } from "../accounts/registry.js";
 import { getAccountManager } from "../accounts/manager.js";
 import type { AccountSpecShape } from "../config/schema.js";
+import {
+  disableAuxiliaryServices,
+  refreshAuxiliaryServices,
+} from "../services/auxiliary-service-runtime.js";
 import { buildShellHtml } from "./shell.js";
 import { buildWizardHtml } from "./tabs/wizard.js";
 import { buildSetupHtml } from "./tabs/setup.js";
@@ -87,6 +97,8 @@ import { buildAccountsHtml } from "./tabs/accounts.js";
 import { buildAgentsHtml } from "./tabs/agents.js";
 import { buildStatusHtml } from "./tabs/status.js";
 import { buildLogsHtml } from "./tabs/logs.js";
+import { buildClaudeCodeEntry, claudeCodeConfigPath, claudeDesktopConfigPath } from "./client-config.js";
+import { resetConfiguration } from "./reset.js";
 
 // ─── TCP connectivity test ─────────────────────────────────────────────────────
 
@@ -103,70 +115,6 @@ function tcpCheck(host: string, port: number, timeoutMs = 5000): Promise<boolean
 
 // ─── REST API helpers ──────────────────────────────────────────────────────────
 
-/**
- * UI-010: resolve the Claude Desktop config path for the current platform.
- * Returns null on Windows when %APPDATA% is unset (a service running without a
- * loaded user profile) — the earlier `process.env.APPDATA ?? ""` fell through
- * to a CWD-relative `Claude\claude_desktop_config.json` that existsSync could
- * match by accident or that a write could clobber.
- */
-function claudeDesktopConfigPath(): string | null {
-  if (process.platform === "win32") {
-    const appData = process.env.APPDATA;
-    if (!appData) return null;
-    return nodePath.join(appData, "Claude", "claude_desktop_config.json");
-  }
-  if (process.platform === "darwin") {
-    return nodePath.join(os.homedir(), "Library", "Application Support", "Claude", "claude_desktop_config.json");
-  }
-  return nodePath.join(os.homedir(), ".config", "Claude", "claude_desktop_config.json");
-}
-
-/** Claude Code stores its MCP servers in `~/.claude.json` (same on every
- *  platform). */
-function claudeCodeConfigPath(): string {
-  return nodePath.join(os.homedir(), ".claude.json");
-}
-
-/**
- * Build the `mcpServers.mailpouch` entry an MCP host should use for the given
- * transport. http points at the daemon's /mcp endpoint; stdio spawns a local
- * instance (MAILPOUCH_FORCE_STDIO).
- *
- * Daemon-aware: when `remoteMode` is on, a stdio entry would collide with the
- * shared daemon's per-account singleton (the spawn exits → the host shows
- * mailpouch as dead). So a stdio request is **coerced to http** — we never emit
- * a config the user's host can't actually run.
- */
-function buildClaudeCodeEntry(transport: "stdio" | "http"): { entry: Record<string, unknown>; transport: "stdio" | "http"; coercedToHttp?: boolean; warning?: string } {
-  const cn = (loadConfig() ?? defaultConfig()).connection;
-  const daemonMode = !!cn?.remoteMode;
-  const coercedToHttp = transport === "stdio" && daemonMode;
-  const effective = coercedToHttp ? "http" : transport;
-
-  if (effective === "http") {
-    const scheme = cn?.remoteTlsCertPath && cn?.remoteTlsKeyPath ? "https" : "http";
-    const host = cn?.remoteHost || "127.0.0.1";
-    const port = cn?.remotePort ?? 8788;
-    const mcpPath = cn?.remotePath || "/mcp";
-    const entry = { type: "http", url: `${scheme}://${host}:${port}${mcpPath}` };
-    const warning = coercedToHttp
-      ? "A shared mailpouch daemon is configured (remoteMode), so the app connects over HTTP — a per-computer (stdio) entry would conflict with the daemon and fail to start."
-      : (!cn?.remoteMode || !cn?.remoteOauthEnabled)
-      ? "HTTP transport needs the mailpouch daemon running with remoteMode + remoteOauthEnabled. Enable remote mode and start the daemon, then approve the agent in the Agents tab."
-      : undefined;
-    return { entry, transport: "http", ...(coercedToHttp ? { coercedToHttp } : {}), ...(warning ? { warning } : {}) };
-  }
-  const distIndexPath = nodePath.resolve(_moduleDir, "../index.js");
-  const entry = {
-    type: "stdio",
-    command: "node",
-    args: [distIndexPath],
-    env: { MAILPOUCH_FORCE_STDIO: "1" },
-  };
-  return { entry, transport: "stdio" };
-}
-
 function json(res: http.ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body);
   res.writeHead(status, {
@@ -180,21 +128,383 @@ function json(res: http.ServerResponse, status: number, body: unknown): void {
   res.end(payload);
 }
 
-/** Strip password fields before sending config to the browser */
+/**
+ * Rebuild account-scoped services after a registry mutation, then warm only
+ * the account that changed. Rebuild is awaited so callers never report a
+ * successful mutation against stale services; the network connection itself
+ * remains best-effort and must not turn a persisted settings change into a
+ * failed HTTP response.
+ */
+async function refreshAccountManager(changedAccountId: string | undefined, operation: string): Promise<boolean> {
+  const manager = getAccountManager();
+  if (!manager) return false;
+  try {
+    await manager.rebuildFromRegistryAsync();
+  } catch (error) {
+    logger.warn(`Could not rebuild AccountManager after ${operation}`, "SettingsServer", error);
+    return false;
+  }
+  if (changedAccountId) {
+    void manager.connectAccount(changedAccountId).catch(error =>
+      logger.warn(`Could not connect changed account "${changedAccountId}" after ${operation}`, "SettingsServer", error),
+    );
+  }
+  return true;
+}
+
+/**
+ * Rebuild mailbox services after a reset without ever rehydrating a credential
+ * that the reset could not remove from the OS keychain.
+ *
+ * A normal async rebuild intentionally prefers keychain entries. That is the
+ * wrong policy after reset cleanup reports a failure: a stale `primary`
+ * credential could otherwise be loaded straight back into the newly-default
+ * account. In that case AccountManager enters its in-process
+ * hydration-suspended mode and rebuilds only from the unhydrated registry;
+ * reset also persists the corresponding restart-safe quarantine marker.
+ */
+async function refreshAccountManagerAfterReset(credentialsCleared: boolean): Promise<boolean> {
+  if (credentialsCleared) {
+    return refreshAccountManager(undefined, "configuration reset");
+  }
+
+  const manager = getAccountManager();
+  if (!manager) return false;
+  try {
+    manager.rebuildFromRegistryWithoutKeychain();
+    return true;
+  } catch (error) {
+    logger.warn(
+      "Could not rebuild AccountManager from the unhydrated registry after incomplete configuration reset",
+      "SettingsServer",
+      error,
+    );
+    return false;
+  }
+}
+
+const SECRET_PLACEHOLDER = "••••••••";
+
+/**
+ * A validated, field-level settings mutation.  Parsing an HTTP request must
+ * never mutate the configuration object returned by loadConfig(): that object
+ * can be the loader cache and, more importantly, it may be stale by the time
+ * this request obtains the cross-process write lock.
+ */
+interface SettingsConfigPatch {
+  connection?: Partial<ServerConfig["connection"]>;
+  settingsPort?: number;
+  requireDestructiveConfirm?: boolean;
+  desktopNotificationsEnabled?: boolean;
+  surfaceSecurityNotifications?: boolean;
+  autoOpenApprovalWindow?: boolean;
+  tosAcknowledged?: ServerConfig["tosAcknowledged"];
+  permissions?: {
+    preset?: PermissionPreset;
+    tools?: Partial<ServerConfig["permissions"]["tools"]>;
+  };
+  responseLimits?: Partial<NonNullable<ServerConfig["responseLimits"]>>;
+}
+
+/**
+ * A write-lock holder must read from disk, rather than accidentally reuse a
+ * 15-second process-local cache entry captured before it waited for the lock.
+ * The lock prevents cooperative writers from changing the file after this
+ * point; invalidating first makes the read the current state at that point.
+ */
+function loadConfigForSettingsWrite(): ServerConfig {
+  invalidateConfigCache();
+  return loadConfig() ?? defaultConfig();
+}
+
+/**
+ * Apply a settings request as a pure field-level patch.  In particular, never
+ * mutate the loader's cached config object while validation, keychain work, or
+ * another writer is still in progress.  This is what lets independent saves
+ * (for example Settings Port and Permissions) retain each other's changes.
+ */
+function applySettingsConfigPatch(current: ServerConfig, patch: SettingsConfigPatch): ServerConfig {
+  const next: ServerConfig = {
+    ...current,
+    connection: { ...current.connection },
+    permissions: {
+      ...current.permissions,
+      tools: { ...current.permissions.tools },
+    },
+    ...(current.responseLimits ? { responseLimits: { ...current.responseLimits } } : {}),
+    ...(current.accounts ? { accounts: current.accounts.map(account => ({ ...account })) } : {}),
+    ...(current.tosAcknowledged ? { tosAcknowledged: { ...current.tosAcknowledged } } : {}),
+  };
+
+  if (patch.connection) {
+    next.connection = { ...next.connection, ...patch.connection };
+  }
+  if (patch.settingsPort !== undefined) next.settingsPort = patch.settingsPort;
+  if (patch.requireDestructiveConfirm !== undefined) next.requireDestructiveConfirm = patch.requireDestructiveConfirm;
+  if (patch.desktopNotificationsEnabled !== undefined) next.desktopNotificationsEnabled = patch.desktopNotificationsEnabled;
+  if (patch.surfaceSecurityNotifications !== undefined) next.surfaceSecurityNotifications = patch.surfaceSecurityNotifications;
+  if (patch.autoOpenApprovalWindow !== undefined) next.autoOpenApprovalWindow = patch.autoOpenApprovalWindow;
+  if (patch.tosAcknowledged !== undefined) next.tosAcknowledged = { ...patch.tosAcknowledged };
+
+  if (patch.permissions) {
+    next.permissions = {
+      preset: patch.permissions.preset ?? next.permissions.preset,
+      tools: { ...next.permissions.tools, ...patch.permissions.tools },
+    };
+  }
+
+  if (patch.responseLimits) {
+    const currentLimits = next.responseLimits ?? defaultConfig().responseLimits!;
+    next.responseLimits = {
+      maxResponseBytes: patch.responseLimits.maxResponseBytes ?? currentLimits.maxResponseBytes,
+      maxEmailBodyChars: patch.responseLimits.maxEmailBodyChars ?? currentLimits.maxEmailBodyChars,
+      maxEmailListResults: patch.responseLimits.maxEmailListResults ?? currentLimits.maxEmailListResults,
+      maxAttachmentBytes: patch.responseLimits.maxAttachmentBytes ?? currentLimits.maxAttachmentBytes,
+      warnOnLargeResponse: patch.responseLimits.warnOnLargeResponse ?? currentLimits.warnOnLargeResponse,
+    };
+  }
+
+  return next;
+}
+
+class StaleSettingsFormError extends Error {
+  constructor() {
+    super("Configuration was reset after this form was loaded.");
+    this.name = "StaleSettingsFormError";
+  }
+}
+
+function parseConfigResetGeneration(value: unknown): number | undefined | null {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) return null;
+  return value;
+}
+
+function assertCurrentResetGeneration(current: ServerConfig, expected: number | undefined): void {
+  if (expected !== undefined && (current.configResetGeneration ?? 0) !== expected) {
+    throw new StaleSettingsFormError();
+  }
+}
+
+async function runAtConfigResetGeneration<T>(
+  expected: number | undefined,
+  mutation: () => Promise<T>,
+): Promise<{ stale: true } | { stale: false; value: T }> {
+  return withConfigWriteLockAsync(async () => {
+    const current = loadConfigForSettingsWrite();
+    if (expected !== undefined && (current.configResetGeneration ?? 0) !== expected) {
+      return { stale: true };
+    }
+    return { stale: false, value: await mutation() };
+  });
+}
+
+/** Apply one pure patch against the current config while owning the write lock. */
+async function saveSettingsConfigPatch(
+  patch: SettingsConfigPatch,
+  expectedResetGeneration?: number,
+): Promise<ServerConfig> {
+  return withConfigWriteLockAsync(async () => {
+    const current = loadConfigForSettingsWrite();
+    assertCurrentResetGeneration(current, expectedResetGeneration);
+    const next = applySettingsConfigPatch(current, patch);
+    saveConfig(next);
+    return next;
+  });
+}
+
+/**
+ * Strip mailbox credentials before returning an account to the browser.
+ *
+ * Account specs can legitimately contain plaintext on hosts where no OS
+ * keychain is available.  Treat them exactly like the legacy connection
+ * shape: settings responses are a display model, never a credential export.
+ */
+function safeAccount(account: AccountSpecShape): AccountSpecShape {
+  return {
+    ...account,
+    password: account.password ? SECRET_PLACEHOLDER : "",
+    smtpToken: account.smtpToken ? SECRET_PLACEHOLDER : undefined,
+  };
+}
+
+type EditableAccountPatch = Partial<Pick<
+  AccountSpecShape,
+  | "name"
+  | "providerType"
+  | "smtpHost"
+  | "smtpPort"
+  | "imapHost"
+  | "imapPort"
+  | "username"
+  | "password"
+  | "smtpToken"
+  | "bridgeCertPath"
+  | "allowInsecureBridge"
+  | "tlsMode"
+  | "autoStartBridge"
+  | "bridgePath"
+>>;
+
+const ACCOUNT_EDITABLE_FIELDS = new Set([
+  "name", "providerType", "smtpHost", "smtpPort", "imapHost", "imapPort",
+  "username", "password", "smtpToken", "bridgeCertPath",
+  "allowInsecureBridge", "tlsMode", "autoStartBridge", "bridgePath",
+  // Browser optimistic-concurrency metadata is accepted by the route but is
+  // never copied into an account record.
+  "configResetGeneration",
+]);
+
+function validPort(value: unknown): value is number {
+  return typeof value === "number"
+    && Number.isInteger(value)
+    && value >= 1
+    && value <= 65_535;
+}
+
+function validHost(value: unknown): value is string {
+  return typeof value === "string"
+    && value.length > 0
+    && value.length <= 253
+    && !/[\x00-\x1f\x7f\s]/.test(value);
+}
+
+function validBoundedText(value: unknown, maxLength: number, allowEmpty = true): value is string {
+  return typeof value === "string"
+    && (allowEmpty || value.length > 0)
+    && value.length <= maxLength
+    && !/[\x00\r\n]/.test(value);
+}
+
+/** Parse an account request into an allowlisted, detached persistence patch. */
+function parseAccountPatch(
+  body: Record<string, unknown>,
+  requireComplete: boolean,
+): { patch: EditableAccountPatch } | { error: string } {
+  const unknown = Object.keys(body).filter(key => !ACCOUNT_EDITABLE_FIELDS.has(key));
+  if (unknown.length > 0) {
+    return { error: `Unknown account field${unknown.length === 1 ? "" : "s"}: ${unknown.join(", ")}` };
+  }
+
+  const required = ["name", "providerType", "smtpHost", "smtpPort", "imapHost", "imapPort", "username", "password"];
+  if (requireComplete) {
+    const missing = required.filter(key => !(key in body));
+    if (missing.length > 0) return { error: `Missing required account field${missing.length === 1 ? "" : "s"}: ${missing.join(", ")}` };
+  }
+
+  const patch: EditableAccountPatch = {};
+  if ("name" in body) {
+    if (!validBoundedText(body.name, 200, false)) return { error: "Invalid name: must be non-empty, contain no line breaks, and be at most 200 characters." };
+    patch.name = body.name.trim();
+    if (!patch.name) return { error: "Invalid name: must not be blank." };
+  }
+  if ("providerType" in body) {
+    if (body.providerType !== "proton-bridge" && body.providerType !== "imap") {
+      return { error: "Invalid providerType: must be 'proton-bridge' or 'imap'." };
+    }
+    patch.providerType = body.providerType;
+  }
+  if ("smtpHost" in body) {
+    if (!validHost(body.smtpHost)) return { error: "Invalid smtpHost: must be a non-empty hostname with no whitespace or control characters (max 253 characters)." };
+    patch.smtpHost = body.smtpHost;
+  }
+  if ("imapHost" in body) {
+    if (!validHost(body.imapHost)) return { error: "Invalid imapHost: must be a non-empty hostname with no whitespace or control characters (max 253 characters)." };
+    patch.imapHost = body.imapHost;
+  }
+  if ("smtpPort" in body) {
+    if (!validPort(body.smtpPort)) return { error: "Invalid smtpPort: must be an integer between 1 and 65535." };
+    patch.smtpPort = body.smtpPort;
+  }
+  if ("imapPort" in body) {
+    if (!validPort(body.imapPort)) return { error: "Invalid imapPort: must be an integer between 1 and 65535." };
+    patch.imapPort = body.imapPort;
+  }
+  if ("username" in body) {
+    if (!validBoundedText(body.username, 1_024, !requireComplete)) return { error: "Invalid username: must be non-empty on account creation, contain no line breaks, and be at most 1024 characters." };
+    patch.username = body.username.trim();
+    if (requireComplete && !patch.username) return { error: "Invalid username: must not be blank on account creation." };
+  }
+  if (requireComplete && body.password === SECRET_PLACEHOLDER) {
+    return { error: "Invalid password: the redaction placeholder cannot be used when creating an account." };
+  }
+  if ("password" in body && body.password !== "" && body.password !== SECRET_PLACEHOLDER) {
+    if (!validBoundedText(body.password, 16_384)) return { error: "Invalid password: must contain no NUL or line-break characters and be at most 16384 characters." };
+    patch.password = body.password;
+  } else if (requireComplete && body.password === "") {
+    patch.password = "";
+  }
+  if ("smtpToken" in body && body.smtpToken !== "" && body.smtpToken !== SECRET_PLACEHOLDER) {
+    if (!validBoundedText(body.smtpToken, 16_384)) return { error: "Invalid smtpToken: must contain no NUL or line-break characters and be at most 16384 characters." };
+    patch.smtpToken = body.smtpToken;
+  } else if (requireComplete && body.smtpToken === SECRET_PLACEHOLDER) {
+    return { error: "Invalid smtpToken: the redaction placeholder cannot be used when creating an account." };
+  }
+  for (const field of ["bridgeCertPath", "bridgePath"] as const) {
+    if (field in body) {
+      const value = body[field];
+      if (!validBoundedText(value, 4_096)) return { error: `Invalid ${field}: must contain no line breaks and be at most 4096 characters.` };
+      patch[field] = value;
+    }
+  }
+  for (const field of ["allowInsecureBridge", "autoStartBridge"] as const) {
+    if (field in body) {
+      const value = body[field];
+      if (typeof value !== "boolean") return { error: `Invalid ${field}: must be a boolean.` };
+      patch[field] = value;
+    }
+  }
+  if ("tlsMode" in body) {
+    if (body.tlsMode !== "ssl" && body.tlsMode !== "starttls") return { error: "Invalid tlsMode: must be 'starttls' or 'ssl'." };
+    patch.tlsMode = body.tlsMode;
+  }
+
+  if (!requireComplete && Object.keys(patch).length === 0) {
+    return { error: "No editable account fields were provided." };
+  }
+  return { patch };
+}
+
+/** Webhook URLs frequently embed bearer-like endpoint tokens in their path. */
+function safeWebhookUrl(rawUrl: string): string {
+  try {
+    const parsed = new URL(rawUrl);
+    return `${parsed.protocol}//${parsed.host}/…`;
+  } catch {
+    return "[redacted endpoint]";
+  }
+}
+
+/** Strip credential fields before sending config to the browser. */
 function safeConfig(cfg: ServerConfig): unknown {
   const hasPassword  = !!(cfg.connection.password || cfg.connection.passwordEncrypted);
   const hasSmtpToken = !!(cfg.connection.smtpToken || cfg.connection.smtpTokenEncrypted);
   const hasSlApiKey  = !!cfg.connection.simpleloginApiKey;
   const hasPassToken = !!cfg.connection.passAccessToken;
+  const hasRemoteBearer = !!cfg.connection.remoteBearerToken;
+  const hasRemoteOauthAdmin = !!cfg.connection.remoteOauthAdminPassword;
   return {
     ...cfg,
     credentialStorage: cfg.credentialStorage ?? "config",
+    // Account credentials are stored separately from the legacy connection
+    // mirror.  Redact them too, including config-fallback installations where
+    // they are necessarily present in plaintext in the owner-only file.
+    accounts: cfg.accounts?.map(account => safeAccount(account)),
+    // Webhook signing secrets authenticate outbound grant-change events and
+    // must not be exported through the otherwise read-only configuration API.
+    webhooks: cfg.webhooks?.map(webhook => ({
+      ...webhook,
+      url: safeWebhookUrl(webhook.url),
+      secret: webhook.secret ? SECRET_PLACEHOLDER : undefined,
+    })),
     connection: {
       ...cfg.connection,
-      password:          hasPassword  ? "••••••••" : "",
-      smtpToken:         hasSmtpToken ? "••••••••" : "",
-      simpleloginApiKey: hasSlApiKey  ? "••••••••" : "",
-      passAccessToken:   hasPassToken ? "••••••••" : "",
+      password:          hasPassword  ? SECRET_PLACEHOLDER : "",
+      smtpToken:         hasSmtpToken ? SECRET_PLACEHOLDER : "",
+      simpleloginApiKey: hasSlApiKey  ? SECRET_PLACEHOLDER : "",
+      passAccessToken:   hasPassToken ? SECRET_PLACEHOLDER : "",
+      remoteBearerToken: hasRemoteBearer ? SECRET_PLACEHOLDER : undefined,
+      remoteOauthAdminPassword: hasRemoteOauthAdmin ? SECRET_PLACEHOLDER : undefined,
       // Never send encrypted blobs to the browser
       passwordEncrypted:  undefined,
       smtpTokenEncrypted: undefined,
@@ -261,6 +571,9 @@ const _agentSetupPkgVersion = (() => {
 })();
 
 function buildAgentSetupJson(settingsPort = 8766) {
+  const coreToolCount = toolsForTier("core").size;
+  const extendedToolCount = toolsForTier("extended").size;
+  const completeToolCount = toolsForTier("complete").size;
   return {
     product: "mailpouch",
     version: _agentSetupPkgVersion,
@@ -385,7 +698,7 @@ function buildAgentSetupJson(settingsPort = 8766) {
       },
     },
     capabilities: {
-      toolCount: ALL_TOOLS.length,
+      toolCount: completeToolCount,
       categories: Object.keys(TOOL_CATEGORIES),
       tiers: ["core", "extended", "complete"],
       defaultTier: "complete",
@@ -393,14 +706,14 @@ function buildAgentSetupJson(settingsPort = 8766) {
       prompts: { supported: true, description: "Pre-canned prompts like draft_in_my_voice, triage_inbox, compose_reply — consult prompts/list." },
       elicitation: { supported: true, description: "Server may request user confirmation mid-call for destructive operations. Clients that don't support elicitation fall back to { confirmed: true } on the call args." },
       destructiveConfirmation:
-        "Destructive tools (delete_email, bulk_delete, move_to_trash, move_to_spam, alias_delete, pass_get) require an MCP elicitation round-trip OR an explicit { confirmed: true } argument on the call.",
+        "Destructive tools, including delete/trash/spam actions, SimpleLogin deletion, and Proton Pass secrets, require an MCP elicitation round-trip OR an explicit { confirmed: true } argument on the call.",
     },
     accountRouting: {
       description: "A single server can host multiple mail accounts. Pass account_id on any tool call to route to a specific account; omit it to use the currently-active one.",
       discovery: "The list of configured accounts is not exposed as a tool (operator's decision for privacy). Ask the user to set the default in the settings UI, or pass account_id on every call.",
     },
     firstCallAdvice:
-      "Before invoking tools, call tools/list to discover the currently-exposed surface. Default tier is `complete` (70 tools) but operators can restrict to `core` (~20 tools) or `extended` (~50) via MAILPOUCH_TIER. Per-agent grants can further narrow the surface or impose folder allowlists / IP pins / rate limits. If a tool you expected is missing, ask the user to adjust the grant — don't assume it's a bug.",
+      `Before invoking tools, call tools/list to discover the currently-exposed surface. Default tier is \`complete\` (up to ${completeToolCount} tools; optional integrations are omitted until configured), but operators can restrict to \`core\` (${coreToolCount}) or \`extended\` (${extendedToolCount}) via MAILPOUCH_TIER. Per-agent grants can further narrow the surface or impose folder allowlists / IP pins / rate limits. If a tool you expected is missing, ask the user to adjust the grant — don't assume it's a bug.`,
     humanControls: {
       settingsUi: `http://localhost:${settingsPort}`,
       description: "The operator uses this UI to approve your agent, set conditions (expiry, folder allowlist, IP pins, per-tool rate limits, account scope), and revoke access. Every tool call you make is audit-logged (hashed-args, never values). Your audit trail is visible to them.",
@@ -591,6 +904,12 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
   // CSRF: 32-byte random token embedded in HTML, required on all mutations.
   const csrfToken = randomBytes(32).toString("hex");
 
+  // A browser cannot attach X-Access-Token to its first top-level navigation.
+  // In LAN mode, exchange the token in the documented bootstrap URL for this
+  // short-lived, HttpOnly browser session, then redirect to a clean URL. The
+  // session is in-memory and therefore dies with this settings-server process.
+  const browserSessions = lan && accessToken ? new SettingsBrowserSessionStore() : null;
+
   // Rate limiters — keyed by client IP
   const generalLimiter    = new RateLimiter(GENERAL_RATE_LIMIT,    60_000); // 120/min
   const escalationLimiter = new RateLimiter(ESCALATION_RATE_LIMIT, 60_000); // 20/min
@@ -619,9 +938,31 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
   }
 
   function requireOrigin(req: http.IncomingMessage, res: http.ServerResponse): boolean {
-    if (isValidOrigin(req, port, lan, scheme)) return true;
+    if (isValidOrigin(req, port, lan)) return true;
     json(res, 403, { error: "Origin not permitted." });
     return false;
+  }
+
+  function hasValidLanAccess(req: http.IncomingMessage, url: URL): boolean {
+    if (!accessToken) return false;
+    return hasValidAccessToken(req, url, accessToken) || browserSessions?.hasValidSession(req) === true;
+  }
+
+  function redirectAfterLanBootstrap(res: http.ServerResponse, url: URL, sessionValue?: string): void {
+    // Preserve any future benign query parameters, but never leave the bearer
+    // token in the address bar, browser history, or Referer value.
+    const clean = new URL(url);
+    clean.searchParams.delete("token");
+    const location = `${clean.pathname}${clean.search}`;
+    if (sessionValue) {
+      res.setHeader("Set-Cookie", formatSettingsSessionCookie(sessionValue, scheme === "https"));
+    }
+    res.writeHead(303, {
+      "Location": location,
+      "Cache-Control": "no-store, no-cache, must-revalidate",
+      "Referrer-Policy": "no-referrer",
+    });
+    res.end();
   }
 
   // ── Request handler ───────────────────────────────────────────────────────
@@ -644,7 +985,7 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
     {
       const reqOrigin = req.headers["origin"] as string | undefined;
       const allowedOrigin =
-        reqOrigin && isValidOrigin(req, port, lan, scheme)
+        reqOrigin && isValidOrigin(req, port, lan)
           ? reqOrigin
           : `${scheme}://localhost:${port}`;
       res.setHeader("Access-Control-Allow-Origin", allowedOrigin);
@@ -662,11 +1003,15 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
     }
 
     // ── LAN access token ────────────────────────────────────────────────────
-    // In LAN mode every request must carry the access token so that other
-    // devices on the network cannot read config or approve escalations.
+    // In LAN mode every request must carry the access token or an established
+    // HttpOnly browser session so that other devices on the network cannot
+    // read config or approve escalations. API query tokens are never accepted.
     if (lan && accessToken && path !== "/") {
-      if (!hasValidAccessToken(req, url, accessToken)) {
-        json(res, 401, { error: "Access denied. Include the X-Access-Token header." });
+      if (!hasValidLanAccess(req, url)) {
+        json(res, 401, {
+          error: "Access denied. Reopen the secure LAN settings URL from the server console.",
+          code: "lan_session_required",
+        });
         return;
       }
     }
@@ -680,21 +1025,36 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
     try {
       // ── Serve UI ────────────────────────────────────────────────────────
       if (method === "GET" && path === "/") {
-        // UI-014: in LAN mode the shell HTML embeds the per-process CSRF token,
-        // so "/" must be token-gated too. The general gate above skips "/"
-        // (browser navigation can't send the X-Access-Token header), so accept
-        // the bootstrap `?token=` here instead. Without this any LAN device
-        // could GET "/" and read the CSRF token.
-        if (lan && accessToken && !hasValidBootstrapToken(req, url, accessToken)) {
-          json(res, 401, { error: "Access denied. Open the URL with ?token=… from the server console." });
-          return;
+        // The shell embeds a per-process CSRF token. A LAN browser either has
+        // a previously exchanged session cookie, or presents the one-time
+        // bootstrap token only here. The exchange redirects before emitting
+        // HTML, so no raw bearer survives in the final URL/history.
+        if (lan && accessToken) {
+          const hasSession = browserSessions?.hasValidSession(req) === true;
+          if (hasSession) {
+            // A user may paste the bootstrap URL again after a session exists.
+            // Still strip it rather than serving HTML under a token-bearing URL.
+            if (url.searchParams.has("token")) {
+              redirectAfterLanBootstrap(res, url);
+              return;
+            }
+          } else if (hasValidBootstrapToken(req, url, accessToken)) {
+            redirectAfterLanBootstrap(res, url, browserSessions!.issue());
+            return;
+          } else {
+            json(res, 401, {
+              error: "Access denied. Open the secure LAN settings URL from the server console.",
+              code: "lan_session_required",
+            });
+            return;
+          }
         }
         // Per-response CSP nonce. Lets us drop 'unsafe-inline' for script
         // and style: only the three inline blocks we ship can execute,
         // because they carry the matching nonce attribute. Stops stored XSS
         // from any future bug that reflects config into the page.
         const cspNonce = randomBytes(16).toString("base64");
-        const html = buildShellHtml(configPath, csrfToken, port, cspNonce);
+        const html = buildShellHtml(csrfToken, port, cspNonce);
         res.writeHead(200, {
           "Content-Type":             "text/html; charset=utf-8",
           // CSP3 behaviour note:
@@ -811,7 +1171,24 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
         if (!requireCsrf(req, res)) return;
         let body: Record<string, unknown>;
         try { body = JSON.parse(await readBodySafe(req)) as Record<string, unknown>; } catch { json(res, 400, { error: "Request body must be valid JSON." }); return; }
-        const current = loadConfig() ?? defaultConfig();
+        const expectedResetGeneration = parseConfigResetGeneration(body.configResetGeneration);
+        if (expectedResetGeneration === null) {
+          json(res, 400, { error: "Invalid configResetGeneration: must be a non-negative safe integer." }); return;
+        }
+        // Parse and validate into a standalone patch before waiting for the
+        // write lock.  Do not load or mutate config here: another request may
+        // reset or update it while this request is queued.
+        const configPatch: SettingsConfigPatch = {};
+        let activeAccountPatch: Partial<AccountSpecShape> | undefined;
+        let auxiliaryCredentialPatch: {
+          simpleloginApiKey?: string;
+          passAccessToken?: string;
+          clearSimpleloginApiKey?: boolean;
+          clearPassAccessToken?: boolean;
+        } | undefined;
+        // SimpleLogin and Pass instances are immutable. Track the fields that
+        // must replace or disable those live instances after a successful save.
+        let auxiliaryRuntimeRefreshNeeded = false;
 
         // Merge connection settings — never overwrite password with placeholder/empty
         if (body.connection && typeof body.connection === "object") {
@@ -873,34 +1250,89 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
             c.passCliPath = v;
           }
 
-          current.connection = {
-            ...current.connection,
-            smtpHost:       validHost(c.smtpHost) ? c.smtpHost : current.connection.smtpHost,
-            smtpPort:       c.smtpPort       ?? current.connection.smtpPort,
-            imapHost:       validHost(c.imapHost) ? c.imapHost : current.connection.imapHost,
-            imapPort:       c.imapPort       ?? current.connection.imapPort,
-            username:       typeof c.username === "string" ? c.username : current.connection.username,
-            bridgeCertPath:  typeof c.bridgeCertPath === "string" ? c.bridgeCertPath : current.connection.bridgeCertPath,
-            bridgePath:      typeof c.bridgePath === "string" ? c.bridgePath.trim().replace(/^["']|["']$/g, "") : current.connection.bridgePath,
-            debug:           typeof c.debug === "boolean" ? c.debug : current.connection.debug,
-            autoStartBridge: typeof c.autoStartBridge === "boolean" ? c.autoStartBridge : current.connection.autoStartBridge,
-            allowInsecureBridge: typeof c.allowInsecureBridge === "boolean" ? c.allowInsecureBridge : current.connection.allowInsecureBridge,
-            // Optional integrations: placeholder ("••••••••") = keep existing; any other string (incl. "") = set (empty clears)
-            ...(typeof c.simpleloginApiKey === "string" && c.simpleloginApiKey !== "••••••••" ? { simpleloginApiKey: c.simpleloginApiKey.trim() || undefined } : {}),
-            simpleloginBaseUrl: typeof c.simpleloginBaseUrl === "string" ? c.simpleloginBaseUrl.trim() : current.connection.simpleloginBaseUrl,
-            ...(typeof c.passAccessToken === "string" && c.passAccessToken !== "••••••••" ? { passAccessToken: c.passAccessToken.trim() || undefined } : {}),
-            passCliPath: typeof c.passCliPath === "string" ? c.passCliPath.trim() : current.connection.passCliPath,
-            // Only overwrite credentials if a non-empty, non-placeholder string was sent
-            ...(typeof c.password  === "string" && c.password  && c.password  !== "••••••••" ? { password:  c.password  } : {}),
+          if (c.tlsMode !== undefined && c.tlsMode !== "ssl" && c.tlsMode !== "starttls") {
+            json(res, 400, { error: "Invalid tlsMode: must be 'starttls' or 'ssl'." }); return;
+          }
+
+          // The Setup tab edits the active mailbox. Keep every mail transport
+          // field (including credentials) in that account's registry entry;
+          // never copy it through the legacy shared connection object.
+          const parsedActiveAccountPatch: Partial<AccountSpecShape> = {
+            ...(validHost(c.smtpHost) ? { smtpHost: c.smtpHost } : {}),
+            ...(c.smtpPort !== undefined && c.smtpPort !== null ? { smtpPort: c.smtpPort as number } : {}),
+            ...(validHost(c.imapHost) ? { imapHost: c.imapHost } : {}),
+            ...(c.imapPort !== undefined && c.imapPort !== null ? { imapPort: c.imapPort as number } : {}),
+            ...(typeof c.username === "string" ? { username: c.username } : {}),
+            ...(typeof c.bridgeCertPath === "string" ? { bridgeCertPath: c.bridgeCertPath } : {}),
+            ...(typeof c.bridgePath === "string" ? { bridgePath: c.bridgePath.trim().replace(/^["']|["']$/g, "") } : {}),
+            ...(typeof c.autoStartBridge === "boolean" ? { autoStartBridge: c.autoStartBridge } : {}),
+            ...(typeof c.allowInsecureBridge === "boolean" ? { allowInsecureBridge: c.allowInsecureBridge } : {}),
+            ...(c.tlsMode === "ssl" || c.tlsMode === "starttls" ? { tlsMode: c.tlsMode } : {}),
+            // Blank and placeholder values intentionally retain the account's
+            // existing keychain-backed credential.
+            ...(typeof c.password === "string" && c.password && c.password !== "••••••••" ? { password: c.password } : {}),
             ...(typeof c.smtpToken === "string" && c.smtpToken && c.smtpToken !== "••••••••" ? { smtpToken: c.smtpToken } : {}),
           };
+          // A connection payload containing only global integration settings
+          // must not create/mutate an account merely because it happened to
+          // pass through this endpoint.
+          if (Object.keys(parsedActiveAccountPatch).length > 0) {
+            activeAccountPatch = parsedActiveAccountPatch;
+          }
+          const simpleloginRaw = c.simpleloginApiKey;
+          const passRaw = c.passAccessToken;
+          if (c.clearSimpleloginApiKey !== undefined && typeof c.clearSimpleloginApiKey !== "boolean") {
+            json(res, 400, { error: "Invalid clearSimpleloginApiKey: must be a boolean." }); return;
+          }
+          if (c.clearPassAccessToken !== undefined && typeof c.clearPassAccessToken !== "boolean") {
+            json(res, 400, { error: "Invalid clearPassAccessToken: must be a boolean." }); return;
+          }
+          const clearSimpleloginApiKey = c.clearSimpleloginApiKey === true;
+          const clearPassAccessToken = c.clearPassAccessToken === true;
+          // Settings responses deliberately omit keychain-backed secrets. The
+          // browser consequently sends an empty string on an ordinary save;
+          // empty/placeholder values therefore mean "retain". Deletion needs
+          // the explicit clear flag above so an unrelated save cannot erase a
+          // credential that was never disclosed to the browser.
+          const simpleloginReplacementProvided = typeof simpleloginRaw === "string"
+            && simpleloginRaw !== SECRET_PLACEHOLDER
+            && simpleloginRaw.trim() !== "";
+          const passReplacementProvided = typeof passRaw === "string"
+            && passRaw !== SECRET_PLACEHOLDER
+            && passRaw.trim() !== "";
+          if (clearSimpleloginApiKey && simpleloginReplacementProvided) {
+            json(res, 400, { error: "Cannot replace and clear simpleloginApiKey in the same save." }); return;
+          }
+          if (clearPassAccessToken && passReplacementProvided) {
+            json(res, 400, { error: "Cannot replace and clear passAccessToken in the same save." }); return;
+          }
+          const simpleloginApiKey = simpleloginReplacementProvided ? simpleloginRaw.trim() : "";
+          const passAccessToken = passReplacementProvided ? passRaw.trim() : "";
+          configPatch.connection = {
+            ...(typeof c.debug === "boolean" ? { debug: c.debug } : {}),
+            // Optional integrations remain global, but Bridge credentials do not.
+            ...(simpleloginReplacementProvided ? { simpleloginApiKey } : {}),
+            ...(clearSimpleloginApiKey ? { simpleloginApiKey: undefined } : {}),
+            ...(typeof c.simpleloginBaseUrl === "string" ? { simpleloginBaseUrl: c.simpleloginBaseUrl.trim() } : {}),
+            ...(passReplacementProvided ? { passAccessToken } : {}),
+            ...(clearPassAccessToken ? { passAccessToken: undefined } : {}),
+            ...(typeof c.passCliPath === "string" ? { passCliPath: c.passCliPath.trim() } : {}),
+          };
+          if (simpleloginReplacementProvided || passReplacementProvided || clearSimpleloginApiKey || clearPassAccessToken) {
+            auxiliaryCredentialPatch = {
+              ...(simpleloginApiKey ? { simpleloginApiKey } : {}),
+              ...(passAccessToken ? { passAccessToken } : {}),
+              ...(clearSimpleloginApiKey ? { clearSimpleloginApiKey: true } : {}),
+              ...(clearPassAccessToken ? { clearPassAccessToken: true } : {}),
+            };
+          }
         }
 
         // Merge settingsPort
         if (typeof body.settingsPort === "number") {
           const sp = Math.round(body.settingsPort);
           if (sp >= 1 && sp <= 65535) {
-            current.settingsPort = sp;
+            configPatch.settingsPort = sp;
           } else {
             json(res, 400, { error: `Invalid settingsPort: must be 1–65535 (got ${sp}).` }); return;
           }
@@ -908,45 +1340,86 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
 
         // Merge compliance flags (destructive-confirm, ToS ack) and notification prefs
         if (typeof body.requireDestructiveConfirm === "boolean") {
-          current.requireDestructiveConfirm = body.requireDestructiveConfirm;
+          configPatch.requireDestructiveConfirm = body.requireDestructiveConfirm;
         }
         if (typeof body.desktopNotificationsEnabled === "boolean") {
-          current.desktopNotificationsEnabled = body.desktopNotificationsEnabled;
+          configPatch.desktopNotificationsEnabled = body.desktopNotificationsEnabled;
         }
         if (typeof body.surfaceSecurityNotifications === "boolean") {
-          current.surfaceSecurityNotifications = body.surfaceSecurityNotifications;
+          configPatch.surfaceSecurityNotifications = body.surfaceSecurityNotifications;
         }
         if (typeof body.autoOpenApprovalWindow === "boolean") {
-          current.autoOpenApprovalWindow = body.autoOpenApprovalWindow;
+          configPatch.autoOpenApprovalWindow = body.autoOpenApprovalWindow;
         }
         if (body.tosAcknowledged && typeof body.tosAcknowledged === "object") {
           const t = body.tosAcknowledged as Record<string, unknown>;
           if (typeof t.accepted === "boolean" && typeof t.timestamp === "string") {
-            current.tosAcknowledged = { accepted: t.accepted, timestamp: t.timestamp };
+            configPatch.tosAcknowledged = { accepted: t.accepted, timestamp: t.timestamp };
           }
         }
 
         // Merge permissions
-        if (body.permissions && typeof body.permissions === "object") {
+        if (body.permissions !== undefined) {
+          if (!body.permissions || typeof body.permissions !== "object" || Array.isArray(body.permissions)) {
+            json(res, 400, { error: "Invalid permissions: must be an object." }); return;
+          }
           const p = body.permissions as Record<string, unknown>;
           const validPresets = new Set<string>(PERMISSION_PRESETS as unknown as string[]);
+          if (p.preset !== undefined && (typeof p.preset !== "string" || !validPresets.has(p.preset))) {
+            json(res, 400, { error: "Invalid permissions.preset." }); return;
+          }
           // Filter incoming tool keys against ALL_TOOLS so an unknown name
           // (typo, or a key for a tool that doesn't ship yet) is dropped
           // instead of silently entering the persisted config. Matches the
           // pattern config/loader.ts applies on load.
           const knownTools = new Set<string>(ALL_TOOLS as unknown as string[]);
-          const incomingTools = typeof p.tools === "object" && p.tools !== null
-            ? p.tools as Record<string, unknown>
-            : {};
-          const filteredTools: Record<string, unknown> = {};
-          for (const [k, v] of Object.entries(incomingTools)) {
-            if (knownTools.has(k)) filteredTools[k] = v;
+          if (p.tools !== undefined && (!p.tools || typeof p.tools !== "object" || Array.isArray(p.tools))) {
+            json(res, 400, { error: "Invalid permissions.tools: must be an object." }); return;
           }
-          current.permissions = {
-            preset: typeof p.preset === "string" && validPresets.has(p.preset)
-              ? (p.preset as PermissionPreset)
-              : current.permissions.preset,
-            tools:  { ...current.permissions.tools, ...filteredTools as Record<string, boolean> },
+          const incomingTools = (p.tools ?? {}) as Record<string, unknown>;
+          const filteredTools: Partial<ServerConfig["permissions"]["tools"]> = {};
+          for (const [k, v] of Object.entries(incomingTools)) {
+            if (!knownTools.has(k)) continue;
+            if (!v || typeof v !== "object" || Array.isArray(v)) {
+              json(res, 400, { error: `Invalid permission for ${k}: must be an object.` }); return;
+            }
+            const policy = v as Record<string, unknown>;
+            const unknownPolicyFields = Object.keys(policy).filter(
+              field => field !== "enabled" && field !== "rateLimit" && field !== "rateLimitWindow",
+            );
+            if (unknownPolicyFields.length > 0) {
+              json(res, 400, { error: `Invalid permission for ${k}: unknown field ${unknownPolicyFields[0]}.` }); return;
+            }
+            if (typeof policy.enabled !== "boolean") {
+              json(res, 400, { error: `Invalid permission for ${k}: enabled must be a boolean.` }); return;
+            }
+            if (policy.rateLimit !== null
+              && !(typeof policy.rateLimit === "number"
+                && Number.isInteger(policy.rateLimit)
+                && policy.rateLimit >= 1
+                && policy.rateLimit <= 1_000_000)) {
+              json(res, 400, { error: `Invalid permission for ${k}: rateLimit must be null or an integer between 1 and 1000000.` }); return;
+            }
+            if (policy.rateLimitWindow !== undefined
+              && policy.rateLimitWindow !== "second"
+              && policy.rateLimitWindow !== "minute"
+              && policy.rateLimitWindow !== "hour"
+              && policy.rateLimitWindow !== "day") {
+              json(res, 400, { error: `Invalid permission for ${k}: rateLimitWindow must be second, minute, hour, or day.` }); return;
+            }
+            filteredTools[k as ToolName] = {
+              enabled: policy.enabled,
+              rateLimit: policy.rateLimit,
+              ...(policy.rateLimitWindow !== undefined
+                ? { rateLimitWindow: policy.rateLimitWindow }
+                : {}),
+            } as ServerConfig["permissions"]["tools"][ToolName];
+          }
+          configPatch.permissions = {
+            ...(typeof p.preset === "string" && validPresets.has(p.preset)
+              ? { preset: p.preset as PermissionPreset }
+              : {}),
+            ...(Object.keys(filteredTools).length > 0 ? { tools: filteredTools } : {}),
           };
         }
 
@@ -955,78 +1428,209 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
           const rl = body.responseLimits as Record<string, unknown>;
           const validNum = (v: unknown, min: number, max: number): number | undefined =>
             typeof v === "number" && Number.isFinite(v) && v >= min && v <= max ? Math.round(v) : undefined;
-          const cur = current.responseLimits ?? {
-            maxResponseBytes: 900 * 1024, maxEmailBodyChars: 500_000,
-            maxEmailListResults: 50, maxAttachmentBytes: 600_000, warnOnLargeResponse: true,
-          };
-          current.responseLimits = {
-            maxResponseBytes:    validNum(rl.maxResponseBytes,    100_000, 1_048_576) ?? cur.maxResponseBytes,
-            maxEmailBodyChars:   validNum(rl.maxEmailBodyChars,   1_000,   10_000_000) ?? cur.maxEmailBodyChars,
-            maxEmailListResults: validNum(rl.maxEmailListResults, 1,       200)        ?? cur.maxEmailListResults,
-            maxAttachmentBytes:  validNum(rl.maxAttachmentBytes,  0,       1_048_576)  ?? cur.maxAttachmentBytes,
-            warnOnLargeResponse: typeof rl.warnOnLargeResponse === "boolean" ? rl.warnOnLargeResponse : cur.warnOnLargeResponse,
+          const maxResponseBytes = validNum(rl.maxResponseBytes, 100_000, 1_048_576);
+          const maxEmailBodyChars = validNum(rl.maxEmailBodyChars, 1_000, 10_000_000);
+          const maxEmailListResults = validNum(rl.maxEmailListResults, 1, 200);
+          const maxAttachmentBytes = validNum(rl.maxAttachmentBytes, 0, 1_048_576);
+          configPatch.responseLimits = {
+            ...(maxResponseBytes !== undefined ? { maxResponseBytes } : {}),
+            ...(maxEmailBodyChars !== undefined ? { maxEmailBodyChars } : {}),
+            ...(maxEmailListResults !== undefined ? { maxEmailListResults } : {}),
+            ...(maxAttachmentBytes !== undefined ? { maxAttachmentBytes } : {}),
+            ...(typeof rl.warnOnLargeResponse === "boolean" ? { warnOnLargeResponse: rl.warnOnLargeResponse } : {}),
           };
         }
 
-        // Try to store credentials in OS keychain; fall back to config file.
-        // saveConfigWithCredentials mutates `current` — it blanks the password
-        // in the file when the keychain save succeeds — so capture what was
-        // posted BEFORE the call, for in-process propagation below.
-        const postedPassword  = current.connection.password  || "";
-        const postedSmtpToken = current.connection.smtpToken || "";
-        const credStorage     = await saveConfigWithCredentials(current);
+        // Commit registry and global configuration under one config lock.
+        let changedActiveAccountId: string | undefined;
+        let activeAccountMissing = false;
+        let staleSettingsForm = false;
+        let auxiliaryClearFailed = false;
+        let auxiliaryStoredToKeychain = false;
+        let savedCredentialStorage: NonNullable<ServerConfig["credentialStorage"]> = "config";
+        await withConfigWriteLockAsync(async () => {
+          // This must be the first config read in the critical section. A
+          // request may have waited behind a reset, registry edit, or another
+          // settings save; its parsed patch is safe to reuse, its old base is
+          // not.
+          let current = loadConfigForSettingsWrite();
+          if (expectedResetGeneration !== undefined
+            && (current.configResetGeneration ?? 0) !== expectedResetGeneration) {
+            staleSettingsForm = true;
+            return;
+          }
+          const clearPassAccessToken = !!auxiliaryCredentialPatch?.clearPassAccessToken;
+          const clearSimpleloginApiKey = !!auxiliaryCredentialPatch?.clearSimpleloginApiKey;
+          const connectionPatch = configPatch.connection;
 
-        // Push the newly-saved credentials into the running AccountManager so
-        // the SMTP transporter and IMAP connection pick them up WITHOUT a
-        // restart. Without this, the UI "Save Configuration" button reports
-        // success, the keychain is updated, but the in-memory per-account
-        // SMTPService still holds whatever empty creds it was built with at
-        // module load — the next send/receive still fails with
-        // "Please configure the login" / "Missing credentials for PLAIN"
-        // until the user manually restarts the MCP.
-        //
-        // Only applies when the settings server is running in-process with
-        // the MCP (the common case). The standalone `mailpouch-settings`
-        // daemon has no AccountManager singleton; getAccountManager() returns
-        // null there and the update falls through silently — the MCP process
-        // will pick up the new creds on its own next startup via main().
-        try {
-          const mgr = getAccountManager();
-          if (mgr && (postedPassword || postedSmtpToken)) {
-            // SMTP is refreshed synchronously here (transporter rebuilt).
-            mgr.applyKeychainCredentials(postedPassword, postedSmtpToken);
-            // IMAP: flush the stale clients and reconnect with the new password
-            // so it takes effect WITHOUT a restart. Fire-and-forget — the
-            // reconnect can take seconds (or back off if Bridge is throttling),
-            // and we don't want to stall the save response on it; the UI's
-            // "Check Now" surfaces the result.
-            if (postedPassword) {
-              void mgr.reloadImapCredentials(postedPassword);
+          auxiliaryRuntimeRefreshNeeded = !!auxiliaryCredentialPatch?.passAccessToken
+            || !!auxiliaryCredentialPatch?.simpleloginApiKey
+            || clearSimpleloginApiKey
+            || clearPassAccessToken
+            || (connectionPatch?.simpleloginBaseUrl !== undefined
+              && connectionPatch.simpleloginBaseUrl !== (current.connection.simpleloginBaseUrl ?? ""))
+            || (connectionPatch?.passCliPath !== undefined
+              && connectionPatch.passCliPath !== (current.connection.passCliPath ?? ""));
+
+          if (auxiliaryCredentialPatch) {
+            if (clearPassAccessToken || clearSimpleloginApiKey) {
+              const cleared = await deleteAuxiliaryCredentials({
+                passAccessToken: clearPassAccessToken,
+                simpleloginApiKey: clearSimpleloginApiKey,
+              });
+              if (!cleared) {
+                const allClearTargetsStoredInConfig =
+                  (!clearPassAccessToken || !!current.connection.passAccessToken)
+                  && (!clearSimpleloginApiKey || !!current.connection.simpleloginApiKey);
+                // A failed deletion while the OS keychain is usable could
+                // leave an active keychain credential behind, so never report
+                // success in that case. If it is genuinely unavailable and
+                // every selected secret is present in the config, clear that
+                // config fallback instead; this is the supported headless/no-
+                // keychain storage mode.
+                const keychainAvailable = await isKeychainAvailable();
+                if (!allClearTargetsStoredInConfig || keychainAvailable) {
+                  auxiliaryClearFailed = true;
+                  // deleteAuxiliaryCredentials is intentionally all-or-nothing
+                  // from the caller's perspective, but an OS keychain can
+                  // still have deleted one selected entry before reporting a
+                  // failure. Do not leave a client holding either old secret
+                  // usable while we return 503. Disable rather than refresh:
+                  // the durable config was not saved and a refresh could read
+                  // the undeleted stale entry back from the keychain.
+                  try {
+                    await disableAuxiliaryServices();
+                  } catch (error) {
+                    logger.warn(
+                      "Could not fail-close live auxiliary services after a partial credential-clear failure",
+                      "SettingsServer",
+                      error,
+                    );
+                  }
+                  return;
+                }
+                logger.warn(
+                  "OS keychain unavailable; cleared only configuration-backed auxiliary credentials",
+                  "SettingsServer",
+                );
+              }
             }
           }
-        } catch (e: unknown) {
-          // Non-fatal — save already succeeded; a restart will pick creds up.
-          logger.warn("Could not push fresh credentials to AccountManager; a restart will apply them", "SettingsServer", e);
-        }
 
-        json(res, 200, { ok: true, credentialStorage: credStorage });
+          if (activeAccountPatch) {
+            // Resolve the active ID while holding the same config lock as the
+            // registry write, so an activation/deletion cannot redirect this
+            // save to another mailbox between the read and the update.
+            const registry = readRegistry();
+            const updated = await updateAccount(registry.activeAccountId, activeAccountPatch);
+            if (!updated) {
+              activeAccountMissing = true;
+              return;
+            }
+            changedActiveAccountId = updated.id;
+
+            // updateAccount writes the authoritative registry snapshot. Read
+            // that fresh result before applying the independent global patch;
+            // otherwise a stale request could put back its old accounts.
+            current = loadConfigForSettingsWrite();
+          }
+
+          let patchForSave = configPatch;
+          if (auxiliaryCredentialPatch?.passAccessToken || auxiliaryCredentialPatch?.simpleloginApiKey) {
+            const stored = await saveAuxiliaryCredentials(
+              auxiliaryCredentialPatch.passAccessToken ?? "",
+              auxiliaryCredentialPatch.simpleloginApiKey ?? "",
+            );
+            if (stored) {
+              auxiliaryStoredToKeychain = true;
+              // The keychain is now authoritative. Preserve every other
+              // validated field while removing plaintext auxiliary secrets
+              // from the config patch before it reaches disk.
+              patchForSave = {
+                ...configPatch,
+                connection: {
+                  ...configPatch.connection,
+                  ...(auxiliaryCredentialPatch.passAccessToken ? { passAccessToken: undefined } : {}),
+                  ...(auxiliaryCredentialPatch.simpleloginApiKey ? { simpleloginApiKey: undefined } : {}),
+                },
+              };
+            }
+          }
+
+          current = applySettingsConfigPatch(current, patchForSave);
+          if (activeAccountPatch) {
+            // No Bridge credential is ever persisted through the legacy shared
+            // connection object; account registry storage is authoritative.
+            current.connection = { ...current.connection, password: "", smtpToken: "" };
+            delete current.connection.passwordEncrypted;
+            delete current.connection.smtpTokenEncrypted;
+          }
+          if (auxiliaryStoredToKeychain) current.credentialStorage = "keychain";
+
+          saveConfig(current);
+          savedCredentialStorage = current.credentialStorage ?? "config";
+        });
+        if (staleSettingsForm) {
+          json(res, 409, { error: "Configuration was reset after this form was loaded. Refresh settings and apply the change again." }); return;
+        }
+        if (auxiliaryClearFailed) {
+          json(res, 503, { error: "Could not clear auxiliary credentials from the OS keychain. No configuration changes were saved." }); return;
+        }
+        if (activeAccountMissing) {
+          json(res, 409, { error: "Active account changed before configuration could be saved." }); return;
+        }
+        const liveUpdated = changedActiveAccountId
+          ? await refreshAccountManager(changedActiveAccountId, "global connection save")
+          : true;
+        let auxiliaryLiveUpdated = true;
+        if (auxiliaryRuntimeRefreshNeeded) {
+          try {
+            auxiliaryLiveUpdated = await refreshAuxiliaryServices();
+          } catch (error) {
+            // The config/keychain save already succeeded. Do not claim the
+            // immutable in-process clients changed when their replacement
+            // failed; a restart is then required to avoid retaining an old key.
+            logger.warn("Could not refresh auxiliary integration services after configuration save", "SettingsServer", error);
+            auxiliaryLiveUpdated = false;
+          }
+        }
+        const restartRequired = (changedActiveAccountId !== undefined && !liveUpdated)
+          || (auxiliaryRuntimeRefreshNeeded && !auxiliaryLiveUpdated);
+
+        json(res, 200, {
+          ok: true,
+          credentialStorage: savedCredentialStorage,
+          ...(changedActiveAccountId || auxiliaryRuntimeRefreshNeeded ? { restartRequired } : {}),
+        });
         return;
       }
 
       // ── POST /api/preset ──────────────────────────────────────────────────
       if (method === "POST" && path === "/api/preset") {
         if (!requireCsrf(req, res)) return;
-        let _presetBody: { preset: string };
+        let _presetBody: { preset: string; configResetGeneration?: unknown };
         try { _presetBody = JSON.parse(await readBodySafe(req)); } catch { json(res, 400, { error: "Request body must be valid JSON." }); return; }
         const { preset } = _presetBody;
+        const expectedResetGeneration = parseConfigResetGeneration(_presetBody.configResetGeneration);
+        if (expectedResetGeneration === null) {
+          json(res, 400, { error: "Invalid configResetGeneration: must be a non-negative safe integer." }); return;
+        }
         const validPresets = ["full", "read_only", "supervised", "send_only", "custom"];
         if (!validPresets.includes(preset)) {
           json(res, 400, { error: "Invalid preset" });
           return;
         }
-        const current = loadConfig() ?? defaultConfig();
-        current.permissions = buildPermissions(preset as PermissionPreset);
-        saveConfig(current);
+        const permissions = buildPermissions(preset as PermissionPreset);
+        try {
+          await saveSettingsConfigPatch({
+            permissions: { preset: permissions.preset, tools: permissions.tools },
+          }, expectedResetGeneration);
+        } catch (error) {
+          if (error instanceof StaleSettingsFormError) {
+            json(res, 409, { error: "Configuration was reset after this form was loaded. Refresh settings and apply the preset again." }); return;
+          }
+          throw error;
+        }
         json(res, 200, { ok: true });
         return;
       }
@@ -1414,8 +2018,39 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
       // ── POST /api/reset ───────────────────────────────────────────────────
       if (method === "POST" && path === "/api/reset") {
         if (!requireCsrf(req, res)) return;
-        saveConfig(defaultConfig());
-        json(res, 200, { ok: true });
+        // Keep the AccountManager rebuild inside the same config-write lock as
+        // the reset. Without that outer boundary, a concurrent save could
+        // land after the default config but before the manager read it, and we
+        // could incorrectly report that the *reset* was live.
+        const { reset, liveUpdated } = await withConfigWriteLockAsync(async () => {
+          const reset = await resetConfiguration();
+          // A standalone settings process cannot reconfigure the daemon it was
+          // launched beside. Conversely, an in-process server must not promise
+          // a live reset until the AccountManager has rebuilt its services.
+          // Auxiliary/remote cleanup can fail independently of mailbox
+          // credentials. Only an incomplete mailbox cleanup must suspend
+          // AccountManager keychain hydration; the full result still drives
+          // the user-facing cleanup/restart warning below.
+          const liveUpdated = await refreshAccountManagerAfterReset(reset.mailboxCredentialsCleared);
+          return { reset, liveUpdated };
+        });
+        // AccountManager owns only IMAP/SMTP. Reset must force-disable the
+        // separately-owned SimpleLogin/Pass clients rather than refreshing
+        // them from config: if OS-keychain cleanup failed, a refresh would
+        // immediately rehydrate the old credential from the still-present
+        // keychain entry. This runs even when the AccountManager rebuild fails.
+        let auxiliaryLiveUpdated = false;
+        try {
+          auxiliaryLiveUpdated = await disableAuxiliaryServices();
+        } catch (err) {
+          logger.warn("Could not disable auxiliary services after configuration reset", "SettingsServer", err);
+        }
+        json(res, 200, {
+          ok: true,
+          restartRequired: !reset.credentialsCleared || !liveUpdated || !auxiliaryLiveUpdated,
+          credentialsCleared: reset.credentialsCleared,
+          manualKeychainCleanupRequired: !reset.credentialsCleared,
+        });
         return;
       }
 
@@ -1468,9 +2103,10 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
           return;
         }
 
-        const cfg = loadConfig() ?? defaultConfig();
-        cfg.permissions = buildPermissions(result.targetPreset);
-        saveConfig(cfg);
+        const permissions = buildPermissions(result.targetPreset);
+        await saveSettingsConfigPatch({
+          permissions: { preset: permissions.preset, tools: permissions.tools },
+        });
 
         json(res, 200, { ok: true, preset: result.targetPreset });
         return;
@@ -1634,21 +2270,9 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
             json(res, 400, { error: `Invalid preset '${preset}'. Must be one of: ${[...presets].join(", ")}.` });
             return;
           }
-          // Reuse the same conditions whitelist shape the approve route applies.
-          let conditions: GrantConditions | undefined;
-          if (body.conditions && typeof body.conditions === "object" && !Array.isArray(body.conditions)) {
-            const c = body.conditions as Record<string, unknown>;
-            const out: GrantConditions = {};
-            if (typeof c.expiresAt === "string") out.expiresAt = c.expiresAt;
-            if (typeof c.accountId === "string") out.accountId = c.accountId;
-            if (Array.isArray(c.folderAllowlist)) {
-              out.folderAllowlist = c.folderAllowlist.filter((x): x is string => typeof x === "string");
-            }
-            if (Array.isArray(c.ipPins)) {
-              out.ipPins = c.ipPins.filter((x): x is string => typeof x === "string");
-            }
-            if (Object.keys(out).length > 0) conditions = out;
-          }
+          // Interactive and service-account grants share one strict condition
+          // sanitizer so a per-tool hourly cap cannot disappear on issuance.
+          const conditions = sanitizeGrantConditions(body.conditions);
 
           const { account, clientSecret } = sa.issue({
             name,
@@ -1721,31 +2345,10 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
             toolOverrides = out as Partial<Record<ToolName, boolean>>;
           }
 
-          // Sanitize conditions: whitelist GrantConditions keys, validate each
-          // value's shape. Anything else (including __proto__) is discarded.
-          let conditions: GrantConditions | undefined;
-          if (body.conditions && typeof body.conditions === "object" && !Array.isArray(body.conditions)) {
-            const c = body.conditions as Record<string, unknown>;
-            const out: GrantConditions = {};
-            if (typeof c.expiresAt === "string") out.expiresAt = c.expiresAt;
-            if (typeof c.accountId === "string") out.accountId = c.accountId;
-            if (Array.isArray(c.folderAllowlist)) {
-              out.folderAllowlist = c.folderAllowlist.filter((x): x is string => typeof x === "string");
-            }
-            if (Array.isArray(c.ipPins)) {
-              out.ipPins = c.ipPins.filter((x): x is string => typeof x === "string");
-            }
-            if (c.maxCallsPerHourByTool && typeof c.maxCallsPerHourByTool === "object" && !Array.isArray(c.maxCallsPerHourByTool)) {
-              const caps: Partial<Record<ToolName, number>> = {};
-              for (const [k, v] of Object.entries(c.maxCallsPerHourByTool as Record<string, unknown>)) {
-                if (knownTools.has(k) && typeof v === "number" && Number.isFinite(v) && v >= 0) {
-                  caps[k as ToolName] = v;
-                }
-              }
-              out.maxCallsPerHourByTool = caps;
-            }
-            conditions = out;
-          }
+          // Whitelist + normalize conditions once for every grant type. In
+          // particular, aliases collapse to canonical hourly-cap keys and zero
+          // remains a deliberate deny-all cap.
+          const conditions = sanitizeGrantConditions(body.conditions);
 
           const grant = grants.approve({
             clientId,
@@ -1803,7 +2406,7 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
         // GET /api/accounts — list (sanitized, no passwords)
         if (method === "GET" && path === "/api/accounts") {
           const reg = readRegistry();
-          const sanitized = reg.accounts.map(a => ({ ...a, password: a.password ? "••••••••" : "" }));
+          const sanitized = reg.accounts.map(safeAccount);
           json(res, 200, { accounts: sanitized, activeAccountId: reg.activeAccountId });
           return;
         }
@@ -1814,42 +2417,25 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
           let body: Record<string, unknown>;
           try { body = JSON.parse(await readBodySafe(req)) as Record<string, unknown>; }
           catch { json(res, 400, { error: "Body must be JSON." }); return; }
-          if (typeof body.name !== "string" || !body.name) { json(res, 400, { error: "name is required" }); return; }
-          if (body.providerType !== "proton-bridge" && body.providerType !== "imap") {
-            json(res, 400, { error: "providerType must be 'proton-bridge' or 'imap'" }); return;
+          const expectedResetGeneration = parseConfigResetGeneration(body.configResetGeneration);
+          if (expectedResetGeneration === null) {
+            json(res, 400, { error: "Invalid configResetGeneration: must be a non-negative safe integer." }); return;
           }
-          const created = await createAccount({
-            name: body.name,
-            providerType: body.providerType,
-            smtpHost: String(body.smtpHost ?? ""),
-            smtpPort: Number(body.smtpPort ?? 0),
-            imapHost: String(body.imapHost ?? ""),
-            imapPort: Number(body.imapPort ?? 0),
-            username: String(body.username ?? ""),
-            password: String(body.password ?? ""),
-            smtpToken: typeof body.smtpToken === "string" ? body.smtpToken : undefined,
-            bridgeCertPath: typeof body.bridgeCertPath === "string" ? body.bridgeCertPath : undefined,
-            allowInsecureBridge: typeof body.allowInsecureBridge === "boolean" ? body.allowInsecureBridge : undefined,
-            tlsMode: body.tlsMode === "ssl" || body.tlsMode === "starttls" ? body.tlsMode : undefined,
-            autoStartBridge: typeof body.autoStartBridge === "boolean" ? body.autoStartBridge : undefined,
-            bridgePath: typeof body.bridgePath === "string" ? body.bridgePath : undefined,
+          const parsed = parseAccountPatch(body, true);
+          if ("error" in parsed) { json(res, 400, { error: parsed.error }); return; }
+          const result = await runAtConfigResetGeneration(
+            expectedResetGeneration,
+            () => createAccount(parsed.patch as Omit<AccountSpecShape, "id">),
+          );
+          if (result.stale) {
+            json(res, 409, { error: "Configuration was reset after this account form was loaded. Refresh settings and add the account again." }); return;
+          }
+          const created = result.value;
+          const liveUpdated = await refreshAccountManager(created.id, "account creation");
+          json(res, 201, {
+            account: safeAccount(created),
+            restartRequired: !liveUpdated,
           });
-          // Push the new account's creds into the running AccountManager
-          // so the MCP can connect to it on the very next tool call,
-          // without requiring a restart. The in-memory `created` still
-          // carries the plaintext password (writeRegistry only scrubs
-          // the persisted copy); we forward it here and rely on the
-          // manager to treat empty specs appropriately.
-          try {
-            const mgr = getAccountManager();
-            if (mgr && (created.password || created.smtpToken)) {
-              await mgr.rebuildFromRegistryAsync();
-              mgr.applyKeychainCredentials(created.password || "", created.smtpToken);
-            }
-          } catch (e) {
-            logger.warn("Could not propagate new account creds to AccountManager", "Accounts", e);
-          }
-          json(res, 201, { account: { ...created, password: created.password ? "••••••••" : "" } });
           return;
         }
 
@@ -1860,22 +2446,26 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
           let body: Record<string, unknown>;
           try { body = JSON.parse(await readBodySafe(req)) as Record<string, unknown>; }
           catch { json(res, 400, { error: "Body must be JSON." }); return; }
-          // Strip placeholder passwords — only overwrite when a real value arrives.
-          if (body.password === "" || body.password === "••••••••") delete body.password;
-          const updated = await updateAccount(patchMatch[1], body as Partial<AccountSpecShape>);
-          if (!updated) { json(res, 404, { error: "Account not found." }); return; }
-          // Same propagation as create — a password rotation applied
-          // via PATCH should take effect immediately.
-          try {
-            const mgr = getAccountManager();
-            if (mgr && (updated.password || updated.smtpToken)) {
-              await mgr.rebuildFromRegistryAsync();
-              mgr.applyKeychainCredentials(updated.password || "", updated.smtpToken);
-            }
-          } catch (e) {
-            logger.warn("Could not propagate updated account creds to AccountManager", "Accounts", e);
+          const expectedResetGeneration = parseConfigResetGeneration(body.configResetGeneration);
+          if (expectedResetGeneration === null) {
+            json(res, 400, { error: "Invalid configResetGeneration: must be a non-negative safe integer." }); return;
           }
-          json(res, 200, { account: { ...updated, password: updated.password ? "••••••••" : "" } });
+          const parsed = parseAccountPatch(body, false);
+          if ("error" in parsed) { json(res, 400, { error: parsed.error }); return; }
+          const result = await runAtConfigResetGeneration(
+            expectedResetGeneration,
+            () => updateAccount(patchMatch[1], parsed.patch),
+          );
+          if (result.stale) {
+            json(res, 409, { error: "Configuration was reset after this account form was loaded. Refresh settings and edit the account again." }); return;
+          }
+          const updated = result.value;
+          if (!updated) { json(res, 404, { error: "Account not found." }); return; }
+          const liveUpdated = await refreshAccountManager(updated.id, "account update");
+          json(res, 200, {
+            account: safeAccount(updated),
+            restartRequired: !liveUpdated,
+          });
           return;
         }
 
@@ -1884,7 +2474,8 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
           if (!requireCsrf(req, res)) return;
           const ok = await deleteAccount(patchMatch[1]);
           if (!ok) { json(res, 400, { error: "Cannot delete — unknown account id or last remaining account." }); return; }
-          json(res, 200, { ok: true });
+          const liveUpdated = await refreshAccountManager(undefined, "account deletion");
+          json(res, 200, { ok: true, restartRequired: !liveUpdated });
           return;
         }
 
@@ -1899,21 +2490,23 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
           if (!requireCsrf(req, res)) return;
           const set = await setActiveAccount(activateMatch[1]);
           if (!set) { json(res, 404, { error: "Account not found." }); return; }
-          // Hot-swap: ask the AccountManager to rebuild from the persisted
-          // registry and flip its active pointer. Emits "active-changed"
-          // which rewires the module-level imap/smtp references in index.ts.
+          // Rebuild from the persisted registry. AccountManager emits
+          // "active-changed" if the rebuild changed the selected account,
+          // allowing the daemon to rebind every active-account singleton.
           const mgr = getAccountManager();
           let restartRequired = true;
           if (mgr) {
             try {
               await mgr.rebuildFromRegistryAsync();
-              await mgr.setActive(set.id);
+              if (mgr.activeAccountId() !== set.id) {
+                throw new Error(`AccountManager selected '${mgr.activeAccountId()}', expected '${set.id}'.`);
+              }
               restartRequired = false;
             } catch (err) {
               logger.warn("Hot-swap failed, falling back to restart-required", "Accounts", err);
             }
           }
-          json(res, 200, { account: { ...set, password: set.password ? "••••••••" : "" }, restartRequired });
+          json(res, 200, { account: safeAccount(set), restartRequired });
           return;
         }
 
@@ -1937,7 +2530,7 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
       // ── POST /api/write-claude-desktop ────────────────────────────────────
       if (method === "POST" && path === "/api/write-claude-desktop") {
         if (!requireCsrf(req, res)) return;
-        if (lan && accessToken && !hasValidAccessToken(req, url, accessToken)) {
+        if (lan && accessToken && !hasValidLanAccess(req, url)) {
           json(res, 401, { error: "Access denied." }); return;
         }
         try {
@@ -1987,7 +2580,7 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
           // Daemon-aware: when remoteMode is on, this writes the HTTP entry (a
           // stdio entry would collide with the shared daemon's singleton and
           // fail to start); otherwise a stdio entry with MAILPOUCH_FORCE_STDIO.
-          const built = buildClaudeCodeEntry("stdio");
+          const built = buildClaudeCodeEntry(_moduleDir, "stdio");
 
           if (!existing.mcpServers || typeof existing.mcpServers !== "object") {
             existing.mcpServers = {};
@@ -2018,7 +2611,7 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
       // for the requested transport (stdio | http). Mirrors write-claude-desktop.
       if (method === "POST" && path === "/api/write-claude-code") {
         if (!requireCsrf(req, res)) return;
-        if (lan && accessToken && !hasValidAccessToken(req, url, accessToken)) {
+        if (lan && accessToken && !hasValidLanAccess(req, url)) {
           json(res, 401, { error: "Access denied." }); return;
         }
         try {
@@ -2056,7 +2649,7 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
             }
           }
 
-          const built = buildClaudeCodeEntry(transport);
+          const built = buildClaudeCodeEntry(_moduleDir, transport);
           if (!existing.mcpServers || typeof existing.mcpServers !== "object" || Array.isArray(existing.mcpServers)) {
             existing.mcpServers = {};
           }
@@ -2078,7 +2671,7 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
       // ── POST /api/restart-claude-desktop ──────────────────────────────────
       if (method === "POST" && path === "/api/restart-claude-desktop") {
         if (!requireCsrf(req, res)) return;
-        if (lan && accessToken && !hasValidAccessToken(req, url, accessToken)) {
+        if (lan && accessToken && !hasValidLanAccess(req, url)) {
           json(res, 401, { error: "Access denied." }); return;
         }
         try {
@@ -2220,8 +2813,9 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
  *               If successful, starts an HTTPS server and prints the cert
  *               fingerprint so the user can verify it in the browser.
  *             • Generates a 256-bit single-use access token displayed in the
- *               terminal; every non-root request must carry it via
- *               X-Access-Token header or ?token= query param.
+ *               terminal. Opening `/?token=…` exchanges it for a short-lived
+ *               HttpOnly, SameSite browser session and redirects to a clean
+ *               URL; API clients may instead send X-Access-Token directly.
  *             • Falls back to plain HTTP + token if openssl is absent.
  *             Use only on trusted local networks.
  *
@@ -2292,9 +2886,6 @@ export async function startSettingsServer(
 
     const line  = (s: string) => console.log(`  │ ${s.padEnd(w)} │`);
     const blank = ()           => console.log(`  │ ${" ".repeat(w)} │`);
-    const rule  = (ch: string) => console.log(`  ├${"─".repeat(w + 2)}┤`);
-    void rule; // used below
-
     console.log("");
     console.log(`  ┌${"─".repeat(w + 2)}┐`);
     line("mailpouch — Settings UI");

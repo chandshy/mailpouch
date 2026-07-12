@@ -40,20 +40,29 @@ import { ProtonMailConfig, EmailMessage } from "./types/index.js";
 import { SMTPService } from "./services/smtp-service.js";
 import { SimpleIMAPService, stripHtml } from "./services/simple-imap-service.js";
 import { SimpleLoginService } from "./services/simplelogin-service.js";
-import { AnalyticsService } from "./services/analytics-service.js";
 import { SchedulerService } from "./services/scheduler.js";
 import { ReminderService } from "./services/reminder-service.js";
 import { PassService } from "./services/pass-service.js";
-import { FtsIndexService, FtsUnavailableError, openFtsIndex, type FtsRecord } from "./services/fts-service.js";
+import {
+  registerAuxiliaryServiceDisabler,
+  registerAuxiliaryServiceRefresher,
+} from "./services/auxiliary-service-runtime.js";
+import {
+  BridgeWatchdogRouteTracker,
+  bridgeWatchdogRouteForAccount,
+  type BridgeWatchdogRoute,
+} from "./services/bridge-watchdog-route.js";
+import { ftsRecordFromEmail, type FtsRecord } from "./services/fts-service.js";
 import { AgentGrantStore } from "./agents/grant-store.js";
 import { GrantManager } from "./agents/grant-manager.js";
+import type { AgentGrant } from "./agents/types.js";
 import { ServiceAccountStore } from "./agents/service-account-store.js";
 import { AgentAuditLog, hashArgs } from "./agents/audit.js";
 import { currentCaller, localAgentId, type CallerContext } from "./agents/caller-context.js";
 import { registerAgentServices } from "./agents/registry.js";
 import { notifications as agentNotifications } from "./agents/notifications.js";
 import { shouldAutoOpenApproval } from "./agents/auto-open-approval.js";
-import { AccountManager, registerAccountManager } from "./accounts/manager.js";
+import { AccountManager, registerAccountManager, type AccountServices, type AccountsRebuiltEvent } from "./accounts/manager.js";
 import { DesktopNotifier } from "./notifications/desktop.js";
 import { DesktopPrompt } from "./notifications/desktop-prompt.js";
 import { WebhookDispatcher } from "./notifications/webhooks.js";
@@ -99,8 +108,14 @@ function describeDestructivePreview(tool: string, args: Record<string, unknown>)
       return `Would permanently delete folder ${String(args.folderName ?? "(missing)")} and all emails inside it. This cannot be undone.`;
     case "alias_delete":
       return `Would permanently delete SimpleLogin alias ${String(args.aliasId ?? "(missing)")}. This cannot be undone.`;
+    case "alias_delete_contact":
+      return `Would permanently delete SimpleLogin contact ${String(args.contactId ?? "(missing)")}. This cannot be undone.`;
+    case "alias_delete_mailbox":
+      return `Would delete SimpleLogin mailbox ${String(args.mailboxId ?? "(missing)")}; linked aliases may also be deleted.`;
     case "pass_get":
       return `Would decrypt Proton Pass item ${String(args.item_id ?? "(missing)")} and return its secret fields to the model.`;
+    case "pass_totp":
+      return `Would reveal the live TOTP code for Proton Pass item ${String(args.item_id ?? "(missing)")}.`;
     default:
       return `Would run a destructive operation on the Proton mailbox.`;
   }
@@ -130,11 +145,12 @@ function confirmGateFallbackResponse(name: string, preview: string): {
 }
 import { sanitizeText } from "./settings/security.js";
 import { tracer } from "./utils/tracer.js";
-import { allToolDefs, allHandlers, escalationHandlers, describeRequestEscalation } from "./tools/registry.js";
+import { allToolDefs, advertisedToolDefs, allHandlers, escalationHandlers, describeRequestEscalation } from "./tools/registry.js";
 import type { ToolCallContext, ToolSharedState } from "./tools/types.js";
 import { gatherSetupStatus } from "./diagnostics/setup-status.js";
 import { shouldSurfaceGrantToast, shouldSurfaceActionToast } from "./notifications/security-gate.js";
 import { resolveInvocation, USAGE } from "./cli/invocation.js";
+import { AccountRuntimeRegistry } from "./runtime/account-runtime.js";
 
 // ─── Service Initialization ───────────────────────────────────────────────────
 // All credentials and connection settings are loaded from ~/.mailpouch.json
@@ -163,56 +179,133 @@ const config: ProtonMailConfig = {
 
 // Multi-account: AccountManager owns one SimpleIMAPService + SMTPService per
 // configured account. The module-level `imapService`/`smtpService` symbols
-// below point at whichever account is currently "active" and get hot-swapped
-// when the user switches accounts via the settings UI — no restart needed.
+// below point at whichever account is currently active. An active-account
+// transition rebinds every singleton that follows the default account.
 // Per-tool routing to a non-active account happens in the dispatcher via a
 // local shadow of these names.
 const accountManager = new AccountManager();
 registerAccountManager(accountManager);
 let imapService: SimpleIMAPService = accountManager.getActive().imap;
 let smtpService: SMTPService = accountManager.getActive().smtp;
-accountManager.on("active-changed", (ev: { services: { imap: SimpleIMAPService; smtp: SMTPService } }) => {
-  imapService = ev.services.imap;
-  smtpService = ev.services.smtp;
-  logger.info("Module-level imap/smtp services rebound to the new active account", "MCPServer");
-});
 // SimpleLogin client is lazy: constructed empty and reconfigured in main() once
 // the API key is loaded. Alias tools check isConfigured() before dispatching.
 let simpleloginService = new SimpleLoginService("");
-const analyticsService = new AnalyticsService();
 
-import { homeFile as _homeFile } from "./utils/home-path.js";
+import { ensurePrivateParentDirectory, profileHomeFile } from "./utils/home-path.js";
 
-const SCHEDULER_STORE = _homeFile("MAILPOUCH_SCHEDULER_STORE", ".mailpouch-scheduled.json");
-const schedulerService = new SchedulerService(smtpService, SCHEDULER_STORE);
-
-const REMINDERS_STORE = _homeFile("MAILPOUCH_REMINDERS", ".mailpouch-reminders.json");
-const reminderService = new ReminderService(REMINDERS_STORE);
-
-const PASS_AUDIT_PATH = _homeFile("MAILPOUCH_PASS_AUDIT", ".mailpouch-pass-audit.jsonl");
-let passService: PassService | null = null;
-
-const FTS_DB_PATH = _homeFile("MAILPOUCH_FTS_DB", ".mailpouch-fts.db");
-let ftsService: FtsIndexService | null = null;
-
-function getFts(): FtsIndexService {
-  if (ftsService) return ftsService;
-  ftsService = openFtsIndex(FTS_DB_PATH);
-  return ftsService;
+// Runtime state follows the configuration profile.  A custom
+// MAILPOUCH_CONFIG may legitimately run alongside the default profile, so it
+// must not share account-owned queues, indexes, or authorization stores.
+function profileRuntimeFile(envName: string, basename: string): string {
+  const path = profileHomeFile(envName, basename, getConfigPath());
+  ensurePrivateParentDirectory(path);
+  return path;
 }
 
+const SCHEDULER_STORE = profileRuntimeFile("MAILPOUCH_SCHEDULER_STORE", ".mailpouch-scheduled.json");
+const schedulerService = new SchedulerService(smtpService, SCHEDULER_STORE);
+
+const REMINDERS_STORE = profileRuntimeFile("MAILPOUCH_REMINDERS", ".mailpouch-reminders.json");
+const reminderService = new ReminderService(REMINDERS_STORE);
+
+const PASS_AUDIT_PATH = profileRuntimeFile("MAILPOUCH_PASS_AUDIT", ".mailpouch-pass-audit.jsonl");
+let passService: PassService | null = null;
+
+/**
+ * Rebuild the immutable SimpleLogin/Pass clients from the latest durable
+ * settings.  The settings server calls this through the runtime registry
+ * after a successful auxiliary credential, base-URL, or CLI-path save.
+ *
+ * Each call receives a generation so a slow keychain read from an older save
+ * cannot overwrite a newer clear/rotation. Replacing the module references is
+ * atomic for newly dispatched calls; an already-running tool keeps its own
+ * captured service until it completes.
+ */
+let auxiliaryServiceRefreshGeneration = 0;
+async function refreshAuxiliaryServicesFromConfig(): Promise<void> {
+  const generation = ++auxiliaryServiceRefreshGeneration;
+  try {
+    const cn = loadConfig()?.connection;
+    if (!cn) {
+      if (generation === auxiliaryServiceRefreshGeneration) {
+        simpleloginService = new SimpleLoginService("");
+        passService = null;
+      }
+      return;
+    }
+
+    const auxCreds = await loadAuxiliaryCredentialsFromKeychain();
+    // A newer settings save started another refresh while the keychain call
+    // was pending. Its snapshot is authoritative.
+    if (generation !== auxiliaryServiceRefreshGeneration) return;
+
+    const effectiveSimpleloginKey = auxCreds?.simpleloginApiKey || cn.simpleloginApiKey || "";
+    const effectivePassPat = auxCreds?.passAccessToken || cn.passAccessToken || "";
+    const source = auxCreds?.storage ?? "config";
+
+    // Always replace, even with empty values: that is what makes an explicit
+    // clear revoke the old in-process credentials immediately.
+    simpleloginService = new SimpleLoginService(
+      effectiveSimpleloginKey,
+      cn.simpleloginBaseUrl || undefined,
+    );
+    passService = effectivePassPat
+      ? new PassService({
+        personalAccessToken: effectivePassPat,
+        cliPath: cn.passCliPath || undefined,
+        auditLogPath: PASS_AUDIT_PATH,
+      })
+      : null;
+
+    if (effectiveSimpleloginKey) {
+      logger.info(`SimpleLogin client refreshed (alias_* tools active, source=${source})`, "MCPServer");
+    } else {
+      logger.info("SimpleLogin client disabled after settings refresh", "MCPServer");
+    }
+    if (effectivePassPat) {
+      logger.info(`Proton Pass client refreshed (pass_* tools active, source=${source})`, "MCPServer");
+    } else {
+      logger.info("Proton Pass client disabled after settings refresh", "MCPServer");
+    }
+  } catch (error) {
+    // A failed refresh must not leave a recently cleared/rotated credential
+    // live in the daemon. Fail closed, then let the settings server surface
+    // restartRequired rather than claiming the old service is still current.
+    if (generation === auxiliaryServiceRefreshGeneration) {
+      simpleloginService = new SimpleLoginService("");
+      passService = null;
+    }
+    throw error;
+  }
+}
+
+/**
+ * Reset is intentionally different from a normal settings refresh: it must
+ * never read the keychain again, because cleanup can fail while an old entry
+ * remains. Advancing the generation also prevents an older in-flight refresh
+ * from restoring a credential after this fail-closed transition.
+ */
+function disableAuxiliaryServicesForReset(): void {
+  ++auxiliaryServiceRefreshGeneration;
+  simpleloginService = new SimpleLoginService("");
+  passService = null;
+  logger.info("SimpleLogin and Proton Pass clients disabled after configuration reset", "MCPServer");
+}
+
+registerAuxiliaryServiceRefresher(refreshAuxiliaryServicesFromConfig);
+registerAuxiliaryServiceDisabler(disableAuxiliaryServicesForReset);
+
+// The pre-multi-account database has no owner column. AccountRuntimeRegistry
+// archives it on first FTS use and creates a private database per account,
+// rather than risk attributing decrypted mail to the wrong mailbox.
+const LEGACY_FTS_DB_PATH = profileRuntimeFile("MAILPOUCH_FTS_DB", ".mailpouch-fts.db");
+const accountRuntime = new AccountRuntimeRegistry({ legacyFtsPath: LEGACY_FTS_DB_PATH });
+
 function recordFromEmail(m: EmailMessage): FtsRecord {
-  const stableId = m.protonId ?? m.id;
-  const toAll = (m.to ?? []).join(", ");
-  return {
-    id: stableId,
-    subject: m.subject ?? "",
-    from: m.from ?? "",
-    to: toAll,
-    folder: m.folder ?? "",
-    body: stripHtml(m.body ?? m.bodyPreview ?? "").slice(0, 200_000),
-    dateEpoch: Math.floor((m.date?.getTime?.() ?? 0) / 1000),
-  };
+  return ftsRecordFromEmail(
+    m,
+    stripHtml(m.body ?? m.bodyPreview ?? "").slice(0, 200_000),
+  );
 }
 
 // ─── Agent-grant system ───────────────────────────────────────────────────────
@@ -220,14 +313,20 @@ function recordFromEmail(m: EmailMessage): FtsRecord {
 // gate is consistent whether the transport is stdio or HTTP — but stdio
 // callers fall through to the global preset (no caller context), which
 // preserves the single-user Claude Desktop default.
-const AGENT_GRANTS_PATH = _homeFile("MAILPOUCH_AGENTS", ".mailpouch-agents.json");
-const AGENT_AUDIT_PATH = _homeFile("MAILPOUCH_AGENT_AUDIT", ".mailpouch-agent-audit.jsonl");
-const SERVICE_ACCOUNTS_PATH = _homeFile("MAILPOUCH_SERVICE_ACCOUNTS", ".mailpouch-service-accounts.json");
-const OAUTH_TOKENS_PATH = _homeFile("MAILPOUCH_OAUTH_TOKENS", ".mailpouch-oauth-tokens.json");
+const AGENT_GRANTS_PATH = profileRuntimeFile("MAILPOUCH_AGENTS", ".mailpouch-agents.json");
+const AGENT_AUDIT_PATH = profileRuntimeFile("MAILPOUCH_AGENT_AUDIT", ".mailpouch-agent-audit.jsonl");
+const SERVICE_ACCOUNTS_PATH = profileRuntimeFile("MAILPOUCH_SERVICE_ACCOUNTS", ".mailpouch-service-accounts.json");
+const OAUTH_TOKENS_PATH = profileRuntimeFile("MAILPOUCH_OAUTH_TOKENS", ".mailpouch-oauth-tokens.json");
+// AgentGrantStore derives its SQLite hourly-quota sidecar from this exact
+// profile-scoped grants path, so custom profiles and MAILPOUCH_AGENTS overrides
+// never accidentally share a rate budget.
 const agentGrants = new AgentGrantStore(AGENT_GRANTS_PATH);
-const grantManager = new GrantManager(agentGrants);
 const agentAudit = new AgentAuditLog({ path: AGENT_AUDIT_PATH });
 const serviceAccounts = new ServiceAccountStore(SERVICE_ACCOUNTS_PATH);
+// Service grants are credential-backed: GrantManager fresh-checks this store
+// on every authorization decision so a grant orphaned by an interrupted
+// cross-file revoke cannot outlive its service-account credential.
+const grantManager = new GrantManager(agentGrants, serviceAccounts);
 // Each persisted service account is born with an active grant (pre-approved at
 // issuance) so its client_credentials login flows through GrantManager like any
 // approved agent. Converge on startup so an account edited/re-issued while the
@@ -344,13 +443,32 @@ let bridgeRestartAttempts = 0;
 const BRIDGE_MAX_RESTARTS = 3;
 /** Handle returned by setInterval for the bridge watchdog (null when inactive). */
 let bridgeWatchdogTimer: ReturnType<typeof setInterval> | null = null;
+/**
+ * The settings-only process deliberately never touches Bridge.  Hold account
+ * rebuild events behind this lifecycle gate until the normal MCP startup path
+ * has completed its initial reachability probe.
+ */
+let bridgeWatchdogPermitted = false;
+/**
+ * Retains the recovery-relevant active route even when the watchdog exhausts
+ * its retries. A routine AccountManager rebuild then remains a no-op instead
+ * of re-arming a Bridge that was deliberately rate-limited.
+ */
+const bridgeWatchdogRouteTracker = new BridgeWatchdogRouteTracker();
+/**
+ * Invalidates a tick that was already awaiting a reachability probe when the
+ * active account changes or auto-start is disabled.  Clearing an interval does
+ * not cancel its currently-running async callback, so the callback must carry
+ * and check this generation before it launches Bridge or reconnects IMAP.
+ */
+let bridgeWatchdogGeneration = 0;
 /** PID of the Bridge process this server launched. Used for clean shutdown so we
  *  never fall back to `pkill -f proton-bridge`, which would kill any unrelated
  *  process that happens to carry "proton-bridge" in its command line. */
 let launchedBridgePid: number | null = null;
 /** Prevents concurrent gracefulShutdown invocations (SIGINT + tray quit race, etc.). */
 let _shutdownInProgress = false;
-/** Path of the per-account singleton lock this process holds (null if none/disabled). */
+/** Path of the configuration-profile singleton lock this process holds (null if none/disabled). */
 let _singletonLockPath: string | null = null;
 
 // ─── Shared mutable state ────────────────────────────────────────────────────
@@ -364,43 +482,190 @@ const sharedState: ToolSharedState = {
   // Tracks the result of the last SMTP verify attempt so get_connection_status
   // returns an honest answer instead of a hardcoded `true`.
   smtpStatus: { connected: false, lastCheck: new Date(0) },
-  analyticsCache: null,
-  analyticsCacheInflight: null,
 };
+
+function syncLegacyConfigFromActiveAccount({ spec }: AccountServices): void {
+  const secure = spec.tlsMode === "ssl";
+  Object.assign(config.smtp, {
+    host: spec.smtpHost,
+    port: spec.smtpPort,
+    secure,
+    username: spec.username,
+    password: spec.password,
+    smtpToken: spec.smtpToken,
+    bridgeCertPath: spec.bridgeCertPath,
+    allowInsecureBridge: spec.allowInsecureBridge,
+  });
+  Object.assign(config.imap, {
+    host: spec.imapHost,
+    port: spec.imapPort,
+    secure,
+    username: spec.username,
+    password: spec.password,
+    bridgeCertPath: spec.bridgeCertPath,
+    allowInsecureBridge: spec.allowInsecureBridge,
+  });
+  config.autoStartBridge = spec.autoStartBridge;
+  config.bridgePath = spec.bridgePath;
+}
+
+/**
+ * Tool handlers occasionally need connection metadata (for a reply-to check
+ * or a live bridge probe). Build a per-call snapshot from the routed account
+ * instead of handing an `account_id` call the active account's credentials.
+ */
+function configForAccount({ spec }: AccountServices): ProtonMailConfig {
+  const secure = spec.tlsMode === "ssl";
+  return {
+    ...config,
+    smtp: {
+      ...config.smtp,
+      host: spec.smtpHost,
+      port: spec.smtpPort,
+      secure,
+      username: spec.username,
+      password: spec.password,
+      smtpToken: spec.smtpToken,
+      bridgeCertPath: spec.bridgeCertPath,
+      allowInsecureBridge: spec.allowInsecureBridge,
+    },
+    imap: {
+      ...config.imap,
+      host: spec.imapHost,
+      port: spec.imapPort,
+      secure,
+      username: spec.username,
+      password: spec.password,
+      bridgeCertPath: spec.bridgeCertPath,
+      allowInsecureBridge: spec.allowInsecureBridge,
+    },
+    autoStartBridge: spec.autoStartBridge,
+    bridgePath: spec.bridgePath,
+  };
+}
+
+/**
+ * A tool call may await IMAP/SMTP while Settings repoints the same account ID
+ * at another mailbox. Do not return a completed old-mailbox result under the
+ * reused ID. Connection teardown on replacement is the best-effort abort for
+ * an in-flight mutation; callers receive an explicit uncertain-outcome error
+ * rather than stale content that appears to belong to the new mailbox.
+ */
+function isCurrentAccountRoute(
+  accountId: string,
+  accountIdentity: string,
+  services: AccountServices,
+): boolean {
+  try {
+    return accountManager.getForAccount(accountId) === services
+      && accountManager.identityForAccount(accountId) === accountIdentity;
+  } catch {
+    return false;
+  }
+}
+
+accountManager.on("active-changed", (ev: { services: AccountServices }) => {
+  imapService = ev.services.imap;
+  smtpService = ev.services.smtp;
+  syncLegacyConfigFromActiveAccount(ev.services);
+  schedulerService.setSmtpService(smtpService);
+  reconcileBridgeWatchdog();
+
+  sharedState.smtpStatus = accountRuntime.getSmtpStatus(ev.services.spec.id);
+
+  logger.info("Active-account services rebound; account-owned caches remain isolated", "MCPServer", {
+    accountId: ev.services.spec.id,
+  });
+});
+
+accountManager.on("account-services-replaced", (ev: { accountId: string; services: AccountServices }) => {
+  // A same-ID edit can repoint an account at another mailbox without causing
+  // an active-id transition. Rebind the module-level fallbacks explicitly so
+  // no active-account singleton holds the old connection/transporter.
+  if (accountManager.activeAccountId() !== ev.accountId) return;
+  imapService = ev.services.imap;
+  smtpService = ev.services.smtp;
+  syncLegacyConfigFromActiveAccount(ev.services);
+  schedulerService.setSmtpService(smtpService);
+  reconcileBridgeWatchdog();
+  accountRuntime.setSmtpStatus(ev.accountId, { connected: false, lastCheck: new Date(0) });
+  sharedState.smtpStatus = accountRuntime.getSmtpStatus(ev.accountId);
+  logger.info("Active account services replaced after identity change", "MCPServer", { accountId: ev.accountId });
+});
+
+/**
+ * Account-scoped grants name a mutable registry ID.  Reusing that ID for a
+ * different mailbox must never carry an old agent's authority across the
+ * ownership boundary.  Service-account credentials are removed as well:
+ * revoking only their grant would let the next client_credentials exchange
+ * reactivate it from the persisted credential.
+ */
+function revokeGrantsBoundToAccount(accountId: string, reason: string): void {
+  for (const grant of agentGrants.list()) {
+    if (grant.conditions?.accountId !== accountId) continue;
+    const serviceCredentialRemoved = serviceAccounts.revoke(grant.clientId);
+    const revoked = agentGrants.revoke(grant.clientId);
+    if (revoked || serviceCredentialRemoved) {
+      logger.warn("Revoked account-scoped agent authority after mailbox ownership changed", "AgentGate", {
+        accountId,
+        clientId: grant.clientId,
+        reason,
+        serviceCredentialRemoved,
+      });
+    }
+  }
+}
+
+accountManager.on("accounts-rebuilt", (ev: AccountsRebuiltEvent) => {
+  // A credential/certificate edit keeps the same service object and therefore
+  // does not emit active-changed. Refresh the legacy active snapshot anyway so
+  // watchdogs and diagnostics never retain the prior active account settings.
+  try {
+    const active = accountManager.getActive();
+    imapService = active.imap;
+    smtpService = active.smtp;
+    syncLegacyConfigFromActiveAccount(active);
+    schedulerService.setSmtpService(smtpService);
+    reconcileBridgeWatchdog();
+    sharedState.smtpStatus = accountRuntime.getSmtpStatus(active.spec.id);
+  } catch (err: unknown) {
+    logger.warn("Could not refresh active-account bindings after registry rebuild", "MCPServer", err);
+  }
+
+  // A deleted ID and a repointed ID are both hard ownership boundaries. Clear
+  // derived plaintext and quarantine queued background work before anything
+  // can run against the newly resolved account services.
+  for (const accountId of [...ev.removedAccountIds, ...ev.identityChangedAccountIds]) {
+    const reason = ev.removedAccountIds.includes(accountId)
+      ? "account removed from registry"
+      : "account identity changed";
+    try { accountRuntime.resetMailbox(accountId); }
+    catch (err: unknown) { logger.warn("Could not reset account-owned runtime state", "MCPServer", { accountId, err }); }
+    try { schedulerService.quarantineAccount(accountId, reason); }
+    catch (err: unknown) { logger.warn("Could not quarantine account-owned schedules", "MCPServer", { accountId, err }); }
+    try { reminderService.quarantineAccount(accountId, reason); }
+    catch (err: unknown) { logger.warn("Could not quarantine account-owned reminders", "MCPServer", { accountId, err }); }
+    try { revokeGrantsBoundToAccount(accountId, reason); }
+    catch (err: unknown) { logger.warn("Could not revoke account-scoped agent grants", "MCPServer", { accountId, err }); }
+  }
+
+  // Dispose removed account objects after the reset so their current FTS path
+  // can be scrubbed. Retained account runtimes stay alive and isolated.
+  accountRuntime.disposeAccountsExcept(ev.accountIds);
+});
 
 // ─── Analytics TTL Cache ──────────────────────────────────────────────────────
 
-const ANALYTICS_CACHE_TTL_MS = 5 * 60 * 1000;
-
 /**
- * Fetch inbox + sent emails, update the analytics service, and cache the result.
- * Concurrent cache-miss callers share a single in-flight fetch to avoid a stampede.
+ * Fetch a requested account's inbox + sent messages into that account's
+ * analytics runtime. The registry owns cache/in-flight state, so explicit
+ * account routing cannot accidentally observe the active account.
  */
-async function getAnalyticsEmails(): Promise<{ inbox: EmailMessage[]; sent: EmailMessage[] }> {
-  const now = Date.now();
-  const cached = sharedState.analyticsCache;
-  if (cached && now - cached.fetchedAt < ANALYTICS_CACHE_TTL_MS) {
-    return { inbox: cached.inbox, sent: cached.sent };
-  }
-  if (sharedState.analyticsCacheInflight) return sharedState.analyticsCacheInflight;
-  sharedState.analyticsCacheInflight = (async () => {
-    try {
-      // IMAP-012: getEmails now throws on connection loss (rather than
-      // returning empty). Both warm-cache calls degrade to [] on failure so
-      // a transient connection blip can't reject the analytics cache fill
-      // or crash startup — the INBOX call was previously uncaught.
-      const [inbox, sent] = await Promise.all([
-        imapService.getEmails("INBOX", 200).catch(() => [] as EmailMessage[]),
-        imapService.getEmails("Sent", 100).catch(() => [] as EmailMessage[]),
-      ]);
-      sharedState.analyticsCache = { inbox: trimForAnalytics(inbox), sent: trimForAnalytics(sent), fetchedAt: Date.now() };
-      analyticsService.updateEmails(trimForAnalytics(inbox), trimForAnalytics(sent));
-      return { inbox, sent };
-    } finally {
-      sharedState.analyticsCacheInflight = null;
-    }
-  })();
-  return sharedState.analyticsCacheInflight;
+function getAnalyticsEmailsForAccount(
+  accountId: string,
+  sourceImapService: SimpleIMAPService,
+): Promise<{ inbox: EmailMessage[]; sent: EmailMessage[] }> {
+  return accountRuntime.getAnalyticsEmails(accountId, sourceImapService, trimForAnalytics);
 }
 
 // ─── Cursor-Based Pagination ──────────────────────────────────────────────────
@@ -615,7 +880,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
   // The dynamic description for request_permission_escalation has to be
   // re-stamped with the live settings port, which depends on the current
   // config snapshot — everything else is static.
-  const defs = allToolDefs().map(def =>
+  const defs = advertisedToolDefs({
+    simpleLogin: simpleloginService.isConfigured(),
+    pass: passService !== null,
+  }).map(def =>
     def.name === "request_permission_escalation"
       ? { ...def, description: describeRequestEscalation(config.settingsPort ?? 8766) }
       : def,
@@ -649,6 +917,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   // wrong and the single next action. Read-only; never grants or mutates.
   if (name === "setup_status") {
     const diagCaller = currentCaller() ?? _stdioCaller ?? undefined;
+    // This is display-only diagnostic context, not an authorization decision;
+    // retain the lightweight live-map lookup so a partially-written external
+    // grants file does not hide useful setup guidance.
     const diagGrant = diagCaller ? agentGrants.get(diagCaller.clientId) : undefined;
     const result = await gatherSetupStatus({
       grant: diagGrant ? { status: diagGrant.status, clientName: diagGrant.clientName } : undefined,
@@ -719,12 +990,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const requestedAccountId = typeof args.account_id === "string" && args.account_id.trim()
     ? args.account_id.trim()
     : accountManager.activeAccountId();
-  let routedImapService: SimpleIMAPService = accountManager.getActive().imap;
-  let routedSmtpService: SMTPService = accountManager.getActive().smtp;
+  let routedAccountServices: AccountServices = accountManager.getActive();
+  let routedImapService: SimpleIMAPService = routedAccountServices.imap;
+  let routedSmtpService: SMTPService = routedAccountServices.smtp;
+  let routedAccountIdentity = "";
   try {
-    const svcs = accountManager.getForAccount(requestedAccountId);
-    routedImapService = svcs.imap;
-    routedSmtpService = svcs.smtp;
+    routedAccountServices = accountManager.getForAccount(requestedAccountId);
+    routedImapService = routedAccountServices.imap;
+    routedSmtpService = routedAccountServices.smtp;
+    routedAccountIdentity = accountManager.identityForAccount(requestedAccountId);
   } catch {
     return {
       content: [{ type: "text" as const, text: `Unknown account_id: ${requestedAccountId}` }],
@@ -744,6 +1018,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const callStartedAt = Date.now();
   // Flipped true in the catch so the finally success path is skipped.
   let auditFailureRecorded = false;
+  let resultIsError = false;
   // PERM-007: snapshot the config ONCE for the whole gate chain. The grant
   // gate's global-preset read and the destructive-confirm gate's
   // requireDestructiveConfirm read previously each called loadConfig()
@@ -751,36 +1026,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   // between them produced a TOCTOU window where the two gates judged the
   // same call against different snapshots. One snapshot closes that gap.
   const configSnapshot = loadConfig() ?? defaultConfig();
+  const globalPreset = configSnapshot.permissions.preset;
+  let authorizedGrant: AgentGrant | undefined;
   if (caller) {
-    const callerGrant = agentGrants.get(caller.clientId);
-    const boundAccountId = callerGrant?.conditions?.accountId;
-    if (boundAccountId && boundAccountId !== requestedAccountId) {
-      agentAudit.write({
-        ts: new Date(callStartedAt).toISOString(),
-        clientId: caller.clientId,
-        clientName: caller.clientName,
-        tool: name,
-        argHash: hashArgs(args),
-        ok: false,
-        durMs: Date.now() - callStartedAt,
-        blockedReason: `Grant is bound to account ${boundAccountId}; call targeted ${requestedAccountId}.`,
-        ip: caller.ip,
-      });
-      auditFailureRecorded = true;
-      return {
-        content: [{ type: "text" as const, text: `Blocked: this agent's grant is bound to account ${boundAccountId}.` }],
-        isError: true,
-      };
-    }
-
-    const globalPreset = configSnapshot.permissions.preset;
+    // One durable snapshot feeds the initial grant gate. Do not consult
+    // AgentGrantStore's in-memory UI map here: another process can revoke or
+    // narrow this caller while the daemon is alive.
+    const grantSnapshot = grantManager.getAuthorizationSnapshot(caller.clientId);
     const grantResult = grantManager.check({
       clientId: caller.clientId,
       tool: name,
       args: args as Record<string, unknown>,
       callerIp: caller.ip,
+      targetAccountId: requestedAccountId,
       globalPreset,
-    });
+    }, { reserveHourlyToolSlot: false, snapshot: grantSnapshot });
     if (!grantResult.allowed) {
       logger.warn(`Agent grant denied '${name}' for ${caller.clientId}`, "AgentGate", { reason: grantResult.reason });
       agentAudit.write({
@@ -887,6 +1147,47 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
   }
 
+  // Reserve a grant-scoped hourly slot only once every other pre-execution
+  // gate has allowed the call.  GrantManager repeats its own condition checks
+  // as part of this final step, then atomically prunes/checks/reserves the
+  // per-client canonical-tool bucket.  This prevents parallel calls from
+  // overshooting a cap without charging a slot to a globally-disabled or
+  // confirmation-rejected request.
+  if (caller) {
+    // A destructive confirmation can await user input. Re-read authorization
+    // state afterwards so an external revoke/change wins before dispatch.
+    const grantSnapshot = grantManager.getAuthorizationSnapshot(caller.clientId);
+    const finalGrant = grantSnapshot.kind === "present" ? grantSnapshot.grant : undefined;
+    const reservationResult = grantManager.check({
+      clientId: caller.clientId,
+      tool: name,
+      args: args as Record<string, unknown>,
+      callerIp: caller.ip,
+      targetAccountId: requestedAccountId,
+      globalPreset,
+    }, { snapshot: grantSnapshot });
+    if (!reservationResult.allowed) {
+      logger.warn(`Agent grant denied '${name}' for ${caller.clientId}`, "AgentGate", { reason: reservationResult.reason });
+      agentAudit.write({
+        ts: new Date(callStartedAt).toISOString(),
+        clientId: caller.clientId,
+        clientName: caller.clientName,
+        tool: name,
+        argHash: hashArgs(args),
+        ok: false,
+        durMs: Date.now() - callStartedAt,
+        blockedReason: reservationResult.reason,
+        ip: caller.ip,
+      });
+      auditFailureRecorded = true;
+      return {
+        content: [{ type: "text" as const, text: `Blocked by agent grant: ${reservationResult.reason}` }],
+        isError: true,
+      };
+    }
+    authorizedGrant = finalGrant;
+  }
+
   // Response-size limits — hot-reloaded from config every 15 s.
   const _limits = permissions.getResponseLimits();
 
@@ -962,23 +1263,30 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
     const ctx: ToolCallContext = {
       args: args as Record<string, unknown>,
+      accountId: requestedAccountId,
+      accountIdentity: routedAccountIdentity,
       imapService: routedImapService,
       smtpService: routedSmtpService,
       simpleloginService,
-      analyticsService,
+      analyticsService: accountRuntime.getAnalyticsService(requestedAccountId),
       schedulerService,
       reminderService,
       passService,
-      getFts,
+      getFts: () => accountRuntime.getFts(requestedAccountId, routedAccountIdentity),
       // Folder-allowlist accessor: trusted/stdio callers (no caller context)
       // and static-bearer callers fall through to `undefined` (= no
       // restriction), preserving existing behavior. OAuth callers with a
       // folder-restricted grant return their allowlist for content-scoping.
       getCallerAllowedFolders: () => {
-        if (!caller) return undefined;
-        return grantManager.resolveAllowedFolders(caller.clientId);
+        if (!authorizedGrant) return undefined;
+        return grantManager.resolveAllowedFolders(authorizedGrant);
       },
-      config,
+      config: configForAccount(routedAccountServices),
+      smtpStatus: accountRuntime.getSmtpStatus(requestedAccountId),
+      setSmtpStatus: (status) => {
+        accountRuntime.setSmtpStatus(requestedAccountId, status);
+        if (accountManager.activeAccountId() === requestedAccountId) sharedState.smtpStatus = { ...status };
+      },
       limits: _limits,
       ok,
       actionOk,
@@ -986,7 +1294,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       sendProgress,
       encodeCursor,
       decodeCursor,
-      getAnalyticsEmails,
+      getAnalyticsEmails: () => getAnalyticsEmailsForAccount(requestedAccountId, routedImapService),
+      invalidateAnalytics: () => accountRuntime.invalidateAnalytics(requestedAccountId),
       recordFromEmail,
       launchProtonBridge,
       killProtonBridge,
@@ -999,6 +1308,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       state: sharedState,
     };
     const result = await handler(ctx);
+    if (!isCurrentAccountRoute(requestedAccountId, routedAccountIdentity, routedAccountServices)) {
+      resultIsError = true;
+      logger.warn("Discarded a completed tool result after its account route changed", "MCPServer", {
+        tool: name,
+        accountId: requestedAccountId,
+      });
+      return {
+        content: [{
+          type: "text" as const,
+          text: "The account changed while this request was running, so its result was discarded. If this request changed mail, its outcome may be unknown; inspect the mailbox before retrying.",
+        }],
+        isError: true,
+      };
+    }
+    resultIsError = result.isError === true;
     // Per-action security notification (debug aid) — debug-logs a successful
     // non-read-only action; also toasts it when "Surface security messages" is
     // enabled. Uses the one config snapshot already loaded for this gate chain.
@@ -1026,11 +1350,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       isError: true,
     };
   } finally {
-    // Success audit: when the try block exited via a normal return (no
-    // catch ran), the call completed successfully. We can't observe the
-    // response contents from here (each case returns directly), but the
-    // agent-audit channel intentionally avoids logging response bodies —
-    // we just need the fact of the call and its duration.
+    // Every normal handler return receives an audit row. A structured error
+    // is a failed call, not a successful one, and must not consume the
+    // grant's successful-call budget.
     if (!auditFailureRecorded && caller) {
       agentAudit.write({
         ts: new Date(callStartedAt).toISOString(),
@@ -1038,11 +1360,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         clientName: caller.clientName,
         tool: name,
         argHash: hashArgs(args),
-        ok: true,
+        ok: !resultIsError,
         durMs: Date.now() - callStartedAt,
+        ...(resultIsError ? { blockedReason: "Tool returned an error." } : {}),
         ip: caller.ip,
       });
-      agentGrants.recordCall(caller.clientId);
+      if (!resultIsError) agentGrants.recordCall(caller.clientId);
     }
   }
   }); // end tracer.span('mcp.tool_call')
@@ -1052,12 +1375,148 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 // RESOURCES
 // ═════════════════════════════════════════════════════════════════════════════
 
+/**
+ * Resources and prompts can return decrypted mail just as tools can. They do
+ * not pass through CallToolRequestSchema, so apply the same grant + global
+ * read policy here rather than accidentally creating an approval bypass for
+ * remote MCP clients.
+ */
+interface ActiveReadSurfaceAccess {
+  allowedFolders?: string[];
+  accountId: string;
+  accountIdentity: string;
+  services: AccountServices;
+}
+
+/**
+ * Bind a resource/prompt read to the active mailbox observed at its grant
+ * check. Resources do not accept account_id, so an active-account switch
+ * while IMAP is awaiting must discard the old result rather than returning it
+ * under the new default mailbox.
+ */
+async function readFromActiveSurface<T>(
+  access: ActiveReadSurfaceAccess,
+  read: (imap: SimpleIMAPService) => Promise<T>,
+): Promise<T> {
+  const isStillActive = () => accountManager.activeAccountId() === access.accountId
+    && isCurrentAccountRoute(access.accountId, access.accountIdentity, access.services);
+  if (!isStillActive()) {
+    throw new McpError(ErrorCode.InvalidRequest, "The active account changed before this read could start. Retry after the switch completes.");
+  }
+  const result = await read(access.services.imap);
+  if (!isStillActive()) {
+    throw new McpError(ErrorCode.InvalidRequest, "The active account changed while this read was running, so its result was discarded.");
+  }
+  return result;
+}
+
+function requireReadSurfaceAccess(
+  tool: ToolName,
+  args: Record<string, unknown> = {},
+): ActiveReadSurfaceAccess {
+  const services = accountManager.getActive();
+  const activeAccountId = services.spec.id;
+  const accountIdentity = accountManager.identityForAccount(activeAccountId);
+  const caller = currentCaller() ?? _stdioCaller ?? undefined;
+  if (!caller) return { accountId: activeAccountId, accountIdentity, services };
+
+  const grantSnapshot = grantManager.getAuthorizationSnapshot(caller.clientId);
+
+  const configSnapshot = loadConfig() ?? defaultConfig();
+  const grantResult = grantManager.check({
+    clientId: caller.clientId,
+    tool,
+    args,
+    callerIp: caller.ip,
+    targetAccountId: activeAccountId,
+    globalPreset: configSnapshot.permissions.preset,
+  }, { reserveHourlyToolSlot: false, snapshot: grantSnapshot });
+  if (!grantResult.allowed) {
+    agentAudit.write({
+      ts: new Date().toISOString(),
+      clientId: caller.clientId,
+      clientName: caller.clientName,
+      tool: `read_surface:${tool}`,
+      argHash: hashArgs(args),
+      ok: false,
+      durMs: 0,
+      blockedReason: grantResult.reason,
+      ip: caller.ip,
+    });
+    throw new McpError(ErrorCode.InvalidRequest, `Blocked by agent grant: ${grantResult.reason}`);
+  }
+
+  const permissionResult = permissions.check(tool);
+  if (!permissionResult.allowed) {
+    agentAudit.write({
+      ts: new Date().toISOString(),
+      clientId: caller.clientId,
+      clientName: caller.clientName,
+      tool: `read_surface:${tool}`,
+      argHash: hashArgs(args),
+      ok: false,
+      durMs: 0,
+      blockedReason: `preset: ${permissionResult.reason}`,
+      ip: caller.ip,
+    });
+    throw new McpError(ErrorCode.InvalidRequest, `Blocked: ${permissionResult.reason}`);
+  }
+
+  // Resources and prompts are routed through this helper rather than the
+  // normal tool dispatcher.  Make the same final reserving check here, after
+  // the global permission gate, so these read surfaces cannot bypass a
+  // configured per-agent hourly cap or consume one when globally disabled.
+  const reservationSnapshot = grantManager.getAuthorizationSnapshot(caller.clientId);
+  const reservationGrant = reservationSnapshot.kind === "present" ? reservationSnapshot.grant : undefined;
+  const reservationResult = grantManager.check({
+    clientId: caller.clientId,
+    tool,
+    args,
+    callerIp: caller.ip,
+    targetAccountId: activeAccountId,
+    globalPreset: configSnapshot.permissions.preset,
+  }, { snapshot: reservationSnapshot });
+  if (!reservationResult.allowed) {
+    agentAudit.write({
+      ts: new Date().toISOString(),
+      clientId: caller.clientId,
+      clientName: caller.clientName,
+      tool: `read_surface:${tool}`,
+      argHash: hashArgs(args),
+      ok: false,
+      durMs: 0,
+      blockedReason: reservationResult.reason,
+      ip: caller.ip,
+    });
+    throw new McpError(ErrorCode.InvalidRequest, `Blocked by agent grant: ${reservationResult.reason}`);
+  }
+
+  return {
+    allowedFolders: reservationGrant ? grantManager.resolveAllowedFolders(reservationGrant) : undefined,
+    accountId: activeAccountId,
+    accountIdentity,
+    services,
+  };
+}
+
+function requireAllowedReadFolder(path: string, allowedFolders: string[] | undefined): void {
+  if (!allowedFolders) return;
+  if (!allowedFolders.some(folder => folder.toLowerCase() === path.toLowerCase())) {
+    throw new McpError(ErrorCode.InvalidRequest, `Blocked: folder '${path}' is outside this agent's folder allowlist.`);
+  }
+}
+
 server.setRequestHandler(ListResourcesRequestSchema, async () => {
   // Expose the INBOX folder as a listable resource; agents can also use templates for specific emails
   try {
-    const folders = await imapService.getFolders();
+    const access = requireReadSurfaceAccess("get_folders");
+    const { allowedFolders } = access;
+    const folders = await readFromActiveSurface(access, imap => imap.getFolders());
+    const visibleFolders = allowedFolders
+      ? folders.filter(folder => allowedFolders.some(allowed => allowed.toLowerCase() === folder.path.toLowerCase()))
+      : folders;
     return {
-      resources: folders.map((f) => ({
+      resources: visibleFolders.map((f) => ({
         uri: `folder://${encodeURIComponent(f.path)}`,
         name: f.name,
         title: `${f.name} (${f.unreadMessages} unread / ${f.totalMessages} total)`,
@@ -1105,8 +1564,11 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
     } catch {
       throw new McpError(ErrorCode.InvalidRequest, `Malformed percent-encoding in resource URI: ${uri}`);
     }
+    const access = requireReadSurfaceAccess("get_email_by_id", { folder });
+    const { allowedFolders } = access;
+    requireAllowedReadFolder(folder, allowedFolders);
     const id = emailMatch[2];
-    const email = await imapService.getEmailById(id);
+    const email = await readFromActiveSurface(access, imap => imap.getEmailById(id, folder));
     if (!email) {
       throw new McpError(ErrorCode.InvalidRequest, `Email not found: ${uri}`);
     }
@@ -1135,16 +1597,25 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
     } catch {
       throw new McpError(ErrorCode.InvalidRequest, `Malformed percent-encoding in resource URI: ${uri}`);
     }
-    const folders = await imapService.getFolders();
+    const access = requireReadSurfaceAccess("get_folders");
+    const { allowedFolders } = access;
+    const folders = await readFromActiveSurface(access, imap => imap.getFolders());
+    const visibleFolders = allowedFolders
+      ? folders.filter(folder => allowedFolders.some(allowed => allowed.toLowerCase() === folder.path.toLowerCase()))
+      : folders;
+    const matchedFolder = path === ""
+      ? null
+      : folders.find((f) => f.path === path || f.name === path);
+    if (matchedFolder) requireAllowedReadFolder(matchedFolder.path, allowedFolders);
     const folder = path === ""
       ? null  // list-all case
-      : folders.find((f) => f.path === path || f.name === path);
+      : visibleFolders.find((f) => f.path === path || f.name === path);
 
     if (path !== "" && !folder) {
       throw new McpError(ErrorCode.InvalidRequest, `Folder not found: ${path}`);
     }
 
-    const payload = path === "" ? { folders } : folder;
+    const payload = path === "" ? { folders: visibleFolders } : folder;
     return {
       contents: [
         {
@@ -1230,13 +1701,14 @@ server.setRequestHandler(GetPromptRequestSchema, async (request) => {
 
   switch (name) {
     case "triage_inbox": {
+      const access = requireReadSurfaceAccess("get_emails", { folder: "INBOX" });
       const rawLimit = parseInt((args.limit as string) || "20", 10);
       const limit = isNaN(rawLimit) ? 20 : Math.min(Math.max(1, rawLimit), 100);
       // Sanitize agent-supplied focus to prevent prompt injection.
       const focus = args.focus ? sanitizeText(args.focus as string, 200) : undefined;
       let emails: EmailMessage[] = [];
       try {
-        emails = await imapService.getEmails("INBOX", limit);
+        emails = await readFromActiveSurface(access, imap => imap.getEmails("INBOX", limit));
       } catch { /* IMAP not connected — prompt will still guide the user */ }
       const unread = emails.filter((e) => !e.isRead);
 
@@ -1269,7 +1741,7 @@ For each email, assess:
 2. Suggested action: reply_needed / archive / delete / forward / snooze
 3. If reply_needed: one-sentence draft response
 
-After presenting your assessment, wait for the user to approve actions, then use the available tools (reply_to_email, archive_email, delete_email, move_email) to carry them out.`,
+After presenting your assessment, wait for the user to approve actions, then use the available tools (reply_to_email, archive_email, delete_email, move_email) to carry them out. Include account_id="${access.accountId}" on every follow-up tool call so it remains bound to this mailbox even if the active account changes.`,
             },
           },
         ],
@@ -1279,11 +1751,22 @@ After presenting your assessment, wait for the user to approve actions, then use
     case "compose_reply": {
       // Validate emailId early so we never embed an adversarial string in the prompt.
       const emailId = requireNumericEmailId(args.emailId);
+      const access = requireReadSurfaceAccess("get_email_by_id");
+      const { allowedFolders } = access;
+      // The prompt has only a numeric ID and no folder argument. A
+      // folder-restricted grant therefore cannot prove the requested message
+      // is allowed; fail closed instead of resolving it across every mailbox.
+      if (allowedFolders) {
+        throw new McpError(
+          ErrorCode.InvalidRequest,
+          "Blocked: compose_reply cannot resolve a folderless email ID for a folder-restricted agent. Use get_email_by_id with an allowed folder instead.",
+        );
+      }
       // Sanitize agent-supplied intent to prevent prompt injection.
       const intent = sanitizeText(args.intent, 200);
       let emailContent = "Could not load email — use get_email_by_id to fetch it first.";
       try {
-        const email = await imapService.getEmailById(emailId);
+        const email = await readFromActiveSurface(access, imap => imap.getEmailById(emailId));
         if (email) {
           emailContent = JSON.stringify(
             {
@@ -1314,7 +1797,7 @@ Match the tone and formality of the original. Keep it concise.
 Original email:
 ${emailContent}
 
-When ready, use reply_to_email with emailId="${emailId}" to send.`,
+When ready, use reply_to_email with emailId="${emailId}" and account_id="${access.accountId}" to send.`,
             },
           },
         ],
@@ -1322,9 +1805,10 @@ When ready, use reply_to_email with emailId="${emailId}" to send.`,
     }
 
     case "daily_briefing": {
+      const access = requireReadSurfaceAccess("get_emails", { folder: "INBOX" });
       let emails: EmailMessage[] = [];
       try {
-        emails = await imapService.getEmails("INBOX", 50);
+        emails = await readFromActiveSurface(access, imap => imap.getEmails("INBOX", 50));
       } catch { /* ignore */ }
 
       const today = new Date();
@@ -1379,9 +1863,10 @@ Structure the briefing as:
       const fsFolderErr = validateTargetFolder(rawFsFolder);
       if (fsFolderErr) throw new McpError(ErrorCode.InvalidParams, fsFolderErr);
       const folder = rawFsFolder;
+      const access = requireReadSurfaceAccess("get_emails", { folder });
       let emails: EmailMessage[] = [];
       try {
-        emails = await imapService.getEmails(folder, 100);
+        emails = await readFromActiveSurface(access, imap => imap.getEmails(folder, 100));
       } catch { /* ignore */ }
 
       // Cap at 50 entries and truncate subjects to prevent prompt size explosion
@@ -1408,7 +1893,7 @@ Group them by sender domain and present a list of:
 2. Transactional emails (receipts, notifications — keep or archive)
 3. Personal / important emails (do not touch)
 
-After the user reviews, use bulk_delete_emails or bulk_move_emails to take action on approved groups.`,
+After the user reviews, use bulk_delete_emails or bulk_move_emails with account_id="${access.accountId}" to take action on approved groups.`,
             },
           },
         ],
@@ -1418,9 +1903,17 @@ After the user reviews, use bulk_delete_emails or bulk_move_emails to take actio
     case "thread_summary": {
       // Validate emailId early to prevent prompt injection via a crafted ID string.
       const emailId = requireNumericEmailId(args.emailId);
+      const access = requireReadSurfaceAccess("get_thread");
+      const { allowedFolders } = access;
+      if (allowedFolders) {
+        throw new McpError(
+          ErrorCode.InvalidRequest,
+          "Blocked: thread_summary can traverse multiple folders and is unavailable to folder-restricted agents. Use get_email_by_id with an allowed folder instead.",
+        );
+      }
       let emailContent = "Could not load the email.";
       try {
-        const email = await imapService.getEmailById(emailId);
+        const email = await readFromActiveSurface(access, imap => imap.getEmailById(emailId));
         if (email) {
           // Truncate body to prevent prompt token explosion and injection risk.
           const safeEmail = {
@@ -1439,7 +1932,7 @@ After the user reviews, use bulk_delete_emails or bulk_move_emails to take actio
             role: "user" as const,
             content: {
               type: "text" as const,
-              text: `Summarize the following email thread. If there are earlier messages referenced, use search_emails to find them (search by subject or sender).
+      text: `Summarize the following email thread. If there are earlier messages referenced, use search_emails with account_id="${access.accountId}" to find them (search by subject or sender).
 
 Starting email (ID: ${emailId}):
 ${emailContent}
@@ -1456,6 +1949,7 @@ Produce:
     }
 
     case "draft_in_my_voice": {
+      const access = requireReadSurfaceAccess("get_emails", { folder: "Sent" });
       // Recipient must look like an email address — sanitize then validate.
       const rawRecipient = sanitizeText(args.recipient, 254);
       if (!isValidEmail(rawRecipient)) {
@@ -1473,7 +1967,7 @@ Produce:
 
       let samples: Array<{ subject: string; bodyPreview: string }> = [];
       try {
-        const sent = await imapService.getEmails("Sent", sampleCount);
+        const sent = await readFromActiveSurface(access, imap => imap.getEmails("Sent", sampleCount));
         samples = sent.map(e => ({
           subject: e.subject || "(No Subject)",
           // Use bodyPreview (~300 chars) — full bodies would blow up the prompt
@@ -1506,7 +2000,7 @@ When drafting, produce:
 1. A suggested subject line
 2. The body of the new email
 
-Then, if the user approves, use send_email with to="${recipient}" to send it.`,
+Then, if the user approves, use send_email with to="${recipient}" and account_id="${access.accountId}" to send it.`,
             },
           },
         ],
@@ -1617,27 +2111,25 @@ async function isBridgeReachable(host: string, port: number, timeoutMs = 1000): 
 }
 
 /** Launch Proton Bridge using the platform-appropriate command, then wait up to 15 s for ports. */
-async function launchProtonBridge(): Promise<void> {
+async function launchProtonBridge(bridgeConfig: ProtonMailConfig = config): Promise<void> {
   const platform = process.platform;
   let cmd: string;
   let args: string[];
-  let useShell = false;
-  // Strip surrounding quotes that users sometimes paste in (e.g. from explorer)
-  if (config.bridgePath) {
-    config.bridgePath = config.bridgePath.trim().replace(/^["']|["']$/g, "");
-  }
+  // Strip surrounding quotes that users sometimes paste in (e.g. from
+  // Explorer) without mutating the module-level active-account snapshot.
+  const bridgePath = bridgeConfig.bridgePath?.trim().replace(/^["']|["']$/g, "") || undefined;
   // User-configured path takes top priority. Don't pre-check existsSync —
   // that creates a TOCTOU window where an attacker with write access to the
   // containing directory could swap the binary between check and spawn.
   // spawn() itself will surface ENOENT via the 'error' event below.
-  if (config.bridgePath) {
+  if (bridgePath) {
     try {
       // Detach + unref lets Bridge outlive us, but an ENOENT (stale path
       // across platforms, missing perms) arrives as an async 'error' event.
       // Without a listener Node converts it to an unhandled throw that
       // crashes the whole MCP server — attach a no-op handler and let the
       // reachability poll below surface the failure naturally.
-      const bridgeProc = spawn(config.bridgePath, [], {
+      const bridgeProc = spawn(bridgePath, [], {
         stdio: "ignore", detached: true, shell: false,
       });
       launchedBridgePid = bridgeProc.pid ?? null;
@@ -1650,8 +2142,8 @@ async function launchProtonBridge(): Promise<void> {
       while (Date.now() < deadline) {
         await new Promise<void>(r => setTimeout(r, 1500));
         const [smtpOk, imapOk] = await Promise.all([
-          isBridgeReachable(config.smtp.host, config.smtp.port),
-          isBridgeReachable(config.imap.host, config.imap.port),
+          isBridgeReachable(bridgeConfig.smtp.host, bridgeConfig.smtp.port),
+          isBridgeReachable(bridgeConfig.imap.host, bridgeConfig.imap.port),
         ]);
         if (smtpOk && imapOk) {
           logger.info("Proton Bridge is now reachable", "MCPServer");
@@ -1737,8 +2229,8 @@ async function launchProtonBridge(): Promise<void> {
     while (Date.now() < deadline) {
       await new Promise<void>(r => setTimeout(r, 1500));
       const [smtpOk, imapOk] = await Promise.all([
-        isBridgeReachable(config.smtp.host, config.smtp.port),
-        isBridgeReachable(config.imap.host, config.imap.port),
+        isBridgeReachable(bridgeConfig.smtp.host, bridgeConfig.smtp.port),
+        isBridgeReachable(bridgeConfig.imap.host, bridgeConfig.imap.port),
       ]);
       if (smtpOk && imapOk) {
         logger.info("Proton Bridge is now reachable", "MCPServer");
@@ -1789,16 +2281,101 @@ async function killProtonBridge(): Promise<void> {
  * If Bridge ports become unreachable it attempts up to BRIDGE_MAX_RESTARTS relaunches.
  * After all attempts are exhausted it logs a critical alert and stops watching.
  */
+function stopBridgeWatchdog(): void {
+  // Clearing an interval does not cancel an async callback which has already
+  // begun. Bumping the generation makes that callback fail closed at its next
+  // await boundary before it can launch Bridge for a now-disabled account.
+  bridgeWatchdogGeneration += 1;
+  if (bridgeWatchdogTimer) {
+    clearInterval(bridgeWatchdogTimer);
+    bridgeWatchdogTimer = null;
+  }
+  bridgeRestartAttempts = 0;
+}
+
+/** The recovery-relevant route for the live active account, if enabled. */
+function activeBridgeWatchdogRoute(): BridgeWatchdogRoute | null {
+  if (!bridgeWatchdogPermitted || _shutdownInProgress || !config.autoStartBridge) return null;
+  try {
+    const services = accountManager.getActive();
+    return bridgeWatchdogRouteForAccount(services, services.spec);
+  } catch {
+    return null;
+  }
+}
+
+/** True only while this exact timer still owns the currently active account. */
+function isCurrentBridgeWatchdog(
+  generation: number,
+  services: AccountServices,
+): boolean {
+  if (
+    bridgeWatchdogTimer === null ||
+    bridgeWatchdogGeneration !== generation ||
+    !bridgeWatchdogPermitted ||
+    _shutdownInProgress ||
+    !config.autoStartBridge ||
+    !services.spec.autoStartBridge
+  ) {
+    return false;
+  }
+  try {
+    return accountManager.getActive() === services
+      && bridgeWatchdogRouteTracker.matches(bridgeWatchdogRouteForAccount(services, services.spec));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Start a watchdog for the active account. Callers must have synchronized the
+ * active-account snapshot into `config` first; `reconcileBridgeWatchdog()` is
+ * the normal entry point after a settings/account change.
+ */
 function startBridgeWatchdog(): void {
-  if (bridgeWatchdogTimer) return;
-  bridgeWatchdogTimer = setInterval(async () => {
-   try {
+  if (bridgeWatchdogTimer || !bridgeWatchdogPermitted || !config.autoStartBridge || _shutdownInProgress) return;
+  const generation = ++bridgeWatchdogGeneration;
+  bridgeWatchdogTimer = setInterval(() => {
+    void runBridgeWatchdogTick(generation);
+  }, 30_000).unref();
+}
+
+/**
+ * Reconcile the timer with the active account every time its settings are
+ * rebound. Only a recovery-relevant route change restarts it: Settings also
+ * rebuilds the AccountManager for unrelated saves, which must not erase a
+ * watchdog's bounded/exhausted restart state.
+ */
+function reconcileBridgeWatchdog(): void {
+  const nextRoute = activeBridgeWatchdogRoute();
+  if (!bridgeWatchdogRouteTracker.reconcile(nextRoute)) return;
+  stopBridgeWatchdog();
+  if (nextRoute) startBridgeWatchdog();
+}
+
+async function runBridgeWatchdogTick(generation: number): Promise<void> {
+  let services: AccountServices;
+  try {
+    services = accountManager.getActive();
+  } catch {
+    return;
+  }
+  if (!isCurrentBridgeWatchdog(generation, services)) return;
+
+  // Capture one immutable active-account view for this tick. The generation
+  // checks below discard it as soon as Settings changes the active account or
+  // turns off auto-start, instead of relaunching with stale module globals.
+  const bridgeConfig = configForAccount(services);
+
+  try {
     const [smtpOk, imapOk] = await Promise.all([
-      isBridgeReachable(config.smtp.host, config.smtp.port),
-      isBridgeReachable(config.imap.host, config.imap.port),
+      isBridgeReachable(bridgeConfig.smtp.host, bridgeConfig.smtp.port),
+      isBridgeReachable(bridgeConfig.imap.host, bridgeConfig.imap.port),
     ]);
+    if (!isCurrentBridgeWatchdog(generation, services)) return;
+
     if (smtpOk && imapOk) {
-      // Bridge healthy — reset consecutive-failure counter
+      // Bridge healthy — reset consecutive-failure counter.
       if (bridgeRestartAttempts > 0) {
         logger.info("Proton Bridge is reachable again", "MCPServer");
         bridgeRestartAttempts = 0;
@@ -1806,10 +2383,12 @@ function startBridgeWatchdog(): void {
       return;
     }
 
-    // Bridge is down
-    bridgeRestartAttempts++;
+    // Bridge is down. Re-check immediately before launch: a disabled account
+    // can switch in while the socket probes above are still awaiting.
+    if (!isCurrentBridgeWatchdog(generation, services)) return;
+    bridgeRestartAttempts += 1;
     if (bridgeRestartAttempts > BRIDGE_MAX_RESTARTS) {
-      // Already gave up — don't spam logs
+      // Already gave up — don't spam logs.
       return;
     }
 
@@ -1817,25 +2396,33 @@ function startBridgeWatchdog(): void {
       `Proton Bridge went away — restart attempt ${bridgeRestartAttempts}/${BRIDGE_MAX_RESTARTS}`,
       "MCPServer"
     );
-    await launchProtonBridge();
+    // This must receive the captured account configuration rather than the
+    // mutable global `config`; a switch cannot redirect an in-flight launch.
+    await launchProtonBridge(bridgeConfig);
+    if (!isCurrentBridgeWatchdog(generation, services)) return;
 
-    // Try to reconnect IMAP if Bridge came back
+    // Try to reconnect the same account's IMAP client if Bridge came back.
     if (bridgeRestartAttempts === 0) {
-      // launchProtonBridge reset the counter → it succeeded
+      // launchProtonBridge reset the counter → it succeeded.
       try {
-        await imapService.connect(
-          config.imap.host, config.imap.port,
-          config.imap.username, config.imap.password,
-          config.imap.bridgeCertPath, config.imap.secure,
-          config.imap.allowInsecureBridge ?? false
+        if (!isCurrentBridgeWatchdog(generation, services)) return;
+        await services.imap.connect(
+          bridgeConfig.imap.host, bridgeConfig.imap.port,
+          bridgeConfig.imap.username, bridgeConfig.imap.password,
+          bridgeConfig.imap.bridgeCertPath, bridgeConfig.imap.secure,
+          bridgeConfig.imap.allowInsecureBridge ?? false,
         );
-        logger.info("IMAP reconnected after Bridge restart", "MCPServer");
+        if (isCurrentBridgeWatchdog(generation, services)) {
+          logger.info("IMAP reconnected after Bridge restart", "MCPServer");
+        }
       } catch (e: unknown) {
-        logger.warn("IMAP reconnect failed after Bridge restart", "MCPServer", e);
+        if (isCurrentBridgeWatchdog(generation, services)) {
+          logger.warn("IMAP reconnect failed after Bridge restart", "MCPServer", e);
+        }
       }
     }
 
-    if (bridgeRestartAttempts >= BRIDGE_MAX_RESTARTS) {
+    if (bridgeRestartAttempts >= BRIDGE_MAX_RESTARTS && isCurrentBridgeWatchdog(generation, services)) {
       logger.error(
         `Proton Bridge failed to recover after ${BRIDGE_MAX_RESTARTS} restart attempts. ` +
         "Email tools will not work until Bridge is restarted manually. " +
@@ -1846,14 +2433,15 @@ function startBridgeWatchdog(): void {
         `[mailpouch] CRITICAL: Proton Bridge did not recover after ${BRIDGE_MAX_RESTARTS} restart attempts. ` +
         "Start Bridge manually and restart the MCP server.\n"
       );
-      if (bridgeWatchdogTimer) { clearInterval(bridgeWatchdogTimer); bridgeWatchdogTimer = null; }
+      stopBridgeWatchdog();
     }
-   } catch (e: unknown) {
-     // An async error here (Promise.all reject, launchProtonBridge throw) would
-     // otherwise become an unhandledRejection → gracefulShutdown → process exit.
-     logger.warn("Bridge watchdog tick failed — will retry next interval", "MCPServer", e);
-   }
-  }, 30_000).unref();
+  } catch (e: unknown) {
+    // An async error here (Promise.all reject, launchProtonBridge throw) would
+    // otherwise become an unhandledRejection → gracefulShutdown → process exit.
+    if (isCurrentBridgeWatchdog(generation, services)) {
+      logger.warn("Bridge watchdog tick failed — will retry next interval", "MCPServer", e);
+    }
+  }
 }
 
 /**
@@ -1866,6 +2454,72 @@ function trimForAnalytics(emails: EmailMessage[]): EmailMessage[] {
     body: undefined as unknown as string,
     attachments: e.attachments?.map(a => ({ ...a, content: undefined })),
   }));
+}
+
+/** Refresh derived state for one mailbox without relying on the active account. */
+async function syncAccountBackground(services: AccountServices): Promise<void> {
+  const { imap, spec } = services;
+  const accountId = spec.id;
+  if (!imap.isActive()) return;
+
+  // Hold both a runtime generation and the durable mailbox fingerprint while
+  // the network read is outstanding. A settings edit can replace this account
+  // ID with a different mailbox in the meantime; that old result must then be
+  // discarded rather than indexed, cached, or used to cancel its reminders.
+  const generation = accountRuntime.generationFor(accountId);
+  let accountIdentity: string;
+  try {
+    accountIdentity = accountManager.identityForAccount(accountId);
+  } catch {
+    return;
+  }
+
+  try {
+    const [inbox, sent] = await Promise.all([
+      imap.getEmails("INBOX", 50),
+      imap.getEmails("Sent", 50),
+    ]);
+    let stillCurrent = accountRuntime.isCurrentGeneration(accountId, generation);
+    try {
+      const current = accountManager.getForAccount(accountId);
+      stillCurrent = stillCurrent
+        && current.imap === imap
+        && accountManager.identityForAccount(accountId) === accountIdentity;
+    } catch {
+      stillCurrent = false;
+    }
+    if (!stillCurrent) {
+      logger.debug(`Discarded stale background sync for account ${accountId}`, "Scheduler");
+      return;
+    }
+
+    accountRuntime.updateAnalytics(accountId, inbox, sent, trimForAnalytics);
+    logger.debug(`Background sync (${accountId}): ${inbox.length} inbox, ${sent.length} sent`, "Scheduler");
+
+    // Derived indexes are owned by the source account. A failure in optional
+    // SQLite support must not prevent reminder detection or other accounts.
+    try {
+      accountRuntime.getFts(accountId, accountIdentity).upsertMany([...inbox, ...sent].map(recordFromEmail));
+    } catch (err: unknown) {
+      logger.debug(`FTS incremental upsert failed for account ${accountId}`, "Scheduler", err);
+    }
+
+    try {
+      const cancelled = reminderService.detectRepliesAndCancel(inbox, accountId);
+      if (cancelled.length > 0) {
+        logger.info(`Auto-cancelled ${cancelled.length} reminder(s) after replies arrived`, "Scheduler", { accountId });
+      }
+    } catch (err: unknown) {
+      logger.debug(`Reminder reply-detection failed for account ${accountId}`, "Scheduler", err);
+    }
+  } catch (err: unknown) {
+    logger.debug(`Background sync failed for account ${accountId}`, "Scheduler", err);
+  }
+}
+
+/** Run background work for every configured account; a bad mailbox is isolated. */
+async function syncAllAccountsBackground(): Promise<void> {
+  await Promise.all(accountManager.list().map(syncAccountBackground));
 }
 
 // ─── Daemon: Tray Icon ───────────────────────────────────────────────────────
@@ -2360,42 +3014,12 @@ async function main() {
       config.bridgePath         = cn.bridgePath || undefined;
       config.settingsPort       = fileConfig.settingsPort ?? 8766;
 
-      // CRED-001: Pass PAT + SimpleLogin API key now keychain-routable.
-      // After migrateCredentials() runs, the disk fields are blank — read
-      // from keychain first, fall back to the (newly-saved or unmigrated)
-      // disk fields.
-      const auxCreds = await loadAuxiliaryCredentialsFromKeychain();
-      const effectiveSimpleloginKey = auxCreds?.simpleloginApiKey || cn.simpleloginApiKey || "";
-      const effectivePassPat        = auxCreds?.passAccessToken   || cn.passAccessToken   || "";
-      // Storage source for the log line — `auxCreds.storage` is "keychain"
-      // when the secret came from the keychain entry, "config" when
-      // loadAuxiliaryCredentialsFromKeychain fell back to the disk file.
-      // Checking the value (e.g. `auxCreds?.simpleloginApiKey`) would
-      // overclaim "keychain" whenever the disk-fallback value was non-empty.
-      const auxSource = auxCreds?.storage ?? "config";
-
-      // SimpleLogin client — populated from config; stays empty (isConfigured=false) if no key.
-      if (effectiveSimpleloginKey) {
-        simpleloginService = new SimpleLoginService(
-          effectiveSimpleloginKey,
-          cn.simpleloginBaseUrl || undefined,
-        );
-        logger.info(`SimpleLogin client configured (alias_* tools active, source=${auxSource})`, "MCPServer");
-      }
+      // CRED-001: Pass PAT + SimpleLogin API key are keychain-routable. Use
+      // the same replacement path as live Settings saves so startup and
+      // hot-refresh semantics cannot drift.
+      await refreshAuxiliaryServicesFromConfig();
       logger.setDebugMode(!!cn.debug);
       tracer.setEnabled(!!cn.debug);
-
-      // Proton Pass — constructed only when a PAT is configured. Pass is a
-      // credential vault; errors from a missing CLI shouldn't crash the
-      // server on startup. Mail tools work fine without it.
-      if (effectivePassPat) {
-        passService = new PassService({
-          personalAccessToken: effectivePassPat,
-          cliPath: cn.passCliPath || undefined,
-          auditLogPath: PASS_AUDIT_PATH,
-        });
-        logger.info(`Proton Pass client configured (pass_* tools active, source=${auxSource})`, "MCPServer");
-      }
 
       // Password: keychain takes priority over config file plaintext
       const keychainCreds = await loadCredentialsFromKeychain();
@@ -2442,49 +3066,89 @@ async function main() {
   // The MCP is launched per client (Claude Desktop, VS Code, every
   // `claude --continue` session). Each instance otherwise opens its OWN IMAP
   // IDLE/auth loop against the same mailbox — a compounded connection leak.
-  // Hold a per-account PID lock; if another LIVE instance already owns it,
-  // exit 0 instead of starting a second connection. Stale locks (dead PID)
-  // are reclaimed so a legitimate restart after a clean OR crashed shutdown is
-  // never blocked. MAILPOUCH_NO_SINGLETON=1 is the escape hatch for power
-  // users running intentional multi-instance setups.
+  // This process connects EVERY account in one configuration profile, so the
+  // lock must cover the profile rather than only its currently active mailbox.
+  // Otherwise two processes with different active accounts can each acquire a
+  // lock yet both open IDLE sessions for all overlapping mailboxes. Stale
+  // records are deliberately fail-closed rather than automatically removed:
+  // a PID-check followed by unlink can erase a freshly-acquired rival lock.
+  // MAILPOUCH_NO_SINGLETON=1 remains the explicit escape hatch for intentional
+  // multi-instance setups.
   if (process.env.MAILPOUCH_NO_SINGLETON !== "1") {
     try {
-      const outcome = acquireSingletonLock(config.smtp.username);
+      const outcome = acquireSingletonLock(`profile:${getConfigPath()}`);
       if (outcome.status === "held-by-live-instance") {
         logger.info(
-          `Another mailpouch instance for this account is already running (pid ${outcome.pid}); ` +
-          `exiting so we don't open a second IMAP connection. ` +
+          `Another mailpouch instance for this configuration profile is already running (pid ${outcome.pid}); ` +
+          `exiting so we don't open duplicate IMAP connections for its accounts. ` +
           `Set MAILPOUCH_NO_SINGLETON=1 to allow multiple instances.`,
           "MCPServer",
         );
         process.exit(0);
+        return;
+      }
+      if (outcome.status === "stale-lock") {
+        const holder = outcome.pid === null ? "an invalid owner record" : `dead pid ${outcome.pid}`;
+        logger.error(
+          `Singleton lock at ${outcome.path} contains ${holder}. ` +
+          "It was not removed automatically because doing so can race a newly-starting daemon. " +
+          "After confirming no mailpouch process owns this profile, remove that lock manually and retry. " +
+          "Set MAILPOUCH_NO_SINGLETON=1 only when intentionally running multiple instances.",
+          "MCPServer",
+        );
+        process.exit(1);
+        return;
+      }
+      if (outcome.status === "unavailable") {
+        logger.error(
+          `Could not safely acquire singleton lock at ${outcome.path}; refusing to start duplicate mailbox connections. ` +
+          "Check the lock path and its parent permissions, then retry.",
+          "MCPServer",
+        );
+        process.exit(1);
+        return;
       }
       _singletonLockPath = outcome.path;
-      if (outcome.reclaimed) {
-        logger.debug("Reclaimed a stale singleton lock from a previous (crashed) instance", "MCPServer");
-      }
     } catch (e: unknown) {
-      // Fail-safe: a broken lock mechanism must NEVER block a legitimate start.
-      logger.debug("Singleton lock check failed; continuing without it", "MCPServer", e);
+      // A lock error must not turn into an unguarded second daemon. The helper
+      // normally returns `unavailable`; retain this catch for coding/runtime
+      // faults and fail closed too.
+      logger.error("Singleton lock check failed; refusing unguarded startup", "MCPServer", e);
+      process.exit(1);
+      return;
     }
   }
 
-  // Rebuild the SMTP transporter now that credentials and cert path are loaded.
-  // SMTPService is constructed at module load time (before config is read), so
-  // its initial transporter has an empty password and no Bridge cert.
-  //
-  // applyKeychainCredentials handles the legacy single-account path where
-  // the top-level `connection.password` drives everything. The async
-  // rebuild handles the multi-account case: each account's password lives
-  // under a per-account keychain entry (see src/security/keychain.ts
-  // accountPasswordKey) and has to be loaded separately. Do both — they're
-  // cheap and idempotent.
-  accountManager.applyKeychainCredentials(config.smtp.password ?? "", config.smtp.smtpToken);
+  // Rebuild service pairs from the account registry now that keychain-backed
+  // credentials are available. Do not fan the legacy top-level credential out
+  // to every account: each account's keychain entry is its sole authority.
   try {
     await accountManager.rebuildFromRegistryAsync();
   } catch (e: unknown) {
     logger.warn("Async registry rebuild failed (falling back to sync view)", "MCPServer", e);
   }
+  // Background records outlive the active account. Bind their owner resolver
+  // only after the account registry (and keychain-backed services) is ready,
+  // then migrate pre-account records to the persisted active mailbox with the
+  // services' timestamped owner-only backups.
+  schedulerService.configureAccountRouting(
+    () => accountManager.activeAccountId(),
+    (accountId) => {
+      try { return accountManager.getForAccount(accountId).smtp; }
+      catch { return undefined; }
+    },
+    (accountId) => {
+      try { return accountManager.identityForAccount(accountId); }
+      catch { return undefined; }
+    },
+  );
+  reminderService.configureAccountRouting(
+    () => accountManager.activeAccountId(),
+    (accountId) => {
+      try { return accountManager.identityForAccount(accountId); }
+      catch { return undefined; }
+    },
+  );
   smtpService.reinitialize();
 
   // ── Settings UI: bind BEFORE any backend connectivity (Cluster 4) ─────────
@@ -2562,8 +3226,14 @@ async function main() {
     } else {
       logger.debug("autoStartBridge enabled — Bridge already running", "MCPServer");
     }
-    startBridgeWatchdog();
   }
+
+  // Settings-only mode returns before this point, so account rebuild events
+  // can never arm a Bridge watchdog in its UI-only process. Once the initial
+  // probe/optional launch has settled, let active-account changes reconcile
+  // the recurring watchdog from the live configuration.
+  bridgeWatchdogPermitted = true;
+  reconcileBridgeWatchdog();
 
   if (!smtpReachable || !imapReachable) {
     logger.warn(
@@ -2577,10 +3247,14 @@ async function main() {
     logger.info("Connecting to SMTP and IMAP…", "MCPServer");
     await Promise.all([
       smtpService.verifyConnection().then(() => {
-        sharedState.smtpStatus = { connected: true, lastCheck: new Date() };
+        const status = { connected: true, lastCheck: new Date() };
+        sharedState.smtpStatus = status;
+        accountRuntime.setSmtpStatus(accountManager.activeAccountId(), status);
         logger.info("SMTP connection verified", "MCPServer");
       }).catch((e: unknown) => {
-        sharedState.smtpStatus = { connected: false, lastCheck: new Date(), error: diagnosticErrorMessage(e) };
+        const status = { connected: false, lastCheck: new Date(), error: diagnosticErrorMessage(e) };
+        sharedState.smtpStatus = status;
+        accountRuntime.setSmtpStatus(accountManager.activeAccountId(), status);
         logger.warn("SMTP connection failed — sending features limited", "MCPServer", e);
         logger.info("Use your Proton Bridge password (not your Proton Mail account password)", "MCPServer");
       }),
@@ -2640,39 +3314,7 @@ async function main() {
     if (config.autoSync && (config.syncInterval ?? 0) > 0) {
       const intervalMs = (config.syncInterval as number) * 60 * 1000;
       setInterval(async () => {
-        try {
-          if (imapService.isActive()) {
-            const inbox = await imapService.getEmails('INBOX', 50);
-            const sent  = await imapService.getEmails('Sent',  50);
-            analyticsService.updateEmails(trimForAnalytics(inbox), trimForAnalytics(sent));
-            logger.debug(`Background sync: ${inbox.length} inbox, ${sent.length} sent`, 'Scheduler');
-
-            // FTS incremental upsert — ride the same sync to keep the local
-            // search index fresh without a manual fts_rebuild call.
-            try {
-              const fts = getFts();
-              fts.upsertMany([...inbox, ...sent].map(recordFromEmail));
-            } catch (err: unknown) {
-              logger.debug('FTS incremental upsert failed', 'Scheduler', err);
-            }
-
-            // Auto reply-detection — scan inbox for messages whose
-            // In-Reply-To points at a Message-ID we are waiting on, and
-            // cancel those reminders. Also drops reminders past their
-            // deadline with no match (the user can still see them via
-            // list_pending_reminders).
-            try {
-              const cancelled = reminderService.detectRepliesAndCancel(inbox);
-              if (cancelled.length > 0) {
-                logger.info(`Auto-cancelled ${cancelled.length} reminder(s) after replies arrived`, 'Scheduler');
-              }
-            } catch (err: unknown) {
-              logger.debug('Reminder reply-detection failed', 'Scheduler', err);
-            }
-          }
-        } catch (e: unknown) {
-          logger.debug('Background sync failed', 'Scheduler', e);
-        }
+        await syncAllAccountsBackground();
       }, intervalMs).unref(); // .unref() so the timer doesn't prevent clean exit
     }
 
@@ -2809,34 +3451,37 @@ async function gracefulShutdown(signal: string): Promise<void> {
     // 0b. Stop settings server
     await _stopSettingsServerDaemon();
 
-    // 0c. Release the per-account singleton lock so a legitimate restart can
-    // re-acquire it immediately (no stale-lock wait needed on the happy path).
-    if (_singletonLockPath) {
-      try { releaseSingletonLock(_singletonLockPath); } catch { /* best-effort */ }
-      _singletonLockPath = null;
-    }
-
-    // 1. Stop bridge watchdog
-    if (bridgeWatchdogTimer) { clearInterval(bridgeWatchdogTimer); bridgeWatchdogTimer = null; }
+    // 1. Stop bridge watchdog and invalidate any async tick already in flight.
+    bridgeWatchdogPermitted = false;
+    stopBridgeWatchdog();
 
     // PERM-010: flush any unpersisted per-agent call counters before exit.
     try { agentGrants.flushCounters(); }
     catch (err: unknown) { logger.debug("agent-grant counter flush on shutdown failed", "MCPServer", err); }
+    // Closes only the SQLite connection; durable quota state remains intact
+    // for the rolling window after a restart (no forced checkpoint/deletion).
+    try { agentGrants.close(); }
+    catch (err: unknown) { logger.debug("agent-grant quota ledger close failed", "MCPServer", err); }
 
     // 2. Stop scheduler (persists pending items before close)
     schedulerService.stop();
 
-    // Stop IDLE background watcher
-    imapService.stopIdle();
+    // 3. Stop and scrub EVERY account, not just the current active binding.
+    // Each account owns a separate main IMAP client, IDLE client, SMTP pool,
+    // cache, and credentials; leaving a non-active service alive would retain
+    // an authenticated mailbox connection after shutdown.
+    await accountManager.closeAll();
 
-    // 3. Disconnect services
-    await imapService.disconnect();
-    await smtpService.close();
+    // 4. Scrub derived sensitive data from memory
+    accountRuntime.disposeAll();
 
-    // 4. Scrub sensitive data from memory
-    imapService.wipeCache();
-    analyticsService.wipeData();
-    smtpService.wipeCredentials();
+    // Release the profile singleton lock only after every account connection
+    // has been retired. Releasing it earlier permits a replacement process to
+    // open duplicate IMAP/IDLE sessions while this process is still closing.
+    if (_singletonLockPath) {
+      try { releaseSingletonLock(_singletonLockPath); } catch { /* best-effort */ }
+      _singletonLockPath = null;
+    }
 
     // 5. Wipe top-level config credentials
     if (config?.smtp) {
@@ -2871,9 +3516,8 @@ async function gracefulShutdown(signal: string): Promise<void> {
 // Last-resort wipe on any exit path
 process.on("exit", () => {
   try {
-    imapService.wipeCache();
-    analyticsService.wipeData();
-    smtpService.wipeCredentials();
+    accountManager.wipeAll();
+    accountRuntime.disposeAll();
   } catch { /* best-effort */ }
   // Release the singleton lock even on the hard-exit timeout path, so a stale
   // lock never outlives the process when gracefulShutdown's body didn't finish.

@@ -434,6 +434,32 @@ export function requireNumericEmailId(raw: unknown, fieldName: string = "emailId
 }
 
 /**
+ * Keep the valid numeric IMAP UIDs from a bulk-tool argument, capped to the
+ * caller's batch limit. This preserves the long-standing partial-batch
+ * behavior (invalid entries are skipped when valid ones remain) while sharing
+ * the same UID bounds as single-email tools.
+ */
+export function requireNumericEmailIds(raw: unknown, maxIds: number): string[] {
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw new McpError(ErrorCode.InvalidParams, "emailIds must be a non-empty array of numeric UID strings.");
+  }
+
+  const ids: string[] = [];
+  for (const value of raw) {
+    try {
+      ids.push(requireNumericEmailId(value));
+    } catch {
+      // A mixed bulk request remains useful when it contains valid UIDs.
+    }
+    if (ids.length === maxIds) break;
+  }
+  if (ids.length === 0) {
+    throw new McpError(ErrorCode.InvalidParams, "No valid numeric email IDs in the provided list.");
+  }
+  return ids;
+}
+
+/**
  * Validate an optional `folder` argument that flows from a tool handler into
  * `imapService.getEmailById` (or similar service methods that take a folder
  * hint). Returns the validated folder string when present; returns undefined

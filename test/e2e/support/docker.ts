@@ -19,24 +19,38 @@ const GREENMAIL_HOST = "127.0.0.1";
 export const GREENMAIL_IMAP_PORT = 3143;
 export const GREENMAIL_SMTP_PORT = 3025;
 
-/** TCP probe — resolves true if the port accepts a connection within `timeoutMs`. */
-function probeTcp(port: number, timeoutMs = 1000): Promise<boolean> {
+/**
+ * Protocol-aware readiness probe.
+ *
+ * Docker can publish a restarted container's port before Greenmail has
+ * finished booting. A connect-only probe then returns true even though the
+ * service immediately closes the first IMAP/SMTP sessions, which made the
+ * next scenario's beforeAll fail intermittently. Require the service greeting
+ * so readiness means the protocol is accepting sessions, not merely that the
+ * host port exists.
+ */
+function probeService(port: number, timeoutMs = 1000): Promise<boolean> {
   return new Promise((resolve) => {
     const socket = createConnection({ host: GREENMAIL_HOST, port });
+    let settled = false;
     const finish = (ok: boolean): void => {
+      if (settled) return;
+      settled = true;
       socket.destroy();
       resolve(ok);
     };
+    const greeting = port === GREENMAIL_IMAP_PORT ? /^\* OK\b/i : /^220\b/;
     socket.setTimeout(timeoutMs);
-    socket.once("connect", () => finish(true));
+    socket.once("data", (chunk) => finish(greeting.test(chunk.toString("utf8").trim())));
     socket.once("error", () => finish(false));
+    socket.once("close", () => finish(false));
     socket.once("timeout", () => finish(false));
   });
 }
 
 async function waitForReady(port: number, attempts = 30): Promise<void> {
   for (let i = 0; i < attempts; i++) {
-    if (await probeTcp(port)) return;
+    if (await probeService(port)) return;
     await new Promise((r) => setTimeout(r, 500));
   }
   throw new Error(`Greenmail port ${port} did not become ready within ${attempts * 0.5}s`);
@@ -85,7 +99,9 @@ export async function up(): Promise<void> {
     await waitForReady(GREENMAIL_SMTP_PORT);
     return;
   }
-  if (isContainerRunning() && (await probeTcp(GREENMAIL_IMAP_PORT))) return;
+  if (isContainerRunning()
+    && (await probeService(GREENMAIL_IMAP_PORT))
+    && (await probeService(GREENMAIL_SMTP_PORT))) return;
   runArgv("docker", ["compose", "-f", COMPOSE_FILE, "up", "-d"], /* inherit */ true);
   await waitForReady(GREENMAIL_IMAP_PORT);
   await waitForReady(GREENMAIL_SMTP_PORT);

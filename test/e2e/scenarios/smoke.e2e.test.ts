@@ -9,7 +9,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { startE2E, type E2EHarness } from "../mcp-client.js";
 import * as docker from "../support/docker.js";
 import { PROMO_CREDIT_KARMA } from "../fixtures/seed-data.js";
-import { allToolDefs } from "../../../src/tools/registry.js";
+import { advertisedToolDefs } from "../../../src/tools/registry.js";
 import { toolsForTier, parseToolTier } from "../../../src/config/schema.js";
 
 describe("smoke.e2e — harness boots and round-trips", () => {
@@ -47,7 +47,13 @@ describe("smoke.e2e — harness boots and round-trips", () => {
     // committed snapshot — vitest won't write a new snapshot in CI, and this is
     // self-updating when the registry changes.
     const visible = toolsForTier(parseToolTier(undefined));
-    const expectedNames = allToolDefs().map((d) => d.name).filter((n) => visible.has(n)).sort();
+    // Greenmail intentionally configures neither SimpleLogin nor Proton Pass;
+    // listTools must therefore match the capability-filtered registry rather
+    // than advertise companion tools that cannot run in this harness.
+    const expectedNames = advertisedToolDefs({ simpleLogin: false, pass: false })
+      .map((d) => d.name)
+      .filter((n) => visible.has(n))
+      .sort();
     expect(names).toEqual(expectedNames);
   });
 

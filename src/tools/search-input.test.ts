@@ -25,6 +25,36 @@ describe("validateSearchInput", () => {
     expect(() => validateSearchInput({ folders: ["*"] }, MAX)).not.toThrow();
   });
 
+  it("scopes every effective folder for a restricted caller", () => {
+    const o = validateSearchInput(
+      { folder: "inbox", folders: ["INBOX", "Sent"] },
+      MAX,
+      ["INBOX", "Sent"],
+    );
+
+    // Multi-folder precedence remains explicit: the redundant scalar cannot
+    // shrink, expand, or otherwise replace the effective folder set.
+    expect(o.folder).toBeUndefined();
+    expect(o.folders).toEqual(["INBOX", "Sent"]);
+  });
+
+  it("rejects disallowed, wildcard, empty, and conflicting search folders for restricted callers", () => {
+    const allowed = ["INBOX"];
+
+    expect(() => validateSearchInput({ folder: "Archive" }, MAX, allowed))
+      .toThrow(/outside this agent's folder allowlist/);
+    expect(() => validateSearchInput({ folders: ["INBOX", "Archive"] }, MAX, allowed))
+      .toThrow(/outside this agent's folder allowlist/);
+    expect(() => validateSearchInput({ folders: ["*"] }, MAX, allowed))
+      .toThrow(/wildcard folder searches/);
+    expect(() => validateSearchInput({ folders: ["all"] }, MAX, allowed))
+      .toThrow(/wildcard folder searches/);
+    expect(() => validateSearchInput({ folders: [] }, MAX, allowed))
+      .toThrow(/at least one explicit search folder/);
+    expect(() => validateSearchInput({ folder: "INBOX", folders: ["Sent"] }, MAX, ["INBOX", "Sent"]))
+      .toThrow(/conflicts with the effective 'folders'/);
+  });
+
   it("rejects non-array folders, non-string from, oversized subject", () => {
     expect(() => validateSearchInput({ folders: "INBOX" }, MAX)).toThrow(McpError);
     expect(() => validateSearchInput({ from: 5 }, MAX)).toThrow(/'from' filter must be a string/);

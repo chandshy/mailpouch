@@ -39,7 +39,7 @@ import { logger } from "../utils/logger.js";
 import { OAuthStore } from "./oauth-store.js";
 import { OAuthHandlers } from "./oauth-handlers.js";
 import { TokenBucketLimiter } from "./rate-limit.js";
-import type { AgentGrantStore } from "../agents/grant-store.js";
+import { grantHasExpired, isServiceAccountGrant, type AgentGrantStore } from "../agents/grant-store.js";
 import type { ServiceAccountStore } from "../agents/service-account-store.js";
 import { notifications } from "../agents/notifications.js";
 import { runWithCaller } from "../agents/caller-context.js";
@@ -366,6 +366,73 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
     if (token && oauthHandlers) {
       const rec = oauthStore.verifyToken(token);
       if (rec) {
+        // A bearer token is only a credential; its grant remains the live
+        // authorization source. Read a fresh durable snapshot on EVERY HTTP
+        // request so an external Settings/CLI process can revoke access
+        // without relying on this daemon receiving an in-process event. Do
+        // this before resource/IP checks too, so a definitively inactive grant
+        // invalidates all cached bearers regardless of request shape.
+        if (opts.agentGrants) {
+          const grantSnapshot = opts.agentGrants.getAuthorizationSnapshot(rec.clientId);
+          if (grantSnapshot.kind === "unavailable") {
+            // A corrupt/unreadable grants file must fail closed, but it may be
+            // transient (atomic rename, disk issue). Preserve the cached token
+            // so recovery does not force an unnecessary OAuth re-auth.
+            logger.warn(`Grant snapshot unavailable for OAuth client ${rec.clientId}; rejecting bearer without revoking it`, "HTTPTransport");
+            res.statusCode = 401;
+            res.setHeader("WWW-Authenticate", 'Bearer realm="mailpouch", error="invalid_token"');
+            res.end(JSON.stringify({ error: "invalid_token" }));
+            return;
+          }
+
+          const grant = grantSnapshot.kind === "present" ? grantSnapshot.grant : undefined;
+          // Primary grant state is independently authoritative. Resolve it
+          // first so a corrupt service-account file can never postpone token
+          // purging for an already-revoked/expired/missing grant.
+          let definitelyInactive = !grant
+            || grant.status === "revoked"
+            || grant.status === "expired"
+            || (grant.status !== "pending" && grantHasExpired(grant));
+          if (!definitelyInactive && grant && isServiceAccountGrant(grant)) {
+            // A client_credentials grant has a second durable authority: its
+            // credential record. A cross-file revoke can delete that record
+            // before the companion AgentGrant write completes, so consult it
+            // directly rather than trusting the active grant alone.
+            if (!opts.serviceAccounts) {
+              definitelyInactive = true;
+            } else {
+              const serviceSnapshot = opts.serviceAccounts.getAuthorizationSnapshot(rec.clientId);
+              if (serviceSnapshot.kind === "unavailable") {
+                // Same recoverability rule as grant storage: reject while the
+                // credential source is unreadable, but do not make a transient
+                // filesystem failure revoke a bearer permanently.
+                logger.warn(`Service-account snapshot unavailable for OAuth client ${rec.clientId}; rejecting bearer without revoking it`, "HTTPTransport");
+                res.statusCode = 401;
+                res.setHeader("WWW-Authenticate", 'Bearer realm="mailpouch", error="invalid_token"');
+                res.end(JSON.stringify({ error: "invalid_token" }));
+                return;
+              }
+              definitelyInactive = serviceSnapshot.kind === "missing";
+            }
+          }
+          // Pending bearers deliberately survive: they must reach the MCP
+          // grant gate, which reports the actionable pending-approval state.
+          // Missing/revoked/expired grants are definitive and invalidate every
+          // cached token for this client immediately.
+          if (definitelyInactive) {
+            if (grant && grant.status === "active" && grantHasExpired(grant)) {
+              // Best-effort status materialization; rejection + token revocation
+              // do not depend on this write succeeding.
+              try { opts.agentGrants.markExpired(grant.clientId); } catch { /* fail closed below */ }
+            }
+            const n = oauthStore.revokeTokensForClient(rec.clientId);
+            if (n > 0) logger.info(`Revoked ${n} OAuth token(s) for inactive grant ${rec.clientId}`, "HTTPTransport");
+            res.statusCode = 401;
+            res.setHeader("WWW-Authenticate", 'Bearer realm="mailpouch", error="invalid_token"');
+            res.end(JSON.stringify({ error: "invalid_token" }));
+            return;
+          }
+        }
         // Resource Indicators: if the token was bound to a resource, it
         // must match this endpoint's URL.
         const expectedResource = `${issuer}${path}`;
@@ -385,6 +452,7 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
           res.end(JSON.stringify({ error: "invalid_token" }));
           return;
         }
+
         ok = true;
         tokenKey = `oauth:${rec.clientId}`;
         callerClientId = rec.clientId;

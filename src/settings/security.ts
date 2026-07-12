@@ -182,15 +182,13 @@ export function readBodySafe(
  * Requests with no Origin/Referer are allowed (some legitimate browser
  * environments omit them); the CSRF check is the authoritative gate.
  *
- * @param scheme  "http" or "https" — the actual scheme the server is using.
- *                This is required to accept the correct origin in TLS mode,
- *                where browsers send `https://` rather than `http://` origins.
+ * Both HTTP and HTTPS are accepted for the configured host because the UI can
+ * switch transport between restarts while browser tabs remain open.
  */
 export function isValidOrigin(
   req:    http.IncomingMessage,
   port:   number,
   lan:    boolean,
-  scheme: "http" | "https" = "http",
 ): boolean {
   const origin  = req.headers["origin"]  as string | undefined;
   const referer = req.headers["referer"] as string | undefined;
@@ -250,6 +248,111 @@ export interface AccessToken {
   fingerprint: string;
 }
 
+/** Cookie used for a browser session after the one-time LAN URL bootstrap. */
+export const SETTINGS_SESSION_COOKIE_NAME = "mailpouch_settings_session";
+
+// Browser sessions deliberately expire even if the browser leaves its session
+// cookie open. They are only an exchange artifact for a per-process LAN token,
+// so there is no reason for them to outlive a normal settings session.
+const SETTINGS_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+const MAX_SETTINGS_SESSIONS = 128;
+
+/**
+ * In-memory browser sessions for the LAN settings UI.
+ *
+ * A top-level navigation cannot attach X-Access-Token, so the initial
+ * `/?token=…` navigation exchanges the displayed LAN token for a fresh random
+ * HttpOnly cookie and immediately redirects to a URL without the query token.
+ * Only SHA-256 digests are retained in memory; the browser-held value is never
+ * persisted and is invalidated whenever the settings server restarts.
+ */
+export class SettingsBrowserSessionStore {
+  private readonly sessions = new Map<string, number>();
+
+  constructor(
+    private readonly ttlMs = SETTINGS_SESSION_TTL_MS,
+    private readonly maxSessions = MAX_SETTINGS_SESSIONS,
+  ) {}
+
+  /** Issue a new 256-bit, browser-session-only secret. */
+  issue(): string {
+    this.pruneExpired();
+    while (this.sessions.size >= this.maxSessions) {
+      const oldest = this.sessions.keys().next().value as string | undefined;
+      if (!oldest) break;
+      this.sessions.delete(oldest);
+    }
+
+    let value: string;
+    let digest: string;
+    do {
+      value = randomBytes(32).toString("base64url");
+      digest = this.digest(value);
+    } while (this.sessions.has(digest));
+
+    this.sessions.set(digest, Date.now() + this.ttlMs);
+    return value;
+  }
+
+  /** Return true only for an unexpired, server-issued session cookie. */
+  hasValidSession(req: http.IncomingMessage): boolean {
+    const value = readCookie(req, SETTINGS_SESSION_COOKIE_NAME);
+    // `randomBytes(32).toString("base64url")` is exactly 43 URL-safe bytes.
+    // Rejecting anything else avoids hashing arbitrary unbounded cookie input.
+    if (!value || !/^[A-Za-z0-9_-]{43}$/.test(value)) return false;
+
+    const digest = this.digest(value);
+    const expiresAt = this.sessions.get(digest);
+    if (!expiresAt) return false;
+    if (expiresAt <= Date.now()) {
+      this.sessions.delete(digest);
+      return false;
+    }
+    return true;
+  }
+
+  private pruneExpired(now = Date.now()): void {
+    for (const [digest, expiresAt] of this.sessions) {
+      if (expiresAt <= now) this.sessions.delete(digest);
+    }
+  }
+
+  private digest(value: string): string {
+    return createHash("sha256").update(value).digest("hex");
+  }
+}
+
+/**
+ * Build a non-persistent cookie for a LAN browser session. `Secure` is set
+ * whenever the settings server is reachable over HTTPS; the HTTP fallback
+ * cannot set it, which is why LAN mode still warns users to use a trusted
+ * network when certificate generation is unavailable.
+ */
+export function formatSettingsSessionCookie(value: string, secure: boolean): string {
+  if (!/^[A-Za-z0-9_-]{43}$/.test(value)) {
+    throw new Error("Settings browser session value must be a 256-bit base64url token.");
+  }
+  return [
+    `${SETTINGS_SESSION_COOKIE_NAME}=${value}`,
+    "Path=/",
+    "HttpOnly",
+    "SameSite=Strict",
+    ...(secure ? ["Secure"] : []),
+  ].join("; ");
+}
+
+function readCookie(req: http.IncomingMessage, name: string): string | undefined {
+  const raw = req.headers.cookie;
+  if (typeof raw !== "string") return undefined;
+  for (const part of raw.split(";")) {
+    const trimmed = part.trim();
+    const sep = trimmed.indexOf("=");
+    if (sep <= 0) continue;
+    if (trimmed.slice(0, sep) === name) return trimmed.slice(sep + 1);
+  }
+  return undefined;
+}
+
 /** Generate a fresh 256-bit access token for LAN mode. */
 export function generateAccessToken(): AccessToken {
   const value       = randomBytes(32).toString("hex");
@@ -288,16 +391,16 @@ export function hasValidAccessToken(
 }
 
 /**
- * UI-014: bootstrap-only token check for the shell HTML served on "/".
+ * Bootstrap-only token check for the shell HTML served on "/".
  *
  * The shell page is loaded by a top-level browser *navigation*, which cannot
  * carry a custom `X-Access-Token` header — so the documented LAN bootstrap URL
- * passes the token as `?token=…`. The API endpoints stay header-only (query
- * tokens leak into history / referer / proxy logs), but "/" must still be gated
- * in LAN mode or any device on the network could fetch the page and read the
- * embedded per-process CSRF token. This accepts the token from EITHER the
- * header (SPA re-fetch) or the `?token=` query (initial navigation), compared
- * constant-time.
+ * passes the token as `?token=…`. The settings server immediately exchanges a
+ * matching bootstrap token for an HttpOnly browser-session cookie and redirects
+ * to a URL without the query. API endpoints remain header-or-session only:
+ * query tokens leak into history, referer headers, and proxy logs. This accepts
+ * the token from EITHER the header (programmatic root fetch) or the query
+ * (initial navigation), compared constant-time.
  */
 export function hasValidBootstrapToken(
   req:   http.IncomingMessage,

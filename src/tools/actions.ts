@@ -9,6 +9,7 @@ import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import {
   optionalSourceFolder,
   requireNumericEmailId,
+  requireNumericEmailIds,
   validateLabelName,
   validateTargetFolder,
 } from "../utils/helpers.js";
@@ -116,7 +117,7 @@ export const defs: ToolDef[] = [
     name: "move_email",
     title: "Move Email",
     description:
-      "Move an email to a different folder. Common targets: Trash, Archive, Spam, INBOX, Folders/MyFolder. Pass sourceFolder whenever the UID came from a folder other than INBOX — IMAP UIDs are folder-scoped.",
+      "Move an email to a different folder. Common targets: Trash, Archive, Spam, INBOX, Folders/MyFolder. Moving to Trash or Spam requires { confirmed: true }. Pass sourceFolder whenever the UID came from a folder other than INBOX — IMAP UIDs are folder-scoped.",
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     inputSchema: {
       type: "object",
@@ -126,6 +127,7 @@ export const defs: ToolDef[] = [
           type: "string",
           description: "Destination folder path (e.g. Trash, Archive, Folders/Work)",
         },
+        confirmed: { type: "boolean", description: "Must be true when targetFolder is Trash or Spam." },
         sourceFolder: SOURCE_FOLDER_SCHEMA,
       },
       required: ["emailId", "targetFolder"],
@@ -240,7 +242,7 @@ export const defs: ToolDef[] = [
     name: "bulk_move_emails",
     title: "Bulk Move Emails",
     description:
-      "Move multiple emails to a folder in one call. Emits progress notifications if a progressToken is provided in _meta. Returns success/failed counts. Pass sourceFolder whenever the UIDs came from a folder other than INBOX.",
+      "Move multiple emails to a folder in one call. Moving to Trash or Spam requires { confirmed: true }. Emits progress notifications if a progressToken is provided in _meta. Returns success/failed counts. Pass sourceFolder whenever the UIDs came from a folder other than INBOX.",
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     inputSchema: {
       type: "object",
@@ -251,6 +253,7 @@ export const defs: ToolDef[] = [
           description: "Array of email UIDs to move",
         },
         targetFolder: { type: "string", description: "Destination folder path" },
+        confirmed: { type: "boolean", description: "Must be true when targetFolder is Trash or Spam." },
         sourceFolder: SOURCE_FOLDER_SCHEMA,
       },
       required: ["emailIds", "targetFolder"],
@@ -259,9 +262,9 @@ export const defs: ToolDef[] = [
   },
   {
     name: "move_to_label",
-    title: "Move Email to Label",
+    title: "Add Label to Email",
     description:
-      "Apply a label to an email. The email remains in its original folder and also appears in Labels/{label}. Labels are additive — an email can have multiple labels simultaneously.",
+      "Add a label to an email. The email remains in its original folder and also appears in Labels/{label}; labels are additive, so an email can have multiple labels simultaneously. Use move_email only when the email should leave its source folder.",
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     inputSchema: {
       type: "object",
@@ -279,9 +282,9 @@ export const defs: ToolDef[] = [
   },
   {
     name: "bulk_move_to_label",
-    title: "Bulk Move Emails to Label",
+    title: "Add Label to Emails",
     description:
-      "Apply a label to multiple emails. Each email remains in its original folder and also appears in Labels/{label}. Progress notifications are sent for large batches.",
+      "Add a label to multiple emails. Each email remains in its original folder and also appears in Labels/{label}; use bulk_move_emails only when messages should leave their source folder. Progress notifications are sent for large batches.",
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     inputSchema: {
       type: "object",
@@ -330,7 +333,7 @@ export const defs: ToolDef[] = [
 
 export const handlers: Record<string, ToolHandler> = {
   mark_email_read: async (ctx) => {
-    const { args, imapService, actionOk } = ctx;
+    const { args, imapService, actionOk, invalidateAnalytics } = ctx;
     const merEmailId = requireNumericEmailId(args.emailId);
     if (args.isRead !== undefined && typeof args.isRead !== "boolean") {
       throw new McpError(ErrorCode.InvalidParams, "'isRead' must be a boolean when provided.");
@@ -338,11 +341,12 @@ export const handlers: Record<string, ToolHandler> = {
     const isRead = args.isRead !== undefined ? (args.isRead as boolean) : true;
     const merSourceFolder = optionalSourceFolder(args.sourceFolder);
     await imapService.markEmailRead(merEmailId, isRead, merSourceFolder);
+    invalidateAnalytics();
     return actionOk();
   },
 
   star_email: async (ctx) => {
-    const { args, imapService, actionOk } = ctx;
+    const { args, imapService, actionOk, invalidateAnalytics } = ctx;
     const seEmailId = requireNumericEmailId(args.emailId);
     if (args.isStarred !== undefined && typeof args.isStarred !== "boolean") {
       throw new McpError(ErrorCode.InvalidParams, "'isStarred' must be a boolean when provided.");
@@ -350,11 +354,12 @@ export const handlers: Record<string, ToolHandler> = {
     const isStarred = args.isStarred !== undefined ? (args.isStarred as boolean) : true;
     const seSourceFolder = optionalSourceFolder(args.sourceFolder);
     await imapService.starEmail(seEmailId, isStarred, seSourceFolder);
+    invalidateAnalytics();
     return actionOk();
   },
 
   mark_answered: async (ctx) => {
-    const { args, imapService, actionOk } = ctx;
+    const { args, imapService, actionOk, invalidateAnalytics } = ctx;
     const maEmailId = requireNumericEmailId(args.emailId);
     if (args.answered !== undefined && typeof args.answered !== "boolean") {
       throw new McpError(ErrorCode.InvalidParams, "'answered' must be a boolean when provided.");
@@ -362,11 +367,12 @@ export const handlers: Record<string, ToolHandler> = {
     const answered = args.answered !== undefined ? (args.answered as boolean) : true;
     const maSourceFolder = optionalSourceFolder(args.sourceFolder);
     await imapService.setFlag(maEmailId, "\\Answered", answered, maSourceFolder);
+    invalidateAnalytics();
     return actionOk();
   },
 
   mark_forwarded: async (ctx) => {
-    const { args, imapService, actionOk } = ctx;
+    const { args, imapService, actionOk, invalidateAnalytics } = ctx;
     const mfEmailId = requireNumericEmailId(args.emailId);
     if (args.forwarded !== undefined && typeof args.forwarded !== "boolean") {
       throw new McpError(ErrorCode.InvalidParams, "'forwarded' must be a boolean when provided.");
@@ -375,45 +381,50 @@ export const handlers: Record<string, ToolHandler> = {
     const mfSourceFolder = optionalSourceFolder(args.sourceFolder);
     // $Forwarded is the keyword the forward tool writes and the readers honour.
     await imapService.setFlag(mfEmailId, "$Forwarded", forwarded, mfSourceFolder);
+    invalidateAnalytics();
     return actionOk();
   },
 
   move_email: async (ctx) => {
-    const { args, imapService, actionOk } = ctx;
+    const { args, imapService, actionOk, invalidateAnalytics } = ctx;
     const mvEmailId = requireNumericEmailId(args.emailId);
     const mvValidErr = validateTargetFolder(args.targetFolder);
     if (mvValidErr) throw new McpError(ErrorCode.InvalidParams, mvValidErr);
     const mvSourceFolder = optionalSourceFolder(args.sourceFolder);
     await imapService.moveEmail(mvEmailId, args.targetFolder as string, mvSourceFolder);
+    invalidateAnalytics();
     return actionOk();
   },
 
   archive_email: async (ctx) => {
-    const { args, imapService, actionOk } = ctx;
+    const { args, imapService, actionOk, invalidateAnalytics } = ctx;
     const aeEmailId = requireNumericEmailId(args.emailId);
     const aeSourceFolder = optionalSourceFolder(args.sourceFolder);
     await imapService.moveEmail(aeEmailId, "Archive", aeSourceFolder);
+    invalidateAnalytics();
     return actionOk();
   },
 
   move_to_trash: async (ctx) => {
-    const { args, imapService, actionOk } = ctx;
+    const { args, imapService, actionOk, invalidateAnalytics } = ctx;
     const mttEmailId = requireNumericEmailId(args.emailId);
     const mttSourceFolder = optionalSourceFolder(args.sourceFolder);
     await imapService.moveEmail(mttEmailId, "Trash", mttSourceFolder);
+    invalidateAnalytics();
     return actionOk();
   },
 
   move_to_spam: async (ctx) => {
-    const { args, imapService, actionOk } = ctx;
+    const { args, imapService, actionOk, invalidateAnalytics } = ctx;
     const mtsEmailId = requireNumericEmailId(args.emailId);
     const mtsSourceFolder = optionalSourceFolder(args.sourceFolder);
     await imapService.moveEmail(mtsEmailId, "Spam", mtsSourceFolder);
+    invalidateAnalytics();
     return actionOk();
   },
 
   move_to_folder: async (ctx) => {
-    const { args, imapService, actionOk } = ctx;
+    const { args, imapService, actionOk, invalidateAnalytics } = ctx;
     const mtfEmailId = requireNumericEmailId(args.emailId);
     if (typeof args.folder !== "string" || args.folder.trim() === "") {
       throw new McpError(ErrorCode.InvalidParams, "folder must be a non-empty string.");
@@ -437,20 +448,13 @@ export const handlers: Record<string, ToolHandler> = {
     const target = /^(Folders|Labels)\//.test(folderName) ? folderName : `Folders/${folderName}`;
     const mtfSourceFolder = optionalSourceFolder(args.sourceFolder);
     await imapService.moveEmail(mtfEmailId, target, mtfSourceFolder);
+    invalidateAnalytics();
     return actionOk();
   },
 
   bulk_mark_read: async (ctx) => {
-    const { args, imapService, bulkOk, sendProgress, MAX_BULK_IDS } = ctx;
-    if (!Array.isArray(args.emailIds) || (args.emailIds as unknown[]).length === 0) {
-      throw new McpError(ErrorCode.InvalidParams, "emailIds must be a non-empty array of numeric UID strings.");
-    }
-    const bmrEmailIds: string[] = (args.emailIds as unknown[])
-      .filter((id): id is string => typeof id === "string" && /^\d+$/.test(id))
-      .slice(0, MAX_BULK_IDS);
-    if (bmrEmailIds.length === 0) {
-      throw new McpError(ErrorCode.InvalidParams, "No valid numeric email IDs in the provided list.");
-    }
+    const { args, imapService, bulkOk, sendProgress, MAX_BULK_IDS, invalidateAnalytics } = ctx;
+    const bmrEmailIds = requireNumericEmailIds(args.emailIds, MAX_BULK_IDS);
     if (args.isRead !== undefined && typeof args.isRead !== "boolean") {
       throw new McpError(ErrorCode.InvalidParams, "'isRead' must be a boolean when provided.");
     }
@@ -458,20 +462,13 @@ export const handlers: Record<string, ToolHandler> = {
     const bmrSourceFolder = optionalSourceFolder(args.sourceFolder);
     const bmrResults = await imapService.bulkMarkRead(bmrEmailIds, bmrIsRead, bmrSourceFolder);
     await sendProgress(bmrEmailIds.length, bmrEmailIds.length, `Marked ${bmrResults.success} of ${bmrEmailIds.length} (${bmrResults.failed} failed)`);
+    invalidateAnalytics();
     return bulkOk(bmrResults);
   },
 
   bulk_star: async (ctx) => {
-    const { args, imapService, bulkOk, sendProgress, MAX_BULK_IDS } = ctx;
-    if (!Array.isArray(args.emailIds) || (args.emailIds as unknown[]).length === 0) {
-      throw new McpError(ErrorCode.InvalidParams, "emailIds must be a non-empty array of numeric UID strings.");
-    }
-    const bsEmailIds: string[] = (args.emailIds as unknown[])
-      .filter((id): id is string => typeof id === "string" && /^\d+$/.test(id))
-      .slice(0, MAX_BULK_IDS);
-    if (bsEmailIds.length === 0) {
-      throw new McpError(ErrorCode.InvalidParams, "No valid numeric email IDs in the provided list.");
-    }
+    const { args, imapService, bulkOk, sendProgress, MAX_BULK_IDS, invalidateAnalytics } = ctx;
+    const bsEmailIds = requireNumericEmailIds(args.emailIds, MAX_BULK_IDS);
     if (args.isStarred !== undefined && typeof args.isStarred !== "boolean") {
       throw new McpError(ErrorCode.InvalidParams, "'isStarred' must be a boolean when provided.");
     }
@@ -479,35 +476,26 @@ export const handlers: Record<string, ToolHandler> = {
     const bsSourceFolder = optionalSourceFolder(args.sourceFolder);
     const bsResults = await imapService.bulkStar(bsEmailIds, bsIsStarred, bsSourceFolder);
     await sendProgress(bsEmailIds.length, bsEmailIds.length, `Starred ${bsResults.success} of ${bsEmailIds.length} (${bsResults.failed} failed)`);
+    invalidateAnalytics();
     return bulkOk(bsResults);
   },
 
   bulk_move_emails: async (ctx) => {
-    const { args, imapService, bulkOk, sendProgress, MAX_BULK_IDS, state } = ctx;
+    const { args, imapService, bulkOk, sendProgress, MAX_BULK_IDS, invalidateAnalytics } = ctx;
     const bmValidErr = validateTargetFolder(args.targetFolder);
     if (bmValidErr) throw new McpError(ErrorCode.InvalidParams, bmValidErr);
-    if (!Array.isArray(args.emailIds) || (args.emailIds as unknown[]).length === 0) {
-      throw new McpError(ErrorCode.InvalidParams, "emailIds must be a non-empty array of numeric UID strings.");
-    }
-    const rawIds = args.emailIds as unknown[];
-    const emailIds: string[] = rawIds
-      .filter((id): id is string => typeof id === "string" && /^\d+$/.test(id))
-      .slice(0, MAX_BULK_IDS);
-    if (emailIds.length === 0) {
-      throw new McpError(ErrorCode.InvalidParams, "No valid numeric email IDs in the provided list. Email IDs must be numeric UID strings.");
-    }
+    const emailIds = requireNumericEmailIds(args.emailIds, MAX_BULK_IDS);
     const targetFolder = args.targetFolder as string;
     const bmSourceFolder = optionalSourceFolder(args.sourceFolder);
 
     const results = await imapService.bulkMoveEmails(emailIds, targetFolder, bmSourceFolder);
     await sendProgress(emailIds.length, emailIds.length, `Moved ${results.success} of ${emailIds.length} to ${targetFolder} (${results.failed} failed)`);
-    state.analyticsCache = null;
-    state.analyticsCacheInflight = null;
+    invalidateAnalytics();
     return bulkOk(results);
   },
 
   move_to_label: async (ctx) => {
-    const { args, imapService, actionOk } = ctx;
+    const { args, imapService, actionOk, invalidateAnalytics } = ctx;
     const mtlEmailId = requireNumericEmailId(args.emailId);
     if (!args.label || typeof args.label !== "string") {
       throw new McpError(ErrorCode.InvalidParams, "'label' is required and must be a string.");
@@ -520,20 +508,13 @@ export const handlers: Record<string, ToolHandler> = {
     // a nonexistent Labels/<name>, which Proton Bridge can silently no-op.
     await imapService.ensureFolderExists(`Labels/${label}`);
     await imapService.copyEmailToFolder(mtlEmailId, `Labels/${label}`, mtlSourceFolder);
+    invalidateAnalytics();
     return actionOk();
   },
 
   bulk_move_to_label: async (ctx) => {
-    const { args, imapService, bulkOk, sendProgress, MAX_BULK_IDS, state } = ctx;
-    if (!Array.isArray(args.emailIds) || (args.emailIds as unknown[]).length === 0) {
-      throw new McpError(ErrorCode.InvalidParams, "emailIds must be a non-empty array of numeric UID strings.");
-    }
-    const emailIds2: string[] = (args.emailIds as unknown[])
-      .filter((id): id is string => typeof id === "string" && /^\d+$/.test(id))
-      .slice(0, MAX_BULK_IDS);
-    if (emailIds2.length === 0) {
-      throw new McpError(ErrorCode.InvalidParams, "No valid numeric email IDs in the provided list.");
-    }
+    const { args, imapService, bulkOk, sendProgress, MAX_BULK_IDS, invalidateAnalytics } = ctx;
+    const emailIds = requireNumericEmailIds(args.emailIds, MAX_BULK_IDS);
     if (!args.label || typeof args.label !== "string") {
       throw new McpError(ErrorCode.InvalidParams, "'label' is required and must be a string.");
     }
@@ -546,15 +527,14 @@ export const handlers: Record<string, ToolHandler> = {
     // Create the label mailbox if it doesn't exist — otherwise the copy targets
     // a nonexistent Labels/<name>, which Proton Bridge can silently no-op.
     await imapService.ensureFolderExists(labelFolder);
-    const results2 = await imapService.bulkCopyToFolder(emailIds2, labelFolder, bmlSourceFolder);
-    await sendProgress(emailIds2.length, emailIds2.length, `Labeled ${results2.success} of ${emailIds2.length} (${results2.failed} failed)`);
-    state.analyticsCache = null;
-    state.analyticsCacheInflight = null;
-    return bulkOk(results2);
+    const results = await imapService.bulkCopyToFolder(emailIds, labelFolder, bmlSourceFolder);
+    await sendProgress(emailIds.length, emailIds.length, `Labeled ${results.success} of ${emailIds.length} (${results.failed} failed)`);
+    invalidateAnalytics();
+    return bulkOk(results);
   },
 
   remove_label: async (ctx) => {
-    const { args, imapService, actionOk } = ctx;
+    const { args, imapService, actionOk, invalidateAnalytics } = ctx;
     const rlEmailId = requireNumericEmailId(args.emailId);
     if (!args.label || typeof args.label !== "string") {
       throw new McpError(ErrorCode.InvalidParams, "'label' is required and must be a string.");
@@ -563,20 +543,13 @@ export const handlers: Record<string, ToolHandler> = {
     const rlLabelValidErr = validateLabelName(rlLabel);
     if (rlLabelValidErr) throw new McpError(ErrorCode.InvalidParams, rlLabelValidErr);
     await imapService.deleteFromFolder(rlEmailId, `Labels/${rlLabel}`);
+    invalidateAnalytics();
     return actionOk();
   },
 
   bulk_remove_label: async (ctx) => {
-    const { args, imapService, bulkOk, sendProgress, MAX_BULK_IDS, state } = ctx;
-    if (!Array.isArray(args.emailIds) || (args.emailIds as unknown[]).length === 0) {
-      throw new McpError(ErrorCode.InvalidParams, "emailIds must be a non-empty array of numeric UID strings.");
-    }
-    const brlEmailIds: string[] = (args.emailIds as unknown[])
-      .filter((id): id is string => typeof id === "string" && /^\d+$/.test(id))
-      .slice(0, MAX_BULK_IDS);
-    if (brlEmailIds.length === 0) {
-      throw new McpError(ErrorCode.InvalidParams, "No valid numeric email IDs in the provided list.");
-    }
+    const { args, imapService, bulkOk, sendProgress, MAX_BULK_IDS, invalidateAnalytics } = ctx;
+    const brlEmailIds = requireNumericEmailIds(args.emailIds, MAX_BULK_IDS);
     if (!args.label || typeof args.label !== "string") {
       throw new McpError(ErrorCode.InvalidParams, "'label' is required and must be a string.");
     }
@@ -587,8 +560,7 @@ export const handlers: Record<string, ToolHandler> = {
 
     const brlResults = await imapService.bulkDeleteFromFolder(brlEmailIds, brlLabelFolder);
     await sendProgress(brlEmailIds.length, brlEmailIds.length, `Unlabeled ${brlResults.success} of ${brlEmailIds.length} (${brlResults.failed} failed)`);
-    state.analyticsCache = null;
-    state.analyticsCacheInflight = null;
+    invalidateAnalytics();
     return bulkOk(brlResults);
   },
 };

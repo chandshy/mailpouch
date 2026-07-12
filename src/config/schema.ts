@@ -26,7 +26,7 @@ export const ALL_TOOLS = [
   "move_to_label", "bulk_move_to_label",
   "remove_label", "bulk_remove_label",
   // Deletion
-  "delete_email", "bulk_delete_emails", "bulk_delete", "empty_trash",
+  "delete_email", "bulk_delete_emails", "empty_trash",
   // Analytics
   "get_email_stats", "get_email_analytics", "get_contacts", "get_volume_trends",
   // System
@@ -103,7 +103,7 @@ export const TOOL_CATEGORIES: Record<string, ToolCategory> = {
   deletion: {
     label: "Deletion",
     description: "Delete emails by moving them to Trash (recoverable). Includes empty_trash, which PERMANENTLY purges the Trash mailbox — the one unrecoverable, confirm-gated exception.",
-    tools: ["delete_email", "bulk_delete_emails", "bulk_delete", "empty_trash"],
+    tools: ["delete_email", "bulk_delete_emails", "empty_trash"],
     risk: "destructive",
   },
   analytics: {
@@ -371,8 +371,23 @@ export interface AccountSpecShape {
 
 export interface ServerConfig {
   configVersion: number;
+  /**
+   * Monotonic epoch changed only by a full configuration reset. Browser
+   * settings forms echo this value so a form loaded before reset cannot later
+   * restore the old mailbox or security policy over the reset defaults.
+   */
+  configResetGeneration?: number;
   connection: ConnectionSettings;
   permissions: ServerPermissions;
+  /**
+   * Durable fail-closed marker written by reset when one or more mailbox
+   * keychain entries could not be deleted. While set, startup and registry
+   * rebuilds must never hydrate account credentials from the OS keychain: a
+   * stale entry must not bring a reset mailbox back after process restart.
+   *
+   * A successful reset is the explicit recovery path and removes this marker.
+   */
+  keychainMailboxCredentialsQuarantined?: boolean;
   /** Where credentials are stored: "keychain" (OS keychain), "encrypted-file" (AES-256-GCM in config), or "config" (plaintext in config — legacy). */
   credentialStorage?: "keychain" | "encrypted-file" | "config";
   /** Tuneable response-size guards — see ResponseLimits. */
@@ -453,26 +468,25 @@ export interface ServerConfig {
 /** Tools that mutate or destroy Proton-side state and require { confirmed: true }. */
 export const DESTRUCTIVE_TOOLS: ReadonlySet<string> = new Set<string>([
   "delete_email",
-  "bulk_delete",
   "bulk_delete_emails",
   "empty_trash",
   "delete_folder",
   "move_to_trash",
   "move_to_spam",
   "alias_delete",
+  "alias_delete_contact",
+  "alias_delete_mailbox",
   "pass_get",
+  "pass_totp",
   "shutdown_server",
   "restart_server",
 ]);
 
 /**
- * Tool-name aliases. PERM-003 (audit 2026-05-28): `bulk_delete` and
- * `bulk_delete_emails` resolve to the same handler in src/tools/deletion.ts,
- * but the permission gate keys rate buckets by raw tool name — letting an
- * agent double the destruction throughput the operator configured by
- * alternating between the two names. Canonicalize at every gate
- * (rate-limit bucket, destructive-confirm, per-tool enabled flag) so the
- * operator's intent applies regardless of which alias the caller used.
+ * Tool-name aliases retained for direct-call compatibility. `bulk_delete`
+ * and `bulk_delete_emails` resolve to the same handler, so every gate must
+ * operate on the canonical name. Otherwise an agent could alternate names to
+ * bypass a per-tool rate limit or an explicit deny.
  *
  * Keys are aliases; values are the canonical name. Stays small — only add
  * an entry when two tool names truly share a handler.
@@ -496,7 +510,6 @@ export function canonicalToolName(name: string): string {
 export const MOVE_TOOLS_WITH_DESTRUCTIVE_TARGET: ReadonlySet<string> = new Set<string>([
   "move_email",
   "bulk_move_emails",
-  "move_to_folder",
 ]);
 
 /** Destination folder names that count as destructive. Case-insensitive comparison. */
@@ -520,11 +533,15 @@ export type ToolTier = "core" | "extended" | "complete";
 /**
  * Where each category surfaces first.
  *
- * Actual tool counts per tier (cumulative, including the 3 always-available
- * meta-tools: setup_status + request_permission_escalation + check_escalation_status):
- *   core     — 27 categorized (reading 14 + sending 4 + analytics 4 + system 5)            + 3 meta = 30 visible
- *   extended — 66 categorized (core 27 + drafts 9 + folders 5 + actions 16 + aliases 6 + pass 3) + 3 = 69 visible
- *   complete — 73 categorized (extended 66 + deletion 4 + bridge_control 3)                       + 3 = 76 visible
+ * Actual canonical tool counts per tier (cumulative, including the 3
+ * always-available meta-tools: setup_status + request_permission_escalation +
+ * check_escalation_status):
+ *   core     — 27 categorized + 3 meta = 30 visible
+ *   extended — 77 categorized + 3 meta = 80 visible
+ *   complete — 83 categorized + 3 meta = 86 visible
+ *
+ * Optional SimpleLogin and Pass groups are omitted from ListTools until their
+ * credentials are configured, so real-world listings are usually smaller.
  */
 export const TOOL_CATEGORY_TIER: Record<string, ToolTier> = {
   reading:        "core",     // reading is the 80 % use case

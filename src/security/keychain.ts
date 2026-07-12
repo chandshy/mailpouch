@@ -244,9 +244,14 @@ export async function deleteAccountCredentials(accountId: string): Promise<boole
   try {
     const keyring = await getKeyring();
     if (!keyring) return false;
-    try { new keyring.Entry(SERVICE_NAME, accountPasswordKey(accountId)).deletePassword(); } catch { /* not set */ }
-    try { new keyring.Entry(SERVICE_NAME, accountSmtpTokenKey(accountId)).deletePassword(); } catch { /* not set */ }
-    return true;
+    // An absent entry normally returns false rather than throwing and still
+    // counts as successfully cleared. A thrown deletion, however, means a
+    // caller (notably the configuration reset flow) must be told that cleanup
+    // could not be verified instead of receiving a false success signal.
+    let cleared = true;
+    try { new keyring.Entry(SERVICE_NAME, accountPasswordKey(accountId)).deletePassword(); } catch { cleared = false; }
+    try { new keyring.Entry(SERVICE_NAME, accountSmtpTokenKey(accountId)).deletePassword(); } catch { cleared = false; }
+    return cleared;
   } catch {
     return false;
   }
@@ -348,6 +353,33 @@ export async function saveAuxiliaryCredentials(passAccessToken: string, simplelo
   }
 }
 
+/**
+ * Delete selected auxiliary secrets after an explicit Settings UI clear.
+ * Keeping this separate from saveAuxiliaryCredentials is intentional: callers
+ * commonly pass an empty value to mean "leave this untouched", while an
+ * explicit clear must remove the durable keychain entry too.
+ */
+export async function deleteAuxiliaryCredentials(targets: {
+  passAccessToken?: boolean;
+  simpleloginApiKey?: boolean;
+}): Promise<boolean> {
+  try {
+    const keyring = await getKeyring();
+    if (!keyring) return false;
+    if (targets.passAccessToken) {
+      // A false return merely means the entry was already absent. A thrown
+      // delete must fail the clear request instead of reporting false success.
+      new keyring.Entry(SERVICE_NAME, KEY_PASS_PAT).deletePassword();
+    }
+    if (targets.simpleloginApiKey) {
+      new keyring.Entry(SERVICE_NAME, KEY_SIMPLELOGIN_KEY).deletePassword();
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Load remoteBearerToken + remoteOauthAdminPassword from the keychain. */
 export async function loadRemoteSecrets(): Promise<{ remoteBearerToken: string; remoteOauthAdminPassword: string } | null> {
   try {
@@ -369,6 +401,26 @@ export async function saveRemoteSecrets(remoteBearerToken: string, remoteOauthAd
     if (!keyring) return false;
     if (remoteBearerToken) new keyring.Entry(SERVICE_NAME, KEY_REMOTE_BEARER).setPassword(remoteBearerToken);
     if (remoteOauthAdminPassword) new keyring.Entry(SERVICE_NAME, KEY_REMOTE_OAUTH_ADMIN).setPassword(remoteOauthAdminPassword);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Delete the remote-server secrets kept in the OS keychain.
+ *
+ * A configuration reset must remove these alongside mailbox and integration
+ * credentials.  Keep this separate from saveRemoteSecrets(): an empty value
+ * during an ordinary settings save means "leave the existing secret alone",
+ * whereas reset is an explicit request to erase it.
+ */
+export async function deleteRemoteSecrets(): Promise<boolean> {
+  try {
+    const keyring = await getKeyring();
+    if (!keyring) return false;
+    new keyring.Entry(SERVICE_NAME, KEY_REMOTE_BEARER).deletePassword();
+    new keyring.Entry(SERVICE_NAME, KEY_REMOTE_OAUTH_ADMIN).deletePassword();
     return true;
   } catch {
     return false;

@@ -8,8 +8,10 @@ export function buildAccountsHtml(p: AccountsParams): string {
   <div class="section-heading">Mail accounts</div>
   <div class="section-subheading">
     Manage the mail providers this server talks to. The active account
-    drives the singleton IMAP/SMTP services — switching accounts requires
-    a server restart. Concurrent per-tool account routing is future work.
+    drives default IMAP/SMTP services; a running daemon can apply a live switch
+    to new calls without interrupting work already in progress. If live
+    switching is unavailable, the UI will ask you to restart. Tools can also
+    use an <code>account_id</code> argument to target a configured account directly.
   </div>
 
   <div class="card" style="margin-top:10px">

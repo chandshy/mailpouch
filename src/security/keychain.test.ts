@@ -95,6 +95,16 @@ describe('Keychain (without keytar installed)', () => {
     expect(await saveAuxiliaryCredentials('pat-secret', 'sl-key')).toBe(false);
   });
 
+  it('deleteAuxiliaryCredentials should return false without keytar', async () => {
+    const { deleteAuxiliaryCredentials } = await import('./keychain.js');
+    expect(await deleteAuxiliaryCredentials({ passAccessToken: true })).toBe(false);
+  });
+
+  it('deleteRemoteSecrets should return false without keytar', async () => {
+    const { deleteRemoteSecrets } = await import('./keychain.js');
+    expect(await deleteRemoteSecrets()).toBe(false);
+  });
+
   it('migrateFromConfig with only Pass PAT set leaves the secret on disk when keychain is unavailable (CRED-001)', async () => {
     const { migrateFromConfig } = await import('./keychain.js');
     const mockConfig = {
@@ -264,6 +274,26 @@ describe('Keychain (positive-path with stub @napi-rs/keyring) — TEST-005', () 
     expect(loaded).toEqual({ passAccessToken: 'pat-secret', simpleloginApiKey: 'sl-key' });
     expect(backend.store.get('mailpouch|pass-pat')).toBe('pat-secret');
     expect(backend.store.get('mailpouch|simplelogin-api-key')).toBe('sl-key');
+    await clear();
+  });
+
+  it('deleteAuxiliaryCredentials removes only explicitly-cleared secrets', async () => {
+    const { saveAuxiliaryCredentials, loadAuxiliaryCredentials, deleteAuxiliaryCredentials } = await import('./keychain.js');
+    await saveAuxiliaryCredentials('pat-secret', 'sl-key');
+    expect(await deleteAuxiliaryCredentials({ passAccessToken: true })).toBe(true);
+    expect(await loadAuxiliaryCredentials()).toEqual({ passAccessToken: '', simpleloginApiKey: 'sl-key' });
+    expect(backend.store.has('mailpouch|pass-pat')).toBe(false);
+    expect(backend.store.get('mailpouch|simplelogin-api-key')).toBe('sl-key');
+    await clear();
+  });
+
+  it('deleteRemoteSecrets removes both remote-server entries', async () => {
+    const { saveRemoteSecrets, loadRemoteSecrets, deleteRemoteSecrets } = await import('./keychain.js');
+    await saveRemoteSecrets('bearer-secret', 'oauth-admin-secret');
+    expect(await deleteRemoteSecrets()).toBe(true);
+    expect(await loadRemoteSecrets()).toBeNull();
+    expect(backend.store.has('mailpouch|remote-bearer-token')).toBe(false);
+    expect(backend.store.has('mailpouch|remote-oauth-admin-password')).toBe(false);
     await clear();
   });
 

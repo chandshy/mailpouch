@@ -21,7 +21,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from "http";
-import { createHash, createHmac, randomBytes } from "crypto";
+import { createHash } from "crypto";
 import { OAuthStore } from "./oauth-store.js";
 import { TokenBucketLimiter } from "./rate-limit.js";
 import { clientIp } from "./http.js";
@@ -165,9 +165,6 @@ function verifyPkceS256(verifier: string, challenge: string): boolean {
   return constantTimeEqual(computed, challenge);
 }
 
-// Constant-time string compare imported from ../utils/crypto.
-const safeEqual = constantTimeEqual;
-
 /**
  * Extract client_id + client_secret for the client_credentials grant. Supports
  * both RFC 6749 §2.3.1 transports: HTTP Basic (`Authorization: Basic
@@ -234,21 +231,6 @@ export class OAuthHandlers {
     this.verifyClientCredentials = verifyClientCredentials;
     // Authorize is always automatic-consent (there is no admin password): the
     // per-agent grant Approve/Deny is the only human gate (see handleAuthorizeGet).
-  }
-
-
-
-  /**
-   * XPORT-008: reject state-changing POSTs whose Origin is cross-site. The
-   * consent form is same-origin (`form-action 'self'`); a present Origin that
-   * doesn't match the issuer means a cross-site submission. A missing Origin is
-   * allowed through (some same-origin form posts omit it) — the CSRF token is
-   * the primary defence; the Origin check is belt-and-suspenders.
-   */
-  private originAllowed(req: IncomingMessage): boolean {
-    const origin = req.headers["origin"];
-    if (!origin || typeof origin !== "string") return true;
-    return origin === this.cfg.issuer;
   }
 
   /**
@@ -369,7 +351,7 @@ export class OAuthHandlers {
   }
 
   /** Consent page — returns a small HTML form rather than a redirect. */
-  private async handleAuthorizeGet(req: IncomingMessage, res: ServerResponse, url: URL): Promise<OAuthHandlerResult> {
+  private async handleAuthorizeGet(_req: IncomingMessage, res: ServerResponse, url: URL): Promise<OAuthHandlerResult> {
     const params = url.searchParams;
     const clientId = params.get("client_id") ?? "";
     const redirectUri = params.get("redirect_uri") ?? "";

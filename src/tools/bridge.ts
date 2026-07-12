@@ -3,7 +3,6 @@
  * restart_server.
  */
 
-import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { logger } from "../utils/logger.js";
 import type { ToolDef, ToolHandler, ToolModule } from "./types.js";
 
@@ -29,7 +28,7 @@ export const defs: ToolDef[] = [
   {
     name: "shutdown_server",
     title: "Shutdown MCP Server",
-    description: "Gracefully shut down the MCP server. Terminates Proton Bridge (regardless of whether this server launched it), disconnects IMAP/SMTP, scrubs credentials from memory, then exits.",
+    description: "Gracefully shut down the MCP server. Terminates Proton Bridge (regardless of whether this server launched it), disconnects IMAP/SMTP, scrubs credentials from memory, then exits. Requires { confirmed: true }.",
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
     inputSchema: { type: "object", properties: {} },
     outputSchema: ACTION_RESULT_SCHEMA,
@@ -37,7 +36,7 @@ export const defs: ToolDef[] = [
   {
     name: "restart_server",
     title: "Restart MCP Server",
-    description: "Restart the MCP server. Terminates Proton Bridge, shuts down gracefully, then spawns a fresh server process. If autoStartBridge is enabled the new process will re-launch Bridge automatically.",
+    description: "Restart the MCP server. Terminates Proton Bridge, shuts down gracefully, then spawns a fresh server process. If autoStartBridge is enabled the new process will re-launch Bridge automatically. Requires { confirmed: true }.",
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
     inputSchema: { type: "object", properties: {} },
     outputSchema: ACTION_RESULT_SCHEMA,
@@ -47,7 +46,10 @@ export const defs: ToolDef[] = [
 export const handlers: Record<string, ToolHandler> = {
   start_bridge: async (ctx) => {
     const { ok, config, launchProtonBridge, isBridgeReachable, state } = ctx;
-    await launchProtonBridge();
+    // The dispatcher may have routed this call with account_id.  Pass that
+    // immutable snapshot through to the launcher instead of reading the
+    // module-level active-account configuration mid-call.
+    await launchProtonBridge(config);
     const [smtpUp, imapUp] = await Promise.all([
       isBridgeReachable(config.smtp.host, config.smtp.port),
       isBridgeReachable(config.imap.host, config.imap.port),

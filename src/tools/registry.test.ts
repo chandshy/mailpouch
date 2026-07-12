@@ -7,7 +7,13 @@
 
 import { describe, it, expect } from "vitest";
 
-import { allToolDefs } from "./registry.js";
+import {
+  ALL_TOOLS,
+  ALWAYS_AVAILABLE_TOOLS,
+  DESTRUCTIVE_TOOLS,
+  MOVE_TOOLS_WITH_DESTRUCTIVE_TARGET,
+} from "../config/schema.js";
+import { allToolDefs, advertisedToolDefs } from "./registry.js";
 
 interface SchemaShape {
   type?: string;
@@ -60,5 +66,34 @@ describe("allToolDefs — account_id surface", () => {
     expect(getFolders, "get_folders missing from registry").toBeDefined();
     const schema = (getFolders!.inputSchema ?? {}) as SchemaShape;
     expect(Object.keys(schema.properties ?? {})).toEqual(["account_id"]);
+  });
+
+  it("contains every canonical and always-available tool exactly once", () => {
+    const names = defs.map((def) => def.name);
+    expect(new Set(names).size).toBe(names.length);
+    expect(new Set(names)).toEqual(new Set([...ALL_TOOLS, ...ALWAYS_AVAILABLE_TOOLS]));
+  });
+
+  it("adds a confirmation field to every confirmation-gated definition", () => {
+    const confirmationGated = new Set([...DESTRUCTIVE_TOOLS, ...MOVE_TOOLS_WITH_DESTRUCTIVE_TARGET]);
+    for (const def of defs.filter((item) => confirmationGated.has(item.name))) {
+      const schema = (def.inputSchema ?? {}) as SchemaShape;
+      expect(schema.properties?.confirmed, `${def.name} is missing confirmed`).toMatchObject({ type: "boolean" });
+    }
+  });
+});
+
+describe("advertisedToolDefs — optional companions", () => {
+  it("omits unconfigured SimpleLogin and Proton Pass tools", () => {
+    const names = advertisedToolDefs({ simpleLogin: false, pass: false }).map((def) => def.name);
+    expect(names.some((name) => name.startsWith("alias_"))).toBe(false);
+    expect(names.some((name) => name.startsWith("pass_"))).toBe(false);
+  });
+
+  it("includes companions once configured", () => {
+    const names = advertisedToolDefs({ simpleLogin: true, pass: true }).map((def) => def.name);
+    expect(names).toContain("alias_list");
+    expect(names).toContain("pass_list");
+    expect(names).toHaveLength(86);
   });
 });

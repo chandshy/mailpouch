@@ -10,7 +10,7 @@ function makeCtx(over: Partial<ToolCallContext>): ToolCallContext {
   });
   return {
     ok,
-    state: { analyticsCache: {}, analyticsCacheInflight: {} },
+    invalidateAnalytics: () => {},
     ...over,
   } as unknown as ToolCallContext;
 }
@@ -33,14 +33,16 @@ describe("empty_trash tool", () => {
     expect(def.description).toMatch(/Trash/);
   });
 
-  it("handler returns the purge count and invalidates analytics cache", async () => {
+  it("handler returns the purge count and invalidates this account's analytics cache", async () => {
     let emptied = false;
+    let invalidated = false;
     const ctx = makeCtx({
       imapService: { emptyTrash: async () => { emptied = true; return { deleted: 7 }; } } as unknown as ToolCallContext["imapService"],
+      invalidateAnalytics: () => { invalidated = true; },
     });
     const res = await mod.handlers.empty_trash(ctx);
     expect(emptied).toBe(true);
     expect(res.structuredContent).toMatchObject({ success: true, deleted: 7 });
-    expect(ctx.state.analyticsCache).toBeNull();
+    expect(invalidated).toBe(true);
   });
 });

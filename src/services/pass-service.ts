@@ -31,7 +31,7 @@
 
 import { spawn, spawnSync } from "child_process";
 import { createHash } from "crypto";
-import { appendFileSync, existsSync, readFileSync, statSync } from "fs";
+import { appendFileSync, existsSync, readFileSync } from "fs";
 import { homedir } from "os";
 import { isAbsolute, sep, join as pathJoin } from "path";
 import { logger } from "../utils/logger.js";

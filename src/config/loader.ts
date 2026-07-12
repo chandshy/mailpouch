@@ -8,13 +8,15 @@
  * to reduce the risk of credential exposure.
  */
 
-import { readFileSync, writeFileSync, existsSync, renameSync, statSync, openSync, closeSync, unlinkSync, chmodSync } from "fs";
-import { homedir, tmpdir } from "os";
-import { join, resolve, normalize } from "path";
+import { readFileSync, writeFileSync, existsSync, renameSync, statSync, openSync, closeSync, unlinkSync, chmodSync, realpathSync, fsyncSync, mkdirSync, rmdirSync } from "fs";
+import { homedir } from "os";
+import { join, resolve, normalize, dirname, basename, relative, isAbsolute, sep } from "path";
 import { randomBytes } from "crypto";
+import { AsyncLocalStorage } from "async_hooks";
 import {
   ALL_TOOLS,
   TOOL_CATEGORIES,
+  canonicalToolName,
   CONFIG_VERSION,
   PERMISSION_PRESETS,
   DEFAULT_RESPONSE_LIMITS,
@@ -25,7 +27,6 @@ import {
   type ResponseLimits,
 } from "./schema.js";
 import {
-  isKeychainAvailable,
   loadCredentials as loadKeychainCredentials,
   saveCredentials as saveKeychainCredentials,
   loadAuxiliaryCredentials as loadKeychainAuxCredentials,
@@ -58,21 +59,78 @@ function clamp(value: number, min: number, max: number): number {
 
 // ─── Config path ───────────────────────────────────────────────────────────────
 
+/** True when `candidate` is `directory` itself or lives below it. */
+function isWithinDirectory(candidate: string, directory: string): boolean {
+  const pathFromDirectory = relative(directory, candidate);
+  return pathFromDirectory === "" || (
+    pathFromDirectory !== ".." &&
+    !pathFromDirectory.startsWith(`..${sep}`) &&
+    !isAbsolute(pathFromDirectory)
+  );
+}
+
+/**
+ * Resolve symlinks in an existing path, or in its deepest existing ancestor.
+ *
+ * `realpathSync(configPath)` alone is not sufficient for first-run profiles:
+ * the config file may not exist yet even though a parent directory is a
+ * symlink. Resolving that parent preserves one profile identity before and
+ * after the first save. If no ancestor can be resolved (for example because
+ * of a transient filesystem failure), retain the normalized lexical path so a
+ * new configuration path remains usable.
+ */
+function canonicalizePathOrExistingParent(path: string): string {
+  let ancestor = path;
+  const suffix: string[] = [];
+
+  while (true) {
+    try {
+      return join(realpathSync(ancestor), ...suffix);
+    } catch {
+      const parent = dirname(ancestor);
+      if (parent === ancestor) return path;
+      suffix.unshift(basename(ancestor));
+      ancestor = parent;
+    }
+  }
+}
+
+/**
+ * Return the physical config path whenever the config (or a parent directory)
+ * already exists.  Every profile-scoped consumer — config locks, singleton
+ * locks, scheduler/reminder/FTS stores, and agent state — derives its identity
+ * from this value.  Without canonicalization, `MAILPOUCH_CONFIG=~/alias.json`
+ * could bypass the singleton lock for `~/real.json` when alias.json is a
+ * symlink to it.
+ */
 export function getConfigPath(): string {
   const envPath = process.env.MAILPOUCH_CONFIG;
-  if (envPath) {
-    // Resolve to absolute path and ensure it stays within the user's home
-    // directory — prevents path-traversal attacks (e.g. "../../etc/passwd").
-    const resolved = resolve(normalize(envPath));
-    const home = homedir();
-    if (!resolved.startsWith(home + "/") && !resolved.startsWith(home + "\\") && resolved !== home) {
-      throw new Error(
-        `MAILPOUCH_CONFIG must point to a path within the home directory (${home}). Got: ${resolved}`
-      );
-    }
-    return resolved;
+  const home = homedir();
+  const requestedPath = envPath
+    ? resolve(normalize(envPath))
+    : join(home, ".mailpouch.json");
+
+  // Check the lexical path first so a new path cannot escape $HOME via `..`.
+  if (!isWithinDirectory(requestedPath, home)) {
+    const source = envPath ? "MAILPOUCH_CONFIG" : "Default config path";
+    throw new Error(
+      `${source} must point to a path within the home directory (${home}). Got: ${requestedPath}`
+    );
   }
-  return join(homedir(), ".mailpouch.json");
+
+  const canonicalPath = canonicalizePathOrExistingParent(requestedPath);
+  // A symlink inside $HOME may point outside it. Do not let canonicalization
+  // turn an otherwise-safe override into a read/write escape hatch. Resolve
+  // $HOME too in case the platform itself exposes it through a symlink.
+  const canonicalHome = canonicalizePathOrExistingParent(home);
+  if (!isWithinDirectory(canonicalPath, canonicalHome)) {
+    const source = envPath ? "MAILPOUCH_CONFIG" : "Default config path";
+    throw new Error(
+      `${source} must point to a path within the home directory (${home}). Got: ${canonicalPath}`
+    );
+  }
+
+  return canonicalPath;
 }
 
 // ─── Default values ────────────────────────────────────────────────────────────
@@ -181,6 +239,7 @@ export function buildPermissions(preset: PermissionPreset): ServerConfig["permis
 export function defaultConfig(): ServerConfig {
   return {
     configVersion: CONFIG_VERSION,
+    configResetGeneration: 0,
     connection: {
       smtpHost: "localhost",
       smtpPort: 1025,
@@ -263,9 +322,13 @@ export function loadConfig(): ServerConfig | null {
     const knownTools = new Set<string>(ALL_TOOLS as readonly string[]);
     const rawTools = parsed.permissions?.tools ?? {};
     const filteredTools: Partial<Record<ToolName, ToolPermission>> = {};
-    for (const [k, v] of Object.entries(rawTools)) {
-      if (knownTools.has(k)) {
-        filteredTools[k as ToolName] = v as ToolPermission;
+    for (const [rawName, value] of Object.entries(rawTools)) {
+      const canonicalName = canonicalToolName(rawName);
+      if (!knownTools.has(canonicalName)) continue;
+      // A canonical key wins if both it and a legacy alias appear in a saved
+      // config. Otherwise preserve the alias's policy on upgrade.
+      if (rawName === canonicalName || filteredTools[canonicalName as ToolName] === undefined) {
+        filteredTools[canonicalName as ToolName] = value as ToolPermission;
       }
     }
 
@@ -312,6 +375,12 @@ export function loadConfig(): ServerConfig | null {
       const sp = Math.round(parsedSettingsPort);
       if (sp >= 1 && sp <= 65535) preservedSettingsPort = sp;
     }
+    const preservedConfigResetGeneration =
+      typeof parsed.configResetGeneration === "number"
+      && Number.isSafeInteger(parsed.configResetGeneration)
+      && parsed.configResetGeneration >= 0
+        ? parsed.configResetGeneration
+        : 0;
     // credentialStorage drives the settings UI's "where are my secrets
     // kept?" badge. Derive it from observed state rather than trusting the
     // persisted value — an attacker editing the config file could otherwise
@@ -339,6 +408,7 @@ export function loadConfig(): ServerConfig | null {
 
     const result: ServerConfig = {
       configVersion: CONFIG_VERSION,
+      configResetGeneration: preservedConfigResetGeneration,
       connection: mergedConnection,
       permissions: {
         // Default to "read_only" — not "full" — for pre-permissions config files.
@@ -351,6 +421,13 @@ export function loadConfig(): ServerConfig | null {
       // opts out. This keeps the safe default for existing configs that never
       // set the field.
       requireDestructiveConfirm: parsed.requireDestructiveConfirm !== false,
+      // This marker is deliberately fail-closed: only an explicit boolean
+      // true survives. It is written by reset after incomplete mailbox
+      // keychain cleanup and prevents a stale OS-keychain entry from being
+      // rehydrated after restart.
+      keychainMailboxCredentialsQuarantined: parsed.keychainMailboxCredentialsQuarantined === true
+        ? true
+        : undefined,
       tosAcknowledged: parsed.tosAcknowledged,
       settingsPort: preservedSettingsPort,
       credentialStorage: preservedCredentialStorage,
@@ -391,21 +468,211 @@ export function loadConfig(): ServerConfig | null {
 // race with each other and with the settings-UI POST handler. Without a lock,
 // two near-simultaneous renames clobber one another (last-writer-wins) and a
 // reader caught between them can observe a half-merged file. We serialize via
-// an exclusive O_EXCL lock file next to the config — no new dependency.
+// an exclusive lock directory next to the config — no new dependency.
 
 /** Max attempts to acquire the lock before giving up. */
 const LOCK_MAX_RETRIES = 50;
 /** Delay between lock acquisition attempts (busy-wait; writes are sub-ms). */
 const LOCK_RETRY_DELAY_MS = 20;
-/** A lock file older than this is treated as abandoned by a crashed holder. */
-const LOCK_STALE_MS = 10_000;
 
 /**
- * Reentrancy depth. writeRegistry holds the lock across its whole
- * read-modify-write and calls saveConfig() inside it; the inner saveConfig
- * must reuse the held lock rather than deadlock on its own O_EXCL.
+ * A config lock is an atomically-created directory containing a small owner
+ * record. mtime is not a safe liveness signal: an async config write can
+ * legitimately await keychain work for longer than an arbitrary lease timeout.
+ *
+ * The directory is important for stale recovery. A reclaimer deletes the exact
+ * dead owner's record and then calls rmdir(). Only one contender can remove an
+ * empty directory; a new owner cannot appear while that directory still
+ * exists. This avoids the file-lock TOCTOU where a stale reclaimer can unlink
+ * or rename over a successor that acquired the pathname in between.
  */
-let _lockDepth = 0;
+interface ConfigLockOwner {
+  version: 1;
+  pid: number;
+  token: string;
+}
+
+interface HeldConfigLock {
+  directory: string;
+  ownerPath: string;
+  owner: ConfigLockOwner;
+}
+
+const CONFIG_LOCK_OWNER_FILENAME = "owner.json";
+
+function configLockOwnerPath(lockDirectory: string): string {
+  return join(lockDirectory, CONFIG_LOCK_OWNER_FILENAME);
+}
+
+function isConfigLockOwner(value: unknown): value is ConfigLockOwner {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<ConfigLockOwner>;
+  return candidate.version === 1 &&
+    typeof candidate.pid === "number" && Number.isSafeInteger(candidate.pid) && candidate.pid > 0 &&
+    typeof candidate.token === "string" && candidate.token.length >= 16;
+}
+
+function readConfigLockOwner(lockDirectory: string): ConfigLockOwner | null {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(configLockOwnerPath(lockDirectory), "utf-8"));
+    return isConfigLockOwner(parsed) ? parsed : null;
+  } catch {
+    // A partially-created/corrupt owner record has no trustworthy owner.
+    // Leaving its directory in place is deliberately fail-closed: deleting it
+    // based only on age can overlap a live writer that was paused mid-create.
+    return null;
+  }
+}
+
+function sameConfigLockOwner(left: ConfigLockOwner, right: ConfigLockOwner | null): boolean {
+  return right !== null && left.pid === right.pid && left.token === right.token;
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    // Signal 0 performs no action; it asks the OS whether the process exists
+    // and is signalable. EPERM still proves that a process owns the PID.
+    process.kill(pid, 0);
+    return true;
+  } catch (err: unknown) {
+    const code = (err as NodeJS.ErrnoException).code;
+    return code !== "ESRCH";
+  }
+}
+
+function makeConfigLockOwner(): ConfigLockOwner {
+  return {
+    version: 1,
+    pid: process.pid,
+    token: randomBytes(16).toString("hex"),
+  };
+}
+
+/** Create a new lock directory, returning null only when another owner has it. */
+function createConfigLock(lockDirectory: string): HeldConfigLock | null {
+  try {
+    // mkdir is atomic across the platforms we support. Unlike an O_EXCL file,
+    // the directory cannot be removed while it contains an owner record.
+    mkdirSync(lockDirectory, { mode: 0o700 });
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code === "EEXIST") return null;
+    throw err;
+  }
+
+  const ownerPath = configLockOwnerPath(lockDirectory);
+  const owner = makeConfigLockOwner();
+  let fd: number | null = null;
+  try {
+    fd = openSync(ownerPath, "wx", 0o600);
+    writeFileSync(fd, JSON.stringify(owner), "utf-8");
+    // Make the ownership record durable before another process is allowed to
+    // infer that this lock was abandoned after a machine crash.
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = null;
+    return { directory: lockDirectory, ownerPath, owner };
+  } catch (err) {
+    if (fd !== null) {
+      try { closeSync(fd); } catch { /* best effort */ }
+    }
+    // No compliant writer can acquire this pathname while its directory
+    // exists, and this synchronous create path never yielded. Cleanup cannot
+    // remove a successor.
+    try { unlinkSync(ownerPath); } catch { /* best effort */ }
+    try { rmdirSync(lockDirectory); } catch { /* best effort */ }
+    throw err;
+  }
+}
+
+/**
+ * Remove exactly one conclusively-dead owner directory. Once the owner record
+ * is removed, rmdir is the atomic election: only its winner may retry mkdir.
+ * A successor cannot exist before rmdir because the directory remains present
+ * until that point.
+ */
+function reclaimAbandonedConfigLock(lockDirectory: string, abandoned: ConfigLockOwner): boolean {
+  if (isProcessAlive(abandoned.pid)) return false;
+  try {
+    // Recheck immediately before unlinking. Two reclaimers can both observe a
+    // dead owner, but only one can unlink this exact record; the other sees
+    // ENOENT/mismatch and never removes a successor directory.
+    if (!sameConfigLockOwner(abandoned, readConfigLockOwner(lockDirectory))) {
+      return false;
+    }
+    // Check liveness again after the re-read. PID reuse or a transient probe
+    // error must fail closed rather than break a potentially live lock.
+    if (isProcessAlive(abandoned.pid)) return false;
+    unlinkSync(configLockOwnerPath(lockDirectory));
+  } catch {
+    return false;
+  }
+
+  try {
+    rmdirSync(lockDirectory);
+    return true;
+  } catch {
+    // The record is already gone. A competing reclaimer may have won rmdir,
+    // or an external file may keep the directory non-empty. In either case do
+    // not attempt another deletion or create a replacement over this path.
+    return false;
+  }
+}
+
+/**
+ * Attempt to acquire the directory lock. A known dead owner may be removed;
+ * only the successful rmdir caller retries the create immediately. Unknown
+ * directories and all live owners are left untouched.
+ */
+function tryAcquireConfigLock(lockDirectory: string): HeldConfigLock | null {
+  const created = createConfigLock(lockDirectory);
+  if (created) return created;
+
+  const owner = readConfigLockOwner(lockDirectory);
+  if (!owner || isProcessAlive(owner.pid)) return null;
+  return reclaimAbandonedConfigLock(lockDirectory, owner)
+    ? createConfigLock(lockDirectory)
+    : null;
+}
+
+/** Release only the exact owner record created by this holder. */
+function releaseConfigLock(held: HeldConfigLock): void {
+  try {
+    // A stale reclaimer or external actor may have removed/recreated this
+    // directory. Never delete a record we no longer own.
+    if (!sameConfigLockOwner(held.owner, readConfigLockOwner(held.directory))) return;
+    unlinkSync(held.ownerPath);
+    // A successor cannot be created until this directory disappears. If rmdir
+    // fails, leave it fail-closed rather than deleting unknown contents.
+    rmdirSync(held.directory);
+  } catch {
+    // A failed unlock should not hide the result of the protected operation.
+  }
+}
+
+/**
+ * Synchronous lock depth. A synchronous critical section cannot yield to a
+ * different request, so a nested saveConfig() is safely known to have the
+ * same owner. Async ownership is tracked separately below with
+ * AsyncLocalStorage; a process-global depth is not sufficient after `await`.
+ */
+let _syncLockDepth = 0;
+
+/** Whether an async writer currently owns the on-disk lock. */
+let _asyncLockHeld = false;
+
+interface AsyncConfigLockContext {
+  /** False once the outer callback has released the physical lock. */
+  active: boolean;
+  depth: number;
+}
+
+/**
+ * Reentrancy must follow the async call chain, not merely the process.  A
+ * global `_lockDepth > 0` made any request arriving while a keychain save was
+ * awaiting look nested, so it could run a conflicting read-modify-write
+ * concurrently.  AsyncLocalStorage marks only the actual lock owner's chain.
+ */
+const _asyncLockContext = new AsyncLocalStorage<AsyncConfigLockContext>();
 
 /**
  * In-process async serialization. The on-disk O_EXCL lock guards against OTHER
@@ -427,49 +694,44 @@ function sleepMs(ms: number): Promise<void> {
 }
 
 /**
- * Run `fn` while holding an exclusive lock on `${dest}.lock`. Reentrant for the
- * same process (depth-counted). Reclaims a stale lock left by a crashed holder.
- * The lock is always released in the outermost frame via try/finally.
+ * Run `fn` while holding an exclusive lock on `${dest}.lock`. Reentrant only
+ * for the same synchronous stack or async owner chain. A lock is recovered
+ * only when its recorded owner process is gone; age is never used as a lease.
+ * The lock is released in the outermost frame.
  */
 function withConfigLock<T>(dest: string, fn: () => T): T {
-  if (_lockDepth > 0) {
-    // Already held by an outer frame in this process — reuse it.
-    _lockDepth++;
+  const asyncContext = _asyncLockContext.getStore();
+  if (_syncLockDepth > 0 || asyncContext?.active) {
+    // Already held by this synchronous stack or this async call chain — reuse
+    // it. saveConfig() relies on this when writeRegistry holds the outer lock.
+    _syncLockDepth++;
     try { return fn(); }
-    finally { _lockDepth--; }
+    finally { _syncLockDepth--; }
+  }
+  if (_asyncLockHeld) {
+    // Blocking the Node event loop here would deadlock the async owner while
+    // it awaits keychain/I/O. Never silently bypass its lock; callers that
+    // need to span awaits must use withConfigWriteLockAsync().
+    throw new Error("Configuration write is already in progress; retry with withConfigWriteLockAsync().");
   }
 
   const lockPath = `${dest}.lock`;
-  let fd: number | null = null;
+  let held: HeldConfigLock | null = null;
   for (let attempt = 0; attempt < LOCK_MAX_RETRIES; attempt++) {
-    try {
-      fd = openSync(lockPath, "wx", 0o600); // O_CREAT | O_EXCL
-      break;
-    } catch (err: unknown) {
-      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-      // Lock held by someone else — reclaim it if it's stale (crashed holder),
-      // otherwise back off and retry.
-      try {
-        const age = Date.now() - statSync(lockPath).mtimeMs;
-        if (age > LOCK_STALE_MS) {
-          unlinkSync(lockPath);
-          continue; // retry immediately after clearing the stale lock
-        }
-      } catch { /* lock vanished between open and stat — just retry */ }
-      blockMs(LOCK_RETRY_DELAY_MS);
-    }
+    held = tryAcquireConfigLock(lockPath);
+    if (held) break;
+    blockMs(LOCK_RETRY_DELAY_MS);
   }
-  if (fd === null) {
+  if (held === null) {
     throw new Error(`Could not acquire config lock at ${lockPath} after ${LOCK_MAX_RETRIES} attempts`);
   }
 
-  _lockDepth++;
+  _syncLockDepth++;
   try {
     return fn();
   } finally {
-    _lockDepth--;
-    try { closeSync(fd); } catch { /* already closed */ }
-    try { unlinkSync(lockPath); } catch { /* already removed */ }
+    _syncLockDepth--;
+    releaseConfigLock(held);
   }
 }
 
@@ -525,12 +787,14 @@ export function withConfigWriteLock<T>(fn: () => T): T {
  * released only after the promise settles. CRED-008.
  */
 export async function withConfigWriteLockAsync<T>(fn: () => Promise<T>): Promise<T> {
-  // Reentrant: an async writer already holding the lock (e.g. a future nested
-  // call) reuses it rather than enqueuing behind itself.
-  if (_lockDepth > 0) {
-    _lockDepth++;
+  // Reentrant only for the SAME async call chain. A global depth check would
+  // incorrectly let a second HTTP request enter while the first was awaiting
+  // the keychain, defeating the RMW lock.
+  const inheritedContext = _asyncLockContext.getStore();
+  if (inheritedContext?.active) {
+    inheritedContext.depth++;
     try { return await fn(); }
-    finally { _lockDepth--; }
+    finally { inheritedContext.depth--; }
   }
 
   // Queue behind any in-flight same-process async writer. Chain on settle (not
@@ -542,32 +806,28 @@ export async function withConfigWriteLockAsync<T>(fn: () => Promise<T>): Promise
 
   const dest = getConfigPath();
   const lockPath = `${dest}.lock`;
-  let fd: number | null = null;
+  let held: HeldConfigLock | null = null;
   try {
     for (let attempt = 0; attempt < LOCK_MAX_RETRIES; attempt++) {
-      try {
-        fd = openSync(lockPath, "wx", 0o600); // O_CREAT | O_EXCL
-        break;
-      } catch (err: unknown) {
-        if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-        try {
-          const age = Date.now() - statSync(lockPath).mtimeMs;
-          if (age > LOCK_STALE_MS) { unlinkSync(lockPath); continue; }
-        } catch { /* lock vanished — retry */ }
-        await sleepMs(LOCK_RETRY_DELAY_MS); // async sleep — never blocks the loop
-      }
+      held = tryAcquireConfigLock(lockPath);
+      if (held) break;
+      await sleepMs(LOCK_RETRY_DELAY_MS); // async sleep — never blocks the loop
     }
-    if (fd === null) {
+    if (held === null) {
       throw new Error(`Could not acquire config lock at ${lockPath} after ${LOCK_MAX_RETRIES} attempts`);
     }
 
-    _lockDepth++;
+    _asyncLockHeld = true;
+    const context: AsyncConfigLockContext = { active: true, depth: 1 };
     try {
-      return await fn();
+      return await _asyncLockContext.run(context, fn);
     } finally {
-      _lockDepth--;
-      try { closeSync(fd); } catch { /* already closed */ }
-      try { unlinkSync(lockPath); } catch { /* already removed */ }
+      // Timers/promises spawned inside the callback inherit this context. Mark
+      // it inactive before releasing so a detached callback cannot later
+      // bypass a newly acquired lock merely because it inherited stale ALS.
+      context.active = false;
+      _asyncLockHeld = false;
+      releaseConfigLock(held);
     }
   } finally {
     release();
@@ -587,16 +847,25 @@ export async function loadCredentialsFromKeychain(): Promise<{
 } | null> {
   const tags: { hasPassword?: boolean; hasSmtpToken?: boolean; storage?: string } = {};
   return tracer.span('config.loadKeychain', tags, async () => {
-  // 1. Try keychain first
-  const keychainCreds = await loadKeychainCredentials();
-  if (keychainCreds && (keychainCreds.password || keychainCreds.smtpToken)) {
-    tags.hasPassword = !!keychainCreds.password;
-    tags.hasSmtpToken = !!keychainCreds.smtpToken;
-    tags.storage = "keychain";
-    return { ...keychainCreds, storage: "keychain" as const };
-  }
-
   const config = loadConfig();
+
+  // A reset can complete its file transition even when the OS keychain
+  // refuses one of its deletes.  In that state an old legacy keychain entry
+  // is hostile input: never let a restart restore it over the blank reset
+  // config. Config/encrypted-file credentials remain eligible so an operator
+  // can still configure a new mailbox without first trusting that old entry.
+  const keychainQuarantined = config?.keychainMailboxCredentialsQuarantined === true;
+
+  // 1. Try keychain first unless reset quarantined the mailbox namespace.
+  if (!keychainQuarantined) {
+    const keychainCreds = await loadKeychainCredentials();
+    if (keychainCreds && (keychainCreds.password || keychainCreds.smtpToken)) {
+      tags.hasPassword = !!keychainCreds.password;
+      tags.hasSmtpToken = !!keychainCreds.smtpToken;
+      tags.storage = "keychain";
+      return { ...keychainCreds, storage: "keychain" as const };
+    }
+  }
 
   // 2. Try encrypted-file storage
   if (config) {

@@ -3,11 +3,9 @@
  *
  * Each AccountSpec is a self-contained mail-server definition: provider
  * type, IMAP/SMTP host+port, credentials, optional TLS cert. The overall
- * server picks one "active" account to wire into the singleton IMAP/SMTP
- * services. Switching the active account currently requires a server
- * restart — a full service-layer refactor that lets a single running
- * process speak to multiple accounts concurrently is tracked as future
- * work (would let tools take an optional `account_id` argument).
+ * server picks one "active" account to drive the default IMAP/SMTP services.
+ * The running daemon can rebind that default account, while individual tool
+ * calls may use `account_id` to target a configured account directly.
  *
  * The shape is deliberately similar to the existing top-level
  * ConnectionSettings so migration is mechanical.

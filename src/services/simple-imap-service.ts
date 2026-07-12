@@ -6,9 +6,11 @@ import { ImapFlow } from 'imapflow';
 import type { Attachment } from 'mailparser';
 import { simpleParser } from 'mailparser';
 import { buildEmailMessage, verifyRelocatedMessages, buildSearchCriteria, truncateBody, stripHtml, normalizeAddressList } from './imap-helpers.js';
+import { compareSemver, chunkUidsForWire, expandImapSequence } from './imap-wire-utils.js';
 // Re-export the pure helpers from their original home so existing importers
 // (index.ts, tests) keep working after the move to imap-helpers.ts.
 export { stripHtml, normalizeAddressList };
+export { chunkUidsForWire, expandImapSequence } from './imap-wire-utils.js';
 import nodemailer, { type SendMailOptions } from 'nodemailer';
 import { EmailMessage, EmailFolder, SearchEmailOptions, SaveDraftOptions } from '../types/index.js';
 import { logger } from '../utils/logger.js';
@@ -20,23 +22,6 @@ import { buildBridgeTlsConfig } from './bridge-tls.js';
 import { classifyError, ConnectionStateError } from '../utils/error-classify.js';
 import { tracer, type SpanTags } from '../utils/tracer.js';
 import { BRIDGE_MIN_VERSION } from '../config/schema.js';
-
-/**
- * Compare two dotted numeric version strings ("3.22.1" vs "3.22.0").
- * Returns negative, zero, or positive in strcmp fashion.
- * Non-numeric segments and missing trailing segments compare as 0.
- */
-function compareSemver(a: string, b: string): number {
-  const parse = (s: string) => s.split('.').map(p => parseInt(p, 10) || 0);
-  const aa = parse(a);
-  const bb = parse(b);
-  const len = Math.max(aa.length, bb.length);
-  for (let i = 0; i < len; i++) {
-    const diff = (aa[i] ?? 0) - (bb[i] ?? 0);
-    if (diff !== 0) return diff;
-  }
-  return 0;
-}
 
 /** imapflow's append() return value includes uid at runtime but it is omitted from the type declaration. */
 interface AppendResult { uid?: number }
@@ -72,84 +57,6 @@ interface ImapBodyNode {
 }
 
 // ImapSearchCriteria is provided by imapflow as SearchObject (imported above).
-
-/**
- * Split a list of UID strings into wire-bounded chunks suitable for a single
- * IMAP command. Proton Bridge (and other servers) cap command lines around
- * 8 KB; ~800 nine-digit UIDs already exceed that, and IMAP-002 from the
- * 2026-05-28 audit observed the bulk paths silently degrading to per-UID
- * fallback (and minutes of held mailbox lock). This helper caps each chunk
- * at `maxLen` bytes of `,`-joined UIDs, leaving headroom for the IMAP tag,
- * command verb, and surrounding syntax.
- *
- * No sequence-set compression (`1:5,10`) — the runs aren't usually present
- * in production UID lists and the simpler flat representation keeps the
- * fallback behaviour identical.
- */
-export function chunkUidsForWire(uids: string[], maxLen: number = 7500): string[] {
-  if (uids.length === 0) return [];
-  const chunks: string[] = [];
-  let cur: string[] = [];
-  let curLen = 0;
-  for (const id of uids) {
-    // Project the cost of adding this UID to the current chunk: the UID's
-    // own length plus a leading comma if the chunk already has content.
-    const sep = cur.length === 0 ? 0 : 1;
-    if (cur.length > 0 && curLen + sep + id.length > maxLen) {
-      chunks.push(cur.join(','));
-      cur = [];
-      curLen = 0;
-    }
-    // Recompute the separator *after* a potential flush so the first UID in
-    // a fresh chunk doesn't carry the previous chunk's comma cost.
-    curLen += (cur.length === 0 ? 0 : 1) + id.length;
-    cur.push(id);
-  }
-  if (cur.length > 0) chunks.push(cur.join(','));
-  return chunks;
-}
-
-/**
- * IMAP-011: expand an IMAP sequence-set string (`1`, `1:5`, `1,3,7:9`) into a
- * flat number array. Guards added:
- *  - reject non-numeric / `*` parts (NaN) so `'1:*'` no longer silently yields
- *    `[1]` and `'a:b'` no longer yields `[NaN]`;
- *  - cap the produced count so a hostile/buggy `1:1000000000` can't allocate a
- *    billion-element array and OOM the process.
- */
-const MAX_EXPANDED_SEQUENCE = 10_000;
-export function expandImapSequence(range: string): number[] {
-  const nums: number[] = [];
-  for (const part of range.split(',')) {
-    const segs = part.split(':');
-    // IMAP sequence-set grammar allows at most one ':' per part; "1:2:3" is
-    // malformed and must be rejected, not silently truncated to "1:2".
-    if (segs.length > 2) {
-      throw new Error(`Invalid IMAP sequence part: ${JSON.stringify(part)}`);
-    }
-    const [a, b] = segs.map(Number);
-    if (!Number.isInteger(a) || a < 1) {
-      throw new Error(`Invalid IMAP sequence part: ${JSON.stringify(part)}`);
-    }
-    if (b === undefined) {
-      nums.push(a);
-    } else {
-      if (!Number.isInteger(b) || b < a) {
-        throw new Error(`Invalid IMAP sequence range: ${JSON.stringify(part)}`);
-      }
-      // Check the projected size BEFORE expanding so a hostile `1:1000000000`
-      // can't OOM (or hit "Invalid array length") while growing the array.
-      if (nums.length + (b - a + 1) > MAX_EXPANDED_SEQUENCE) {
-        throw new Error(`IMAP sequence too large (> ${MAX_EXPANDED_SEQUENCE} UIDs): ${JSON.stringify(range)}`);
-      }
-      for (let i = a; i <= b; i++) nums.push(i);
-    }
-    if (nums.length > MAX_EXPANDED_SEQUENCE) {
-      throw new Error(`IMAP sequence too large (> ${MAX_EXPANDED_SEQUENCE} UIDs): ${JSON.stringify(range)}`);
-    }
-  }
-  return nums;
-}
 
 /** Maximum number of emails held in the in-process cache (count-based guard). */
 const MAX_EMAIL_CACHE_SIZE = 500;
@@ -1387,11 +1294,13 @@ export class SimpleIMAPService {
    * Download the binary content of an attachment.
    * The content is sourced from the in-process email cache (populated by
    * getEmailById / getEmails). If the email is not yet cached, a fetch is
-   * triggered first.
+   * triggered first. `folderHint`, when supplied, is authoritative: IMAP UIDs
+   * are per-folder, so this method must not select another folder's same-UID
+   * cache entry or perform an all-folder fallback.
    *
    * Returns null if the email or attachment index is not found.
    */
-  async downloadAttachment(emailId: string, attachmentIndex: number): Promise<{
+  async downloadAttachment(emailId: string, attachmentIndex: number, folderHint?: string): Promise<{
     filename: string;
     contentType: string;
     size: number;
@@ -1399,14 +1308,19 @@ export class SimpleIMAPService {
     encoding: "base64";
   } | null> {
     this.validateEmailId(emailId);
-    const tags: SpanTags = { emailId, attachmentIndex };
+    if (folderHint !== undefined) this.validateFolderName(folderHint);
+    const tags: SpanTags = { emailId, attachmentIndex, folderHint };
     return tracer.span('imap.downloadAttachment', tags, async () => {
     logger.debug('Downloading attachment', 'IMAPService', { emailId, attachmentIndex });
 
-    // Get email metadata — prefer cache hit, then fall through to IMAP fetch
-    let emailMeta: EmailMessage | null | undefined = this.findCacheEntryByUid(emailId);
+    // UIDs are mailbox-local. A caller that knows the source folder must get
+    // the exact folder-qualified cache entry rather than whichever same-UID
+    // message happens to have been cached first in another folder.
+    let emailMeta: EmailMessage | null | undefined = folderHint
+      ? this.getCacheEntry(emailId, folderHint)
+      : this.findCacheEntryByUid(emailId);
     if (!emailMeta) {
-      emailMeta = await this.getEmailById(emailId);
+      emailMeta = await this.getEmailById(emailId, folderHint);
     }
 
     if (!emailMeta || !emailMeta.attachments || emailMeta.attachments.length === 0) {
@@ -2443,139 +2357,115 @@ export class SimpleIMAPService {
     }); // end tracer.span('imap.bulkDeleteEmails')
   }
 
-  /**
-   * Bulk-toggle the \Seen flag on many emails using a single IMAP UID STORE
-   * per folder. Mirrors the bulkDeleteEmails / bulkMoveEmails pattern:
-   * group by cached folder, lock once, batch flag-set, fall back to per-UID
-   * on a batch error.
-   */
-  async bulkMarkRead(emailIds: string[], isRead: boolean = true, sourceFolder?: string): Promise<{ success: number; failed: number; errors: string[] }> {
+  /** Shared batched IMAP flag mutation used by read and star operations. */
+  private async bulkSetFlag(
+    emailIds: string[],
+    sourceFolder: string | undefined,
+    options: {
+      flag: "\\Seen" | "\\Flagged";
+      value: boolean;
+      cacheField: "isRead" | "isStarred";
+      valueTag: "isRead" | "isStarred";
+      span: "imap.bulkMarkRead" | "imap.bulkStar";
+      startLog: string;
+      completeLog: string;
+      failureVerb: "mark" | "star";
+      operationName: string;
+    },
+  ): Promise<{ success: number; failed: number; errors: string[] }> {
     if (sourceFolder !== undefined) this.validateFolderName(sourceFolder);
-    const tags: SpanTags = { count: emailIds.length, isRead, sourceFolder };
-    return tracer.span('imap.bulkMarkRead', tags, async () => {
-    logger.debug('Bulk marking read status', 'IMAPService', { count: emailIds.length, isRead, sourceFolder });
-    if (!this.client || !this.isConnected) throw new Error('IMAP client not connected');
+    const tags: SpanTags = { count: emailIds.length, [options.valueTag]: options.value, sourceFolder };
+    return tracer.span(options.span, tags, async () => {
+      logger.debug(options.startLog, "IMAPService", { count: emailIds.length, [options.valueTag]: options.value, sourceFolder });
+      if (!this.client || !this.isConnected) throw new Error("IMAP client not connected");
 
-    const results = { success: 0, failed: 0, errors: [] as string[] };
-    const grouped = await this.groupEmailsByFolder(emailIds, sourceFolder, results);
+      const results = { success: 0, failed: 0, errors: [] as string[] };
+      const grouped = await this.groupEmailsByFolder(emailIds, sourceFolder, results);
 
-    for (const [folder, ids] of grouped.entries()) {
-      const lock = await this.client.getMailboxLock(folder);
-      try {
-        let existing: Set<string>;
+      for (const [folder, ids] of grouped.entries()) {
+        const lock = await this.client.getMailboxLock(folder);
         try {
-          existing = await this.findExistingUidsInLockedFolder(ids);
-        } catch (e: unknown) {
-          // IMAP-006: transport error during pre-flight. Surface the real
-          // failure mode rather than collapsing into "UIDs not found" — the
-          // caller needs to distinguish "definitely absent" from "couldn't
-          // verify" so a retry is meaningful.
-          const msg = e instanceof Error ? e.message : String(e);
-          for (const id of ids) {
-            results.failed++;
-            results.errors.push(`UID ${id} existence check failed in folder ${folder}: ${msg}`);
+          let existing: Set<string>;
+          try {
+            existing = await this.findExistingUidsInLockedFolder(ids);
+          } catch (error: unknown) {
+            const message = error instanceof Error ? error.message : String(error);
+            for (const id of ids) {
+              results.failed++;
+              results.errors.push(`UID ${id} existence check failed in folder ${folder}: ${message}`);
+            }
+            continue;
           }
-          continue;
-        }
-        const present: string[] = [];
-        for (const id of ids) {
-          if (existing.has(id)) {
-            present.push(id);
-          } else {
+
+          const present = ids.filter((id) => {
+            if (existing.has(id)) return true;
             results.failed++;
             results.errors.push(`UID ${id} not found in folder ${folder}`);
-          }
-        }
-        if (present.length === 0) continue;
+            return false;
+          });
+          if (present.length === 0) continue;
 
-        await this.chunkedBatchOp({
-          present,
-          perChunk: (uidSet) => isRead
-            ? this.client!.messageFlagsAdd(uidSet, ['\\Seen'], { uid: true })
-            : this.client!.messageFlagsRemove(uidSet, ['\\Seen'], { uid: true }),
-          perUid: (id) => isRead
-            ? this.client!.messageFlagsAdd(id, ['\\Seen'], { uid: true })
-            : this.client!.messageFlagsRemove(id, ['\\Seen'], { uid: true }),
-          onSuccess: (id) => {
-            const c = this.getCacheEntry(id, folder); if (c) c.isRead = isRead;
-            results.success++;
-          },
-          onFailure: (id, msg) => { results.failed++; results.errors.push(`Failed to mark ${id}: ${msg}`); },
-          opName: 'Bulk mark-read',
-          folder,
-        });
-      } finally { lock.release(); }
-    }
-    tags.successCount = results.success; tags.failCount = results.failed;
-    if (results.success > 0) this.clearFolderCache(); // unread counts changed → next get_folders refetches
-    logger.info(`Bulk mark-read completed: ${results.success}/${results.failed}`, 'IMAPService');
-    return results;
-    }); // end tracer.span('imap.bulkMarkRead')
+          await this.chunkedBatchOp({
+            present,
+            perChunk: (uidSet) => options.value
+              ? this.client!.messageFlagsAdd(uidSet, [options.flag], { uid: true })
+              : this.client!.messageFlagsRemove(uidSet, [options.flag], { uid: true }),
+            perUid: (id) => options.value
+              ? this.client!.messageFlagsAdd(id, [options.flag], { uid: true })
+              : this.client!.messageFlagsRemove(id, [options.flag], { uid: true }),
+            onSuccess: (id) => {
+              const cached = this.getCacheEntry(id, folder);
+              if (cached) cached[options.cacheField] = options.value;
+              results.success++;
+            },
+            onFailure: (id, message) => {
+              results.failed++;
+              results.errors.push(`Failed to ${options.failureVerb} ${id}: ${message}`);
+            },
+            opName: options.operationName,
+            folder,
+          });
+        } finally {
+          lock.release();
+        }
+      }
+
+      tags.successCount = results.success;
+      tags.failCount = results.failed;
+      if (results.success > 0) this.clearFolderCache();
+      logger.info(`${options.completeLog}: ${results.success}/${results.failed}`, "IMAPService");
+      return results;
+    });
   }
 
-  /** Bulk-toggle the \Flagged (starred) flag on many emails. Same shape as bulkMarkRead. */
+  /** Bulk-toggle the \Seen flag on many emails using a batched UID STORE. */
+  async bulkMarkRead(emailIds: string[], isRead: boolean = true, sourceFolder?: string): Promise<{ success: number; failed: number; errors: string[] }> {
+    return this.bulkSetFlag(emailIds, sourceFolder, {
+      flag: "\\Seen",
+      value: isRead,
+      cacheField: "isRead",
+      valueTag: "isRead",
+      span: "imap.bulkMarkRead",
+      startLog: "Bulk marking read status",
+      completeLog: "Bulk mark-read completed",
+      failureVerb: "mark",
+      operationName: "Bulk mark-read",
+    });
+  }
+
+  /** Bulk-toggle the \Flagged (starred) flag on many emails. */
   async bulkStar(emailIds: string[], isStarred: boolean = true, sourceFolder?: string): Promise<{ success: number; failed: number; errors: string[] }> {
-    if (sourceFolder !== undefined) this.validateFolderName(sourceFolder);
-    const tags: SpanTags = { count: emailIds.length, isStarred, sourceFolder };
-    return tracer.span('imap.bulkStar', tags, async () => {
-    logger.debug('Bulk starring', 'IMAPService', { count: emailIds.length, isStarred, sourceFolder });
-    if (!this.client || !this.isConnected) throw new Error('IMAP client not connected');
-
-    const results = { success: 0, failed: 0, errors: [] as string[] };
-    const grouped = await this.groupEmailsByFolder(emailIds, sourceFolder, results);
-
-    for (const [folder, ids] of grouped.entries()) {
-      const lock = await this.client.getMailboxLock(folder);
-      try {
-        let existing: Set<string>;
-        try {
-          existing = await this.findExistingUidsInLockedFolder(ids);
-        } catch (e: unknown) {
-          // IMAP-006: transport error during pre-flight. Surface the real
-          // failure mode rather than collapsing into "UIDs not found" — the
-          // caller needs to distinguish "definitely absent" from "couldn't
-          // verify" so a retry is meaningful.
-          const msg = e instanceof Error ? e.message : String(e);
-          for (const id of ids) {
-            results.failed++;
-            results.errors.push(`UID ${id} existence check failed in folder ${folder}: ${msg}`);
-          }
-          continue;
-        }
-        const present: string[] = [];
-        for (const id of ids) {
-          if (existing.has(id)) {
-            present.push(id);
-          } else {
-            results.failed++;
-            results.errors.push(`UID ${id} not found in folder ${folder}`);
-          }
-        }
-        if (present.length === 0) continue;
-
-        await this.chunkedBatchOp({
-          present,
-          perChunk: (uidSet) => isStarred
-            ? this.client!.messageFlagsAdd(uidSet, ['\\Flagged'], { uid: true })
-            : this.client!.messageFlagsRemove(uidSet, ['\\Flagged'], { uid: true }),
-          perUid: (id) => isStarred
-            ? this.client!.messageFlagsAdd(id, ['\\Flagged'], { uid: true })
-            : this.client!.messageFlagsRemove(id, ['\\Flagged'], { uid: true }),
-          onSuccess: (id) => {
-            const c = this.getCacheEntry(id, folder); if (c) c.isStarred = isStarred;
-            results.success++;
-          },
-          onFailure: (id, msg) => { results.failed++; results.errors.push(`Failed to star ${id}: ${msg}`); },
-          opName: 'Bulk star',
-          folder,
-        });
-      } finally { lock.release(); }
-    }
-    tags.successCount = results.success; tags.failCount = results.failed;
-    if (results.success > 0) this.clearFolderCache(); // Starred (\Flagged) count changed → next get_folders refetches
-    logger.info(`Bulk star completed: ${results.success}/${results.failed}`, 'IMAPService');
-    return results;
-    }); // end tracer.span('imap.bulkStar')
+    return this.bulkSetFlag(emailIds, sourceFolder, {
+      flag: "\\Flagged",
+      value: isStarred,
+      cacheField: "isStarred",
+      valueTag: "isStarred",
+      span: "imap.bulkStar",
+      startLog: "Bulk starring",
+      completeLog: "Bulk star completed",
+      failureVerb: "star",
+      operationName: "Bulk star",
+    });
   }
 
   /** Copy many emails into `targetFolder` in a single IMAP UID COPY per source folder.
@@ -2839,7 +2729,7 @@ export class SimpleIMAPService {
       logger.debug(`Creating folder: ${folderName}`, 'IMAPService');
 
       // Create the mailbox
-      const result = await this.client.mailboxCreate(folderName);
+      await this.client.mailboxCreate(folderName);
 
       // Clear folder cache to refresh (also resets TTL so next getFolders() re-fetches)
       this.clearFolderCache();

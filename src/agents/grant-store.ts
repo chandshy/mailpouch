@@ -12,17 +12,45 @@
  * eliminate the need for a lockfile.
  */
 
-import { readFileSync, writeFileSync, existsSync, renameSync } from "fs";
-import { randomBytes } from "crypto";
+import { readFileSync, existsSync } from "fs";
 import type { AgentGrant, AgentGrantStatus, GrantConditions } from "./types.js";
 import type { PermissionPreset, ToolName } from "../config/schema.js";
 import { logger } from "../utils/logger.js";
 import { notifications } from "./notifications.js";
 import { withFileLock } from "../utils/file-lock.js";
+import { writeOwnerOnlyJsonAtomically } from "../utils/atomic-json.js";
+import {
+  HourlyQuotaLedger,
+  hourlyQuotaPathForGrantPath,
+  type HourlyToolReservation,
+} from "./hourly-quota-ledger.js";
+import { isValidAgentToolHourlyCap, sanitizeGrantConditions } from "./grant-conditions.js";
+
+export { hourlyQuotaPathForGrantPath, type HourlyToolReservation } from "./hourly-quota-ledger.js";
 
 interface StoreFile {
   version: 1;
   grants: AgentGrant[];
+}
+
+/** Fresh, disk-backed authorization view used on every security decision. */
+export type AuthorizationGrantSnapshot =
+  | { kind: "present"; grant: AgentGrant }
+  | { kind: "missing" }
+  | { kind: "unavailable" };
+
+/** Historical marker used before AgentGrant gained credentialKind. */
+export const LEGACY_SERVICE_ACCOUNT_GRANT_NOTE = "service account (client_credentials)";
+
+/**
+ * True only for a credential-backed grant. Interactive OAuth grants must
+ * never be inferred from a generic HTTP transport value: they have no service
+ * credential to require. The exact old note keeps existing persisted service
+ * grants protected until they are next synchronized with the explicit marker.
+ */
+export function isServiceAccountGrant(grant: AgentGrant): boolean {
+  return grant.credentialKind === "service_account"
+    || grant.note === LEGACY_SERVICE_ACCOUNT_GRANT_NOTE;
 }
 
 export interface CreatePendingArgs {
@@ -40,6 +68,15 @@ export interface ApproveArgs {
   note?: string;
 }
 
+export interface AgentGrantStoreOptions {
+  /**
+   * Test-only override for the durable rate-quota ledger. Production derives
+   * this from the grants path so profile and MAILPOUCH_AGENTS overrides always
+   * share the same quota state.
+   */
+  quotaPath?: string;
+}
+
 /**
  * XPORT-021: ceiling on simultaneously-pending (not-yet-reviewed) grants. The
  * DCR endpoint creates a pending grant per registration; a per-IP rate limiter
@@ -48,13 +85,18 @@ export interface ApproveArgs {
  * before admitting a new one, so the review queue stays usefully small.
  */
 const MAX_PENDING_GRANTS = 50;
+const GRANT_STATUSES = new Set<AgentGrantStatus>(["pending", "active", "revoked", "expired"]);
+const GRANT_PRESETS = new Set<PermissionPreset>(["full", "read_only", "supervised", "send_only", "custom"]);
 
 export class AgentGrantStore {
   private grants = new Map<string, AgentGrant>();
   private readonly path: string;
+  /** Durable SQLite ledger shared by every daemon using this grants profile. */
+  private readonly hourlyQuotaLedger: HourlyQuotaLedger;
 
-  constructor(path: string) {
+  constructor(path: string, options: AgentGrantStoreOptions = {}) {
     this.path = path;
+    this.hourlyQuotaLedger = new HourlyQuotaLedger(options.quotaPath ?? hourlyQuotaPathForGrantPath(path));
     this.load();
   }
 
@@ -132,13 +174,7 @@ export class AgentGrantStore {
 
   private persist(): void {
     const payload: StoreFile = { version: 1, grants: [...this.grants.values()] };
-    // tmp MUST be on the same filesystem as the destination for rename(2) to
-    // be atomic. On Linux installs where /tmp is tmpfs and $HOME is on
-    // separate storage, using os.tmpdir() fails with EXDEV. Put the tmp
-    // next to the destination instead.
-    const tmp = `${this.path}.${randomBytes(8).toString("hex")}.tmp`;
-    writeFileSync(tmp, JSON.stringify(payload, null, 2), { encoding: "utf-8", mode: 0o600 });
-    renameSync(tmp, this.path);
+    writeOwnerOnlyJsonAtomically(this.path, payload);
   }
 
   /**
@@ -204,7 +240,8 @@ export class AgentGrantStore {
         approvedAt: existing?.approvedAt ?? now,
         totalCalls: existing?.totalCalls ?? 0,
         transport: "http",
-        note: "service account (client_credentials)",
+        credentialKind: "service_account",
+        note: LEGACY_SERVICE_ACCOUNT_GRANT_NOTE,
       };
       // No-op re-verify of an already-active service grant: this runs on EVERY
       // client_credentials login, so re-emitting a "grant-approved" event here
@@ -250,7 +287,7 @@ export class AgentGrantStore {
       g.status = "active";
       g.preset = args.preset;
       g.toolOverrides = args.toolOverrides;
-      g.conditions = args.conditions;
+      g.conditions = sanitizeGrantConditions(args.conditions);
       g.note = args.note;
       g.approvedAt = new Date().toISOString();
       g.revokedAt = undefined;
@@ -331,6 +368,31 @@ export class AgentGrantStore {
     // again in gracefulShutdown, so these in-memory increments survive restart.
   }
 
+  /**
+   * Reserve one slot in a client's canonical-tool rolling hourly budget.
+   *
+   * The ledger uses a shared SQLite `BEGIN IMMEDIATE` transaction for prune →
+   * count → insert, so separate processes cannot admit the same final slot.
+   * Callers must invoke it immediately before dispatching the handler; started
+   * calls retain their reservation even when the handler later fails.
+   *
+   * `limit === 0` is an explicit deny-all cap.  `undefined` means no cap and
+   * is handled by GrantManager before it calls this method.
+   */
+  reserveHourlyToolCall(
+    clientId: string,
+    canonicalTool: string,
+    limit: number,
+    now = Date.now(),
+  ): HourlyToolReservation {
+    return this.hourlyQuotaLedger.reserve(clientId, canonicalTool, limit, now);
+  }
+
+  /** Close the durable quota connection without deleting or checkpointing it. */
+  close(): void {
+    this.hourlyQuotaLedger.close();
+  }
+
   /** Force-flush any in-memory call-count updates to disk. */
   flushCounters(): void {
     // Go through mutate() so we reload + reconcile on-disk status first; a bare
@@ -341,6 +403,44 @@ export class AgentGrantStore {
 
   get(clientId: string): AgentGrant | undefined {
     return this.grants.get(clientId);
+  }
+
+  /**
+   * Read one authorization grant directly from durable storage.
+   *
+   * The in-memory map remains useful for settings/UI counters and local
+   * mutations, but it is deliberately NOT an authorization cache: another
+   * process can revoke a grant while this daemon is running. Atomic writes
+  * guarantee this observes either the prior complete file or the new complete
+  * file. Any unreadable or structurally corrupt state is unavailable rather
+  * than being mistaken for an empty/unrestricted grant.
+  */
+  getAuthorizationSnapshot(clientId: string): AuthorizationGrantSnapshot {
+    try {
+      const parsed = JSON.parse(readFileSync(this.path, "utf-8")) as Partial<StoreFile>;
+      if (parsed.version !== 1 || !Array.isArray(parsed.grants) || !parsed.grants.every(isValidAuthorizationGrant)) {
+        logger.warn("AgentGrantStore: authorization snapshot is malformed; denying access", "AgentGrantStore");
+        return { kind: "unavailable" };
+      }
+      const clientIds = new Set<string>();
+      for (const entry of parsed.grants) {
+        if (clientIds.has(entry.clientId)) {
+          logger.warn("AgentGrantStore: authorization snapshot has duplicate client IDs; denying access", "AgentGrantStore");
+          return { kind: "unavailable" };
+        }
+        clientIds.add(entry.clientId);
+      }
+      const grant = parsed.grants.find(g => g.clientId === clientId);
+      return grant ? { kind: "present", grant } : { kind: "missing" };
+    } catch (err) {
+      // Do not preflight with existsSync(): it can report false for an
+      // inaccessible path, which would incorrectly turn a read failure into
+      // a definitive "missing" grant and cause the HTTP layer to purge a
+      // still-valid cached bearer. Only an actual ENOENT is absence.
+      if (isNoEntryError(err)) return { kind: "missing" };
+      logger.warn("AgentGrantStore: authorization snapshot could not be read; denying access", "AgentGrantStore", err);
+      return { kind: "unavailable" };
+    }
   }
 
   list(filter?: { status?: AgentGrantStatus }): AgentGrant[] {
@@ -366,4 +466,63 @@ export class AgentGrantStore {
       return removed;
     });
   }
+}
+
+/** True when a durable grant's status or expiry condition has elapsed. */
+export function grantHasExpired(grant: AgentGrant, now = Date.now()): boolean {
+  if (grant.status === "expired") return true;
+  const expiresAt = grant.conditions?.expiresAt;
+  if (!expiresAt) return false;
+  const expiryMs = Date.parse(expiresAt);
+  return Number.isFinite(expiryMs) && expiryMs <= now;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function isNoEntryError(error: unknown): boolean {
+  return isRecord(error) && error.code === "ENOENT";
+}
+
+/** Validate enough persisted shape to never turn corrupted records into access. */
+function isValidAuthorizationGrant(value: unknown): value is AgentGrant {
+  if (!isRecord(value)) return false;
+  if (typeof value.clientId !== "string" || !value.clientId) return false;
+  if (typeof value.clientName !== "string") return false;
+  if (typeof value.status !== "string" || !GRANT_STATUSES.has(value.status as AgentGrantStatus)) return false;
+  if (typeof value.preset !== "string" || !GRANT_PRESETS.has(value.preset as PermissionPreset)) return false;
+  if (typeof value.createdAt !== "string" || !value.createdAt) return false;
+  if (typeof value.totalCalls !== "number" || !Number.isSafeInteger(value.totalCalls) || value.totalCalls < 0) return false;
+  if (!optionalString(value.approvedAt) || !optionalString(value.revokedAt) || !optionalString(value.lastCallAt)
+    || !optionalString(value.note) || !optionalString(value.registeredFromIp)
+    || !optionalString(value.mcpClientName) || !optionalString(value.mcpClientVersion)
+    || !optionalString(value.lastConnectedAt)) return false;
+  if (value.transport !== undefined && value.transport !== "http" && value.transport !== "stdio") return false;
+  if (value.credentialKind !== undefined && value.credentialKind !== "service_account") return false;
+  if (!validToolOverrides(value.toolOverrides) || !validConditions(value.conditions)) return false;
+  return true;
+}
+
+function optionalString(value: unknown): boolean {
+  return value === undefined || typeof value === "string";
+}
+
+function validToolOverrides(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!isRecord(value)) return false;
+  return Object.values(value).every(override => typeof override === "boolean");
+}
+
+function validConditions(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!isRecord(value)) return false;
+  if (value.expiresAt !== undefined && (typeof value.expiresAt !== "string" || !Number.isFinite(Date.parse(value.expiresAt)))) return false;
+  if (value.accountId !== undefined && typeof value.accountId !== "string") return false;
+  if (value.folderAllowlist !== undefined && (!Array.isArray(value.folderAllowlist) || !value.folderAllowlist.every(folder => typeof folder === "string"))) return false;
+  if (value.ipPins !== undefined && (!Array.isArray(value.ipPins) || !value.ipPins.every(ip => typeof ip === "string"))) return false;
+  if (value.maxCallsPerHourByTool !== undefined) {
+    if (!isRecord(value.maxCallsPerHourByTool) || !Object.values(value.maxCallsPerHourByTool).every(isValidAgentToolHourlyCap)) return false;
+  }
+  return true;
 }

@@ -14,7 +14,7 @@
  */
 
 import readline from "readline";
-import { spawnSync, spawn } from "child_process";
+import { spawnSync } from "child_process";
 import { Socket } from "net";
 import {
   loadConfig,
@@ -23,6 +23,8 @@ import {
   buildPermissions,
   configExists,
   getConfigPath,
+  invalidateConfigCache,
+  withConfigWriteLock,
 } from "../config/loader.js";
 import { checkConnections, type ProtocolCheck } from "./connection-check.js";
 import {
@@ -31,6 +33,12 @@ import {
   type PermissionPreset,
   type ServerConfig,
 } from "../config/schema.js";
+import {
+  activeAccountForConnectionEdit,
+  saveActiveAccountConnectionEdit,
+  type ConnectionEditPatch,
+} from "./active-account-edit.js";
+import { resetConfiguration } from "./reset.js";
 import {
   getPendingEscalations,
   approveEscalation,
@@ -147,6 +155,33 @@ async function tcpCheck(host: string, port: number): Promise<boolean> {
 
 function loadOrDefault(): ServerConfig {
   return loadConfig() ?? defaultConfig();
+}
+
+/**
+ * Preset changes are read-modify-write operations too.  Read the current
+ * on-disk configuration while holding the same lock used by browser settings,
+ * then construct a detached replacement so a stale terminal snapshot cannot
+ * restore accounts, credentials, or unrelated security settings.
+ */
+function savePresetFromFreshConfig(preset: PermissionPreset): ServerConfig {
+  return withConfigWriteLock(() => {
+    invalidateConfigCache();
+    const current = loadConfig() ?? defaultConfig();
+    const next: ServerConfig = {
+      ...current,
+      connection: { ...current.connection },
+      permissions: buildPermissions(preset),
+      ...(current.responseLimits ? { responseLimits: { ...current.responseLimits } } : {}),
+      ...(current.accounts ? { accounts: current.accounts.map(account => ({ ...account })) } : {}),
+      ...(current.tosAcknowledged ? { tosAcknowledged: { ...current.tosAcknowledged } } : {}),
+    };
+    saveConfig(next);
+    return next;
+  });
+}
+
+function configWriteErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /**
@@ -289,7 +324,6 @@ function renderEscalationRecord(e: EscalationRecord, ansi: boolean): string {
   const bold  = ansi ? C.bold  : "";
   const rst   = ansi ? C.reset : "";
   const warn  = ansi ? C.yellow : "";
-  const ok    = ansi ? C.bGreen : "";
   const err   = ansi ? C.bRed  : "";
   const gray  = ansi ? C.gray  : "";
   const cyan  = ansi ? C.bCyan : "";
@@ -385,7 +419,7 @@ function ansiDraw(st: AnsiState): void {
 
     out.push("\n");
     out.push(C.bold + "  Tool permissions\n" + C.reset);
-    for (const [catKey, cat] of Object.entries(TOOL_CATEGORIES)) {
+    for (const [, cat] of Object.entries(TOOL_CATEGORIES)) {
       const tools = cat.tools as readonly string[];
       const perms = st.cfg.permissions.tools;
       const allEnabled = tools.every(t => perms[t as keyof typeof perms]?.enabled !== false);
@@ -585,15 +619,24 @@ export async function runAnsiTUI(serverPort: number, startServerFn: (port: numbe
           const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
           rl.question(
             C.yellow + "\n  Reset config to defaults? All settings will be lost. (y/N): " + C.reset,
-            (ans) => {
+            async (ans) => {
               rl.close();
               process.stdin.setRawMode(true);
+              let notice = "";
               if (ans.trim().toLowerCase() === "y") {
-                saveConfig(defaultConfig());
-                st.cfg = loadOrDefault();
+                try {
+                  const reset = await resetConfiguration();
+                  st.cfg = loadOrDefault();
+                  notice = reset.credentialsCleared
+                    ? "Settings reset. Restart a running MCP server to apply the defaults."
+                    : "Settings reset, but some OS-keychain entries could not be removed. Delete them manually before restarting; a restart alone could restore those credentials.";
+                } catch {
+                  notice = "Reset could not complete. Check the configuration and OS keychain.";
+                }
               }
               st.view = "main";
               redraw();
+              if (notice) process.stdout.write(`\n  ${C.yellow}${notice}${C.reset}\n`);
             }
           );
           return;
@@ -606,41 +649,42 @@ export async function runAnsiTUI(serverPort: number, startServerFn: (port: numbe
           process.stdout.write(C.bold + "\n  Edit Connection Settings\n" + C.reset);
           process.stdout.write(C.gray + "  Leave blank to keep current value. Ctrl+C to cancel.\n\n" + C.reset);
 
-          const cfg = loadOrDefault();
-          const cn = cfg.connection;
+          // Always edit the active registry entry, not config.connection. Once
+          // accounts[] exists the latter is only a backwards-compatible mirror.
+          const account = activeAccountForConnectionEdit();
 
           const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
           const ask = (q: string): Promise<string> =>
             new Promise(res => rl.question(C.gray + "  " + q + C.reset, res));
 
           try {
-            const username = await ask(`Username [${cn.username || ""}]: `);
+            const username = await ask(`Username [${account.username || ""}]: `);
             const password = await mutedQuestion(rl, C.gray + "  Bridge password (leave blank to keep): " + C.reset);
-            const smtpHost = await ask(`SMTP host [${cn.smtpHost}]: `);
-            const smtpPort = await ask(`SMTP port [${cn.smtpPort}]: `);
-            const imapHost = await ask(`IMAP host [${cn.imapHost}]: `);
-            const imapPort = await ask(`IMAP port [${cn.imapPort}]: `);
-            const bridgeCert = await ask(`Bridge cert path [${cn.bridgeCertPath || "none"}]: `);
+            const smtpHost = await ask(`SMTP host [${account.smtpHost}]: `);
+            const smtpPort = await ask(`SMTP port [${account.smtpPort}]: `);
+            const imapHost = await ask(`IMAP host [${account.imapHost}]: `);
+            const imapPort = await ask(`IMAP port [${account.imapPort}]: `);
+            const bridgeCert = await ask(`Bridge cert path [${account.bridgeCertPath || "none"}]: `);
+            const patch: ConnectionEditPatch = {};
 
-            if (username.trim())  cn.username      = username.trim();
-            if (password.trim())  cn.password      = password.trim();
-            if (smtpHost.trim())  cn.smtpHost      = smtpHost.trim();
+            if (username.trim())  patch.username      = username.trim();
+            if (password.trim())  patch.password      = password.trim();
+            if (smtpHost.trim())  patch.smtpHost      = smtpHost.trim();
             if (smtpPort.trim()) {
               const p = parseInt(smtpPort, 10);
-              if (!isNaN(p) && p > 0 && p <= 65535) cn.smtpPort = p;
+              if (!isNaN(p) && p > 0 && p <= 65535) patch.smtpPort = p;
             }
-            if (imapHost.trim())  cn.imapHost      = imapHost.trim();
+            if (imapHost.trim())  patch.imapHost      = imapHost.trim();
             if (imapPort.trim()) {
               const p = parseInt(imapPort, 10);
-              if (!isNaN(p) && p > 0 && p <= 65535) cn.imapPort = p;
+              if (!isNaN(p) && p > 0 && p <= 65535) patch.imapPort = p;
             }
-            if (bridgeCert.trim() !== cn.bridgeCertPath) {
-              cn.bridgeCertPath = bridgeCert.trim();
-            }
+            if (bridgeCert.trim()) patch.bridgeCertPath = bridgeCert.trim();
 
-            cfg.connection = cn;
-            saveConfig(cfg);
-            st.cfg = cfg;
+            await saveActiveAccountConnectionEdit(account.id, patch);
+            // writeRegistry mirrors the active account back into the legacy
+            // shape; reload it rather than retaining a plaintext form value.
+            st.cfg = loadOrDefault();
             process.stdout.write(c("bGreen", "\n  ✅ Connection settings saved.\n"));
           } catch {
             process.stdout.write(c("yellow", "\n  Cancelled.\n"));
@@ -667,11 +711,13 @@ export async function runAnsiTUI(serverPort: number, startServerFn: (port: numbe
       if (key === ESC)  { st.view = "main"; redraw(); return; }
       if (key === ENTER) {
         const preset = PRESETS[st.presetIdx].id;
-        const cfg = loadOrDefault();
-        cfg.permissions = buildPermissions(preset);
-        saveConfig(cfg);
-        st.cfg = cfg;
-        st.view = "main";
+        try {
+          const cfg = savePresetFromFreshConfig(preset);
+          st.cfg = cfg;
+          st.view = "main";
+        } catch (error) {
+          process.stdout.write(c("bRed", `\n  Could not save preset: ${configWriteErrorMessage(error)}\n`));
+        }
         redraw();
       }
 
@@ -692,11 +738,13 @@ export async function runAnsiTUI(serverPort: number, startServerFn: (port: numbe
               if (ans.trim() === "APPROVE") {
                 const result = approveEscalation(e.id, "terminal_tui");
                 if (result.ok) {
-                  const cfg = loadConfig() ?? defaultConfig();
-                  cfg.permissions = buildPermissions(result.targetPreset);
-                  saveConfig(cfg);
-                  st.cfg = cfg;
-                  process.stdout.write(C.bGreen + "\n  ✅ Approved. New preset: " + result.targetPreset + "\n" + C.reset);
+                  try {
+                    const cfg = savePresetFromFreshConfig(result.targetPreset);
+                    st.cfg = cfg;
+                    process.stdout.write(C.bGreen + "\n  ✅ Approved. New preset: " + result.targetPreset + "\n" + C.reset);
+                  } catch (error) {
+                    process.stdout.write(C.bRed + "\n  Escalation was approved, but its preset could not be saved: " + configWriteErrorMessage(error) + "\n" + C.reset);
+                  }
                 } else {
                   process.stdout.write(C.bRed + "\n  Error: " + result.error + "\n" + C.reset);
                 }
@@ -824,33 +872,34 @@ export async function runPlainTUI(serverPort: number, startServerFn: (port: numb
   }
 
   async function editConnection(): Promise<void> {
-    const cfg = loadOrDefault();
-    const cn = cfg.connection;
+    // config.connection is a compatibility mirror in multi-account configs.
+    // Resolve and update the actual active account instead.
+    const account = activeAccountForConnectionEdit();
     process.stdout.write("\n── Edit Connection (blank = keep current) ──\n");
-    const username   = await ask(`Username [${cn.username || ""}]: `);
+    const username   = await ask(`Username [${account.username || ""}]: `);
     const password   = await mutedQuestion(rl, `Bridge password (blank to keep): `);
-    const smtpHost   = await ask(`SMTP host [${cn.smtpHost}]: `);
-    const smtpPort   = await ask(`SMTP port [${cn.smtpPort}]: `);
-    const imapHost   = await ask(`IMAP host [${cn.imapHost}]: `);
-    const imapPort   = await ask(`IMAP port [${cn.imapPort}]: `);
-    const cert       = await ask(`Bridge cert path [${cn.bridgeCertPath || "none"}]: `);
+    const smtpHost   = await ask(`SMTP host [${account.smtpHost}]: `);
+    const smtpPort   = await ask(`SMTP port [${account.smtpPort}]: `);
+    const imapHost   = await ask(`IMAP host [${account.imapHost}]: `);
+    const imapPort   = await ask(`IMAP port [${account.imapPort}]: `);
+    const cert       = await ask(`Bridge cert path [${account.bridgeCertPath || "none"}]: `);
+    const patch: ConnectionEditPatch = {};
 
-    if (username.trim())  cn.username       = username.trim();
-    if (password.trim())  cn.password       = password.trim();
-    if (smtpHost.trim())  cn.smtpHost       = smtpHost.trim();
+    if (username.trim())  patch.username       = username.trim();
+    if (password.trim())  patch.password       = password.trim();
+    if (smtpHost.trim())  patch.smtpHost       = smtpHost.trim();
     if (smtpPort.trim()) {
       const p = parseInt(smtpPort, 10);
-      if (!isNaN(p) && p > 0 && p <= 65535) cn.smtpPort = p;
+      if (!isNaN(p) && p > 0 && p <= 65535) patch.smtpPort = p;
     }
-    if (imapHost.trim())  cn.imapHost       = imapHost.trim();
+    if (imapHost.trim())  patch.imapHost       = imapHost.trim();
     if (imapPort.trim()) {
       const p = parseInt(imapPort, 10);
-      if (!isNaN(p) && p > 0 && p <= 65535) cn.imapPort = p;
+      if (!isNaN(p) && p > 0 && p <= 65535) patch.imapPort = p;
     }
-    if (cert.trim())      cn.bridgeCertPath = cert.trim();
+    if (cert.trim())      patch.bridgeCertPath = cert.trim();
 
-    cfg.connection = cn;
-    saveConfig(cfg);
+    await saveActiveAccountConnectionEdit(account.id, patch);
     process.stdout.write("Connection settings saved.\n");
   }
 
@@ -862,10 +911,12 @@ export async function runPlainTUI(serverPort: number, startServerFn: (port: numb
     const choice = (await ask("Choice (1-4, 0 to cancel): ")).trim();
     const idx = parseInt(choice, 10) - 1;
     if (idx >= 0 && idx < PRESETS.length) {
-      const cfg = loadOrDefault();
-      cfg.permissions = buildPermissions(PRESETS[idx].id);
-      saveConfig(cfg);
-      process.stdout.write(`Preset set to: ${PRESETS[idx].label}\n`);
+      try {
+        savePresetFromFreshConfig(PRESETS[idx].id);
+        process.stdout.write(`Preset set to: ${PRESETS[idx].label}\n`);
+      } catch (error) {
+        process.stdout.write(`Could not save preset: ${configWriteErrorMessage(error)}\n`);
+      }
     } else if (choice !== "0") {
       process.stdout.write("Invalid choice.\n");
     }
@@ -898,10 +949,12 @@ export async function runPlainTUI(serverPort: number, startServerFn: (port: numb
         if (confirm === "APPROVE") {
           const result = approveEscalation(e.id, "terminal_tui");
           if (result.ok) {
-            const cfg = loadOrDefault();
-            cfg.permissions = buildPermissions(result.targetPreset);
-            saveConfig(cfg);
-            process.stdout.write(`Approved. New preset: ${result.targetPreset}\n`);
+            try {
+              savePresetFromFreshConfig(result.targetPreset);
+              process.stdout.write(`Approved. New preset: ${result.targetPreset}\n`);
+            } catch (error) {
+              process.stdout.write(`Escalation was approved, but its preset could not be saved: ${configWriteErrorMessage(error)}\n`);
+            }
           } else {
             process.stdout.write(`Error: ${result.error}\n`);
           }
@@ -946,8 +999,16 @@ export async function runPlainTUI(serverPort: number, startServerFn: (port: numb
   async function resetDefaults(): Promise<void> {
     const confirm = (await ask("Reset config to defaults? All settings will be lost. (y/N): ")).trim();
     if (confirm.toLowerCase() === "y") {
-      saveConfig(defaultConfig());
-      process.stdout.write("Config reset to defaults.\n");
+      try {
+        const reset = await resetConfiguration();
+        process.stdout.write(
+          reset.credentialsCleared
+            ? "Config and known credentials reset to defaults. Restart a running MCP server to apply them.\n"
+            : "Config reset to defaults, but some OS-keychain entries could not be removed. Delete them manually before restarting; a restart alone could restore those credentials.\n",
+        );
+      } catch {
+        process.stdout.write("Reset could not complete. Check the configuration and OS keychain.\n");
+      }
     } else {
       process.stdout.write("Cancelled.\n");
     }

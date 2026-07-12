@@ -26,15 +26,28 @@ import { logger } from "../utils/logger.js";
 import { SMTPService } from "../services/smtp-service.js";
 import { SimpleIMAPService } from "../services/simple-imap-service.js";
 import type { ProtonMailConfig } from "../types/index.js";
-import type { AccountSpec } from "./types.js";
-import { readRegistry, readRegistryWithSecrets } from "./registry.js";
+import type { AccountRegistry, AccountSpec } from "./types.js";
+import {
+  mailboxKeychainCredentialsAreQuarantined,
+  readRegistry,
+  readRegistryWithSecrets,
+} from "./registry.js";
 import { notifications as grantNotifications } from "../agents/notifications.js";
 import { EventEmitter } from "events";
+import { accountIdentityFingerprint, hasMaterialAccountIdentityChange } from "./identity.js";
 
 export interface AccountServices {
   imap: SimpleIMAPService;
   smtp: SMTPService;
   spec: AccountSpec;
+}
+
+export interface AccountsRebuiltEvent {
+  accountIds: string[];
+  /** IDs removed from the live registry during this rebuild. */
+  removedAccountIds: string[];
+  /** IDs retained but repointed at a materially different mailbox/transport. */
+  identityChangedAccountIds: string[];
 }
 
 /** Build the runtime ProtonMailConfig shape the SMTPService ctor expects. */
@@ -65,8 +78,57 @@ function specToRuntimeConfig(spec: AccountSpec): ProtonMailConfig {
   };
 }
 
+/** Keep the manager's sensitive runtime copy independent from config callers. */
+function cloneAccountSpec(spec: AccountSpec): AccountSpec {
+  return { ...spec };
+}
+
+/** Fields passed to SimpleIMAPService.connect() which require a fresh client. */
+function hasImapConnectionSettingsChange(previous: AccountSpec, next: AccountSpec): boolean {
+  return previous.imapHost !== next.imapHost
+    || previous.imapPort !== next.imapPort
+    || previous.username !== next.username
+    || previous.password !== next.password
+    || previous.bridgeCertPath !== next.bridgeCertPath
+    || (previous.tlsMode ?? "starttls") !== (next.tlsMode ?? "starttls")
+    || !!previous.allowInsecureBridge !== !!next.allowInsecureBridge;
+}
+
+/** Fields consumed by SMTPService's transporter/TLS configuration. */
+function hasSmtpConnectionSettingsChange(previous: AccountSpec, next: AccountSpec): boolean {
+  return previous.smtpHost !== next.smtpHost
+    || previous.smtpPort !== next.smtpPort
+    || previous.username !== next.username
+    || previous.password !== next.password
+    || previous.smtpToken !== next.smtpToken
+    || previous.bridgeCertPath !== next.bridgeCertPath
+    || (previous.tlsMode ?? "starttls") !== (next.tlsMode ?? "starttls")
+    || !!previous.allowInsecureBridge !== !!next.allowInsecureBridge;
+}
+
 export class AccountManager extends EventEmitter {
   private readonly perAccount = new Map<string, AccountServices>();
+  /** Serial tail for each account's IMAP connect/reconnect operations. */
+  private readonly connectTails = new Map<string, Promise<void>>();
+  /** Bumped whenever a connect operation must no longer be allowed to win. */
+  private readonly connectionVersions = new Map<string, number>();
+  /** Services already retiring; prevents a queued connect from reviving one. */
+  private readonly retiredServices = new WeakSet<AccountServices>();
+  /** Outstanding best-effort retirement work, including removed services. */
+  private readonly retirementTasks = new Set<Promise<void>>();
+  /** Async registry reads are serialized so an older keychain read cannot win. */
+  private rebuildTail: Promise<void> = Promise.resolve();
+  /** Latest requested rebuild (sync or async); older snapshots are discarded. */
+  private rebuildVersion = 0;
+  /**
+   * Set after a reset could not verify every OS-keychain deletion.  A normal
+   * async rebuild prefers keychain credentials over the on-disk registry;
+   * continuing to do that after such a reset could resurrect the mailbox
+   * credentials the reset was meant to remove.  Keep the process fail-closed
+   * until it is restarted (or an explicit, future remediation flow resumes
+   * hydration).
+   */
+  private keychainHydrationSuspended = false;
   private _activeAccountId = "";
 
   constructor() {
@@ -88,39 +150,27 @@ export class AccountManager extends EventEmitter {
    * populated — main() calls the async version right after boot.
    */
   rebuildFromRegistry(): void {
-    const reg = readRegistry();
-    const seen = new Set<string>();
-    for (const spec of reg.accounts) {
-      seen.add(spec.id);
-      const existing = this.perAccount.get(spec.id);
-      if (existing) {
-        // Patch the spec into the existing services so credential
-        // changes propagate without a reconnect.
-        existing.spec = spec;
-        existing.smtp["config"] = specToRuntimeConfig(spec);
-        existing.smtp.reinitialize();
-        continue;
-      }
-      const svcs: AccountServices = {
-        spec,
-        imap: new SimpleIMAPService(),
-        smtp: new SMTPService(specToRuntimeConfig(spec)),
-      };
-      this.perAccount.set(spec.id, svcs);
-    }
-    // Tear down services for deleted accounts.
-    for (const [id, svcs] of this.perAccount) {
-      if (seen.has(id)) continue;
-      this.perAccount.delete(id);
-      svcs.smtp.close().catch(() => {});
-      svcs.imap.disconnect().catch(() => {});
-    }
-    // Ensure activeAccountId points at a real entry.
-    if (!this.perAccount.has(reg.activeAccountId) && this.perAccount.size > 0) {
-      this._activeAccountId = [...this.perAccount.keys()][0];
-    } else {
-      this._activeAccountId = reg.activeAccountId;
-    }
+    this.rebuildVersion += 1;
+    this.applyRegistry(readRegistry());
+  }
+
+  /**
+   * Fail-closed reset path for an incomplete credential cleanup.
+   *
+   * Rebuild from the durable, unhydrated registry immediately and permanently
+   * suspend keychain hydration for this process.  Incrementing
+   * `rebuildVersion` through `rebuildFromRegistry()` also invalidates any
+   * in-flight async keychain read, so it cannot restore an old primary
+   * credential after the reset returns.
+   *
+   * This is intentionally distinct from the ordinary synchronous rebuild:
+   * callers should use it only after a reset has reported that OS-keychain
+   * deletion was incomplete. The reset also persists a restart-safe
+   * quarantine marker; a later verified reset is the explicit recovery path.
+   */
+  rebuildFromRegistryWithoutKeychain(): void {
+    this.keychainHydrationSuspended = true;
+    this.rebuildFromRegistry();
   }
 
   /**
@@ -129,37 +179,97 @@ export class AccountManager extends EventEmitter {
    * that lands via the settings-UI server — ensures the in-memory
    * services have the passwords the user persisted, even though the
    * on-disk config blanks them.
+   *
+   * Calls are intentionally queued around the *read*, not only map
+   * mutation. A keychain lookup can take long enough for a later settings
+   * save to complete; the generation check then discards the stale snapshot
+   * instead of restoring its old mailbox after the newer rebuild.
    */
   async rebuildFromRegistryAsync(): Promise<void> {
-    const reg = await readRegistryWithSecrets();
+    const requestedVersion = ++this.rebuildVersion;
+    const task = this.rebuildTail.then(async () => {
+      // A later sync/async rebuild already has a newer view to apply.
+      if (requestedVersion !== this.rebuildVersion) return;
+
+      // After an incomplete reset, keep future in-process rebuilds on the
+      // unhydrated registry too. The persisted quarantine covers a restarted
+      // process; this in-memory suspension also invalidates an already-running
+      // async read before reset returns. A settings save or delayed startup
+      // task must not make a stale keychain entry usable again.
+      const registry = this.keychainHydrationSuspended || mailboxKeychainCredentialsAreQuarantined()
+        ? readRegistry()
+        : await readRegistryWithSecrets();
+      // The registry/keychain read yielded; never let an older result win.
+      if (requestedVersion !== this.rebuildVersion) return;
+
+      this.applyRegistry(registry);
+    });
+
+    // Keep the serialization chain usable after a caller observes a read
+    // failure through its own returned promise.
+    this.rebuildTail = task.catch(() => {});
+    return task;
+  }
+
+  /** Reconcile one already-read registry snapshot into the live service map. */
+  private applyRegistry(reg: AccountRegistry): void {
     const seen = new Set<string>();
+    const removedAccountIds: string[] = [];
+    const identityChangedAccountIds: string[] = [];
     for (const spec of reg.accounts) {
       seen.add(spec.id);
       const existing = this.perAccount.get(spec.id);
       if (existing) {
-        existing.spec = spec;
-        existing.smtp["config"] = specToRuntimeConfig(spec);
-        existing.smtp.reinitialize();
+        if (hasMaterialAccountIdentityChange(existing.spec, spec)) {
+          // An ID can be edited to point at an entirely different mailbox.
+          // Reusing a connected IMAP client or SMTP transporter would retain
+          // the old endpoint/credentials until restart, so replace both
+          // services atomically in the registry and tear the old pair down.
+          identityChangedAccountIds.push(spec.id);
+          this.invalidateConnection(spec.id);
+          this.perAccount.set(spec.id, this.createServices(spec));
+          void this.retireServices(existing);
+          this.emit("account-services-replaced", { accountId: spec.id, services: this.getForAccount(spec.id) });
+          continue;
+        }
+        // Patch the spec into the existing services so credential
+        // changes propagate without a reconnect.
+        const nextSpec = cloneAccountSpec(spec);
+        const imapSettingsChanged = hasImapConnectionSettingsChange(existing.spec, nextSpec);
+        const smtpSettingsChanged = hasSmtpConnectionSettingsChange(existing.spec, nextSpec);
+        if (imapSettingsChanged) {
+          // The service instance remains valid for a password/certificate
+          // edit, but an in-flight connect must not start IDLE with the old
+          // arguments after this newer spec has been applied. Stop the old
+          // IDLE loop now and put its disconnect/wipe ahead of any fresh
+          // connect queued by the settings server.
+          this.invalidateConnection(spec.id);
+          this.queueImapRefresh(spec.id, existing);
+        }
+        existing.spec = nextSpec;
+        if (smtpSettingsChanged) {
+          existing.smtp["config"] = specToRuntimeConfig(nextSpec);
+          existing.smtp.reinitialize();
+        }
         continue;
       }
-      const svcs: AccountServices = {
-        spec,
-        imap: new SimpleIMAPService(),
-        smtp: new SMTPService(specToRuntimeConfig(spec)),
-      };
-      this.perAccount.set(spec.id, svcs);
+      this.perAccount.set(spec.id, this.createServices(spec));
     }
+    // Tear down services for deleted accounts.
     for (const [id, svcs] of this.perAccount) {
       if (seen.has(id)) continue;
       this.perAccount.delete(id);
-      svcs.smtp.close().catch(() => {});
-      svcs.imap.disconnect().catch(() => {});
+      removedAccountIds.push(id);
+      this.invalidateConnection(id);
+      void this.retireServices(svcs);
+      this.pruneConnectionState(id);
     }
-    if (!this.perAccount.has(reg.activeAccountId) && this.perAccount.size > 0) {
-      this._activeAccountId = [...this.perAccount.keys()][0];
-    } else {
-      this._activeAccountId = reg.activeAccountId;
-    }
+    this.applyActiveAccountId(reg.activeAccountId);
+    this.emit("accounts-rebuilt", {
+      accountIds: [...this.perAccount.keys()],
+      removedAccountIds,
+      identityChangedAccountIds,
+    } satisfies AccountsRebuiltEvent);
   }
 
   /** The account currently wired into the module-level service references. */
@@ -179,8 +289,30 @@ export class AccountManager extends EventEmitter {
     return svcs;
   }
 
+  /** Opaque durable identity for cache/queue ownership checks. */
+  identityForAccount(accountId: string): string {
+    return accountIdentityFingerprint(this.getForAccount(accountId).spec);
+  }
+
   /** Enumerate all accounts the manager knows about. */
   list(): AccountServices[] { return [...this.perAccount.values()]; }
+
+  /**
+   * Connect/reconnect exactly one account using its current spec.
+   *
+   * A settings save can replace a service while its prior connect() is
+   * awaiting the network. Queue connects by account and verify the service
+   * identity/version after the await, so that old socket can never launch a
+   * new IDLE loop after it has been retired or reconfigured.
+   */
+  async connectAccount(accountId: string): Promise<void> {
+    // Preserve the public unknown-account failure before queuing any work.
+    const services = this.getForAccount(accountId);
+    const version = this.connectionVersions.get(accountId) ?? 0;
+    return this.enqueueConnectionTask(accountId, () =>
+      this.connectCurrentAccount(accountId, services, version),
+    );
+  }
 
   /**
    * Hot-swap the active account. Rewires the active pointer and emits
@@ -190,92 +322,70 @@ export class AccountManager extends EventEmitter {
    */
   async setActive(accountId: string): Promise<void> {
     if (!this.perAccount.has(accountId)) throw new Error(`Unknown account id: ${accountId}`);
+    this.applyActiveAccountId(accountId);
+  }
+
+  /**
+   * Keep rebuilds and explicit switches on the same transition path. A rebuild
+   * can change the persisted active id before `setActive()` is called; emitting
+   * here ensures subscribers still rebind their account-scoped dependencies.
+   */
+  private applyActiveAccountId(requestedId: string): void {
+    const next = this.perAccount.has(requestedId)
+      ? requestedId
+      : this.perAccount.size > 0
+        ? this.perAccount.keys().next().value ?? ""
+        : "";
     const prev = this._activeAccountId;
-    if (prev === accountId) return;
-    this._activeAccountId = accountId;
-    logger.info(`Active account hot-swapped: ${prev} → ${accountId}`, "AccountManager");
-    this.emit("active-changed", { prev, next: accountId, services: this.getActive() });
+    if (prev === next) return;
+
+    this._activeAccountId = next;
+    // Construction has no subscribers yet; avoid a misleading startup
+    // transition/notification. Every later real account change emits.
+    if (!prev || !next) return;
+
+    logger.info(`Active account hot-swapped: ${prev} → ${next}`, "AccountManager");
+    this.emit("active-changed", { prev, next, services: this.getActive() });
     // A grant-style notification so the tray/UI pick it up alongside agent events.
-    grantNotifications.emit("active-account-changed", { prev, next: accountId });
+    grantNotifications.emit("active-account-changed", { prev, next });
   }
 
   /**
-   * Inject credentials freshly loaded from the OS keychain into every
-   * account that currently has an empty password slot. Patches the in-memory
-   * spec, the per-account SMTPService.config, and calls reinitialize() so
-   * the SMTP transporter is rebuilt with the credentials. IMAP picks up the
-   * new password automatically through connectAll() (which reads from the
-   * patched spec).
+   * Cleanly retire every account's services. Called on shutdown.
    *
-   * Context: credentials are stored in the OS keychain (under
-   * service=mailpouch, account=bridge-password) rather than in the config
-   * file so ~/.mailpouch.json can be mode-0600 without also being a plaintext
-   * secret store. The AccountManager constructs services from the file-level
-   * registry at module load, BEFORE main() has read the keychain, which
-   * means every account spec starts with password = "". Without this
-   * propagation step the SMTP transporter auths with empty credentials and
-   * Bridge rejects with "Please configure the login" / "Missing credentials
-   * for PLAIN". This is specifically the regression the multi-account
-   * rollout introduced — the singleton-service world had module-level
-   * reinitialize() reading a single shared config that main() populated
-   * directly; per-account isolation broke that path.
-   *
-   * Accounts that already had a password (explicit in the file or
-   * previously propagated) are left alone; passing an empty string does
-   * nothing. Safe to call at boot after keychain load, and after every
-   * settings-UI credential save.
+   * This also waits for a connect already in flight: it is invalidated before
+   * retirement, then detects that it lost ownership when its network await
+   * resolves. The process-level shutdown timeout remains the final guard for
+   * a network implementation that never settles its connect/disconnect.
    */
-  applyKeychainCredentials(password: string, smtpToken?: string): void {
-    if (!password && !smtpToken) return;
-    for (const [id, svcs] of this.perAccount) {
-      let mutated = false;
-      // Password: overwrite whenever the new value differs (covers both
-      // "empty → set after boot-time keychain load" and "rotated → replace
-      // old value after a settings-UI save"). Never overwrite to empty —
-      // that would nuke a good in-memory credential after a save that
-      // left the password field blank on purpose (user updated username
-      // only, for instance).
-      if (password && password !== svcs.spec.password) {
-        svcs.spec.password = password;
-        mutated = true;
-      }
-      if (smtpToken !== undefined && smtpToken !== svcs.spec.smtpToken) {
-        svcs.spec.smtpToken = smtpToken;
-        mutated = true;
-      }
-      if (mutated) {
-        svcs.smtp["config"] = specToRuntimeConfig(svcs.spec);
-        svcs.smtp.reinitialize();
-        logger.debug(`Applied keychain credentials to account "${id}"`, "AccountManager");
-      }
-    }
-  }
-
-  /**
-   * Flush stale IMAP credentials and reconnect with the new password for every
-   * account that now holds it, so a Settings → Connection save takes effect
-   * without a server restart. SMTP is already refreshed synchronously by
-   * applyKeychainCredentials (reinitialize); IMAP needs an async reconnect.
-   * Best-effort per account; never throws.
-   */
-  async reloadImapCredentials(password: string): Promise<void> {
-    if (!password) return;
-    await Promise.all(
-      [...this.perAccount.values()]
-        .filter((svcs) => svcs.spec.password === password)
-        .map((svcs) =>
-          svcs.imap.reloadCredentials(password).catch((err: unknown) =>
-            logger.warn(`IMAP credential reload failed for account "${svcs.spec.id}"`, "AccountManager", err),
-          ),
-        ),
-    );
-  }
-
-  /** Cleanly tear down every account's services. Called on shutdown. */
   async closeAll(): Promise<void> {
-    for (const svcs of this.perAccount.values()) {
-      try { await svcs.smtp.close(); } catch { /* ignore */ }
-      try { await svcs.imap.disconnect(); } catch { /* ignore */ }
+    const retirements: Promise<void>[] = [];
+    for (const [accountId, svcs] of this.perAccount) {
+      this.invalidateConnection(accountId);
+      retirements.push(this.retireServices(svcs));
+    }
+    // A failed connect is expected during shutdown when Bridge is unavailable;
+    // cleanup must continue rather than rejecting before every service is
+    // scrubbed and the process can release its singleton lock.
+    await Promise.allSettled([...retirements, ...this.connectTails.values()]);
+    // A stale connect can schedule one last retirement after the first set
+    // settles; include it before declaring shutdown hygiene complete.
+    await Promise.allSettled([...this.retirementTasks]);
+  }
+
+  /**
+   * Synchronous, best-effort credential/cache scrub for last-resort exit
+   * hooks. It deliberately does not await network shutdown; `closeAll()` is
+   * the graceful path and should run first whenever possible.
+   */
+  wipeAll(): void {
+    for (const [accountId, svcs] of this.perAccount) {
+      this.invalidateConnection(accountId);
+      this.retiredServices.add(svcs);
+      this.stopIdle(svcs);
+      this.wipeImap(svcs);
+      this.wipeSmtp(svcs);
+      this.scrubAccountSpec(svcs.spec);
     }
   }
 
@@ -291,18 +401,9 @@ export class AccountManager extends EventEmitter {
    */
   async connectAll(): Promise<Array<{ id: string; ok: boolean; error?: string }>> {
     const results: Array<{ id: string; ok: boolean; error?: string }> = [];
-    for (const [id, svcs] of this.perAccount) {
-      const s = svcs.spec;
+    for (const [id] of this.perAccount) {
       try {
-        await svcs.imap.connect(
-          s.imapHost,
-          s.imapPort,
-          s.username,
-          s.password,
-          s.bridgeCertPath,
-          s.tlsMode === "ssl",
-          !!s.allowInsecureBridge,
-        );
+        await this.connectAccount(id);
         logger.info(`IMAP connected for account "${id}"`, "AccountManager");
         results.push({ id, ok: true });
       } catch (err: unknown) {
@@ -312,6 +413,216 @@ export class AccountManager extends EventEmitter {
       }
     }
     return results;
+  }
+
+  /** Run a connection only if its caller's service/version is still current. */
+  private async connectCurrentAccount(
+    accountId: string,
+    services: AccountServices,
+    version: number,
+  ): Promise<void> {
+    if (!this.isCurrentConnection(accountId, services, version)) return;
+
+    const { imap, spec } = services;
+    try {
+      await imap.connect(
+        spec.imapHost,
+        spec.imapPort,
+        spec.username,
+        spec.password,
+        spec.bridgeCertPath,
+        spec.tlsMode === "ssl",
+        !!spec.allowInsecureBridge,
+      );
+    } catch (error) {
+      if (!this.isCurrentConnection(accountId, services, version)) {
+        await this.cleanUpStaleConnect(accountId, services);
+      }
+      throw error;
+    }
+
+    if (!this.isCurrentConnection(accountId, services, version)) {
+      await this.cleanUpStaleConnect(accountId, services);
+      return;
+    }
+
+    try {
+      void imap.startIdle().catch(err =>
+        logger.debug(`IDLE startup failed for account "${accountId}"`, "AccountManager", err),
+      );
+    } catch (error) {
+      // Service methods are async in production, but keep the manager robust
+      // if a custom/test implementation throws before returning a promise.
+      logger.debug(`IDLE startup failed for account "${accountId}"`, "AccountManager", error);
+    }
+  }
+
+  private isCurrentConnection(accountId: string, services: AccountServices, version: number): boolean {
+    return this.perAccount.get(accountId) === services
+      && !this.retiredServices.has(services)
+      && (this.connectionVersions.get(accountId) ?? 0) === version;
+  }
+
+  /** Stop the socket produced by a connection whose account state changed. */
+  private async cleanUpStaleConnect(accountId: string, services: AccountServices): Promise<void> {
+    if (this.perAccount.get(accountId) !== services || this.retiredServices.has(services)) {
+      await this.retireServices(services);
+      return;
+    }
+
+    // Same service, newer connection settings (for example a password
+    // rotation). Keep the fresh AccountSpec/SMTP config, but clear the old
+    // IMAP connection config and cache before the queued reconnect starts.
+    this.stopIdle(services);
+    await this.bestEffort(() => services.imap.disconnect());
+    this.wipeImap(services);
+  }
+
+  private invalidateConnection(accountId: string): void {
+    this.connectionVersions.set(accountId, (this.connectionVersions.get(accountId) ?? 0) + 1);
+  }
+
+  /**
+   * Disconnect a still-current service after an operational IMAP setting
+   * changes. It runs in the same per-account queue as connects, which keeps
+   * a reconnect from racing the old client's logout/wipe.
+   */
+  private queueImapRefresh(accountId: string, services: AccountServices): void {
+    this.stopIdle(services);
+    void this.enqueueConnectionTask(accountId, async () => {
+      if (this.perAccount.get(accountId) !== services || this.retiredServices.has(services)) {
+        await this.retireServices(services);
+        return;
+      }
+      await this.bestEffort(() => services.imap.disconnect());
+      this.wipeImap(services);
+    });
+  }
+
+  private enqueueConnectionTask(accountId: string, operation: () => Promise<void>): Promise<void> {
+    const previous = this.connectTails.get(accountId);
+    const afterPrevious = previous ? previous.catch(() => {}) : Promise.resolve();
+    const task = afterPrevious.then(operation);
+    this.connectTails.set(accountId, task);
+    void task.then(
+      () => this.finishConnectTask(accountId, task),
+      () => this.finishConnectTask(accountId, task),
+    );
+    return task;
+  }
+
+  private finishConnectTask(accountId: string, task: Promise<void>): void {
+    if (this.connectTails.get(accountId) !== task) return;
+    this.connectTails.delete(accountId);
+    this.pruneConnectionState(accountId);
+  }
+
+  /** Avoid retaining a generation counter for an account with no service or work. */
+  private pruneConnectionState(accountId: string): void {
+    if (!this.perAccount.has(accountId) && !this.connectTails.has(accountId)) {
+      this.connectionVersions.delete(accountId);
+    }
+  }
+
+  /** Fully retire a no-longer-current service pair and track its async closes. */
+  private retireServices(services: AccountServices): Promise<void> {
+    this.retiredServices.add(services);
+    this.stopIdle(services);
+
+    // Invoke the asynchronous closes first, then scrub synchronously. Both
+    // services tolerate a second close, and immediate wiping means a hung
+    // network logout cannot keep credentials/cached mail in process memory.
+    const imapDisconnect = this.bestEffort(() => services.imap.disconnect());
+    this.wipeImap(services);
+    const smtpClose = this.bestEffort(() => services.smtp.close());
+    this.wipeSmtp(services);
+    this.scrubAccountSpec(services.spec);
+
+    const task = Promise.all([imapDisconnect, smtpClose]).then(() => undefined);
+    this.retirementTasks.add(task);
+    void task.then(
+      () => this.retirementTasks.delete(task),
+      () => this.retirementTasks.delete(task),
+    );
+    return task;
+  }
+
+  private stopIdle(services: AccountServices): void {
+    try { services.imap.stopIdle(); } catch { /* best effort */ }
+  }
+
+  private wipeImap(services: AccountServices): void {
+    try { services.imap.wipeCache(); } catch { /* best effort */ }
+  }
+
+  private wipeSmtp(services: AccountServices): void {
+    try { services.smtp.wipeCredentials(); } catch { /* best effort */ }
+
+    // SMTPService owns a ProtonMailConfig containing an IMAP-shaped sibling
+    // object as well. Its public wipeCredentials() scrubs SMTP auth; zero the
+    // sibling and endpoint fields too so a retired service cannot retain the
+    // old account through that runtime config object.
+    const config = services.smtp["config"] as ProtonMailConfig | null | undefined;
+    if (!config) return;
+    if (config.smtp) {
+      config.smtp.host = "";
+      config.smtp.port = 0;
+      config.smtp.secure = false;
+      config.smtp.username = "";
+      config.smtp.password = "";
+      config.smtp.smtpToken = undefined;
+      config.smtp.bridgeCertPath = undefined;
+      config.smtp.allowInsecureBridge = undefined;
+    }
+    if (config.imap) {
+      config.imap.host = "";
+      config.imap.port = 0;
+      config.imap.secure = false;
+      config.imap.username = "";
+      config.imap.password = "";
+      config.imap.bridgeCertPath = undefined;
+      config.imap.allowInsecureBridge = undefined;
+    }
+    config.autoStartBridge = undefined;
+    config.bridgePath = undefined;
+  }
+
+  /** Zero the manager-owned spec after its service pair is no longer usable. */
+  private scrubAccountSpec(spec: AccountSpec): void {
+    spec.id = "";
+    spec.name = "";
+    spec.providerType = "imap";
+    spec.smtpHost = "";
+    spec.smtpPort = 0;
+    spec.imapHost = "";
+    spec.imapPort = 0;
+    spec.username = "";
+    spec.password = "";
+    spec.smtpToken = undefined;
+    spec.bridgeCertPath = undefined;
+    spec.allowInsecureBridge = undefined;
+    spec.tlsMode = undefined;
+    spec.autoStartBridge = undefined;
+    spec.bridgePath = undefined;
+    spec.lastCheckedAt = undefined;
+    spec.lastCheckResult = undefined;
+  }
+
+  private bestEffort(operation: () => Promise<void>): Promise<void> {
+    try {
+      return Promise.resolve(operation()).catch(() => {});
+    } catch {
+      return Promise.resolve();
+    }
+  }
+
+  private createServices(spec: AccountSpec): AccountServices {
+    const runtimeSpec = cloneAccountSpec(spec);
+    return {
+      spec: runtimeSpec,
+      imap: new SimpleIMAPService(),
+      smtp: new SMTPService(specToRuntimeConfig(runtimeSpec)),
+    };
   }
 }
 

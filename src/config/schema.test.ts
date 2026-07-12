@@ -15,8 +15,8 @@ import {
 } from "./schema.js";
 
 describe("ALL_TOOLS", () => {
-  it("has exactly 84 entries", () => {
-    expect(ALL_TOOLS).toHaveLength(84);
+  it("has exactly 83 canonical entries", () => {
+    expect(ALL_TOOLS).toHaveLength(83);
   });
 
   it("contains no duplicates", () => {
@@ -28,7 +28,7 @@ describe("ALL_TOOLS", () => {
     const tools = new Set<string>(ALL_TOOLS);
     expect(tools.has("forward_email")).toBe(true);
     expect(tools.has("bulk_mark_read")).toBe(true);
-    expect(tools.has("bulk_delete")).toBe(true);
+    expect(tools.has("bulk_delete")).toBe(false); // legacy direct-call alias
     expect(tools.has("list_labels")).toBe(true);
     expect(tools.has("get_emails_by_label")).toBe(true);
     expect(tools.has("remove_label")).toBe(true);
@@ -87,15 +87,17 @@ describe("TOOL_CATEGORIES", () => {
 });
 
 describe("DESTRUCTIVE_TOOLS", () => {
-  it("includes deletion, trash, spam, alias_delete, pass_get, and server lifecycle tools", () => {
+  it("includes every confirmation-gated destructive capability", () => {
     expect(DESTRUCTIVE_TOOLS.has("delete_email")).toBe(true);
-    expect(DESTRUCTIVE_TOOLS.has("bulk_delete")).toBe(true);
     expect(DESTRUCTIVE_TOOLS.has("bulk_delete_emails")).toBe(true);
     expect(DESTRUCTIVE_TOOLS.has("delete_folder")).toBe(true);
     expect(DESTRUCTIVE_TOOLS.has("move_to_trash")).toBe(true);
     expect(DESTRUCTIVE_TOOLS.has("move_to_spam")).toBe(true);
     expect(DESTRUCTIVE_TOOLS.has("alias_delete")).toBe(true);
+    expect(DESTRUCTIVE_TOOLS.has("alias_delete_contact")).toBe(true);
+    expect(DESTRUCTIVE_TOOLS.has("alias_delete_mailbox")).toBe(true);
     expect(DESTRUCTIVE_TOOLS.has("pass_get")).toBe(true);
+    expect(DESTRUCTIVE_TOOLS.has("pass_totp")).toBe(true);
     expect(DESTRUCTIVE_TOOLS.has("shutdown_server")).toBe(true);
     expect(DESTRUCTIVE_TOOLS.has("restart_server")).toBe(true);
   });
@@ -191,6 +193,12 @@ describe("Tool tiering", () => {
       expect(core.size).toBeLessThan(ext.size);
       expect(ext.size).toBeLessThan(full.size);
     });
+
+    it("keeps the documented canonical tier counts honest", () => {
+      expect(toolsForTier("core").size).toBe(30);
+      expect(toolsForTier("extended").size).toBe(80);
+      expect(toolsForTier("complete").size).toBe(86);
+    });
   });
 
   describe("parseToolTier", () => {
@@ -227,10 +235,12 @@ describe("PERM-003 tool aliases", () => {
 });
 
 describe("PERM-004 move-to-destructive destinations", () => {
-  it("MOVE_TOOLS_WITH_DESTRUCTIVE_TARGET names the three movers", () => {
+  it("MOVE_TOOLS_WITH_DESTRUCTIVE_TARGET names the generic movers", () => {
     expect(MOVE_TOOLS_WITH_DESTRUCTIVE_TARGET.has("move_email")).toBe(true);
     expect(MOVE_TOOLS_WITH_DESTRUCTIVE_TARGET.has("bulk_move_emails")).toBe(true);
-    expect(MOVE_TOOLS_WITH_DESTRUCTIVE_TARGET.has("move_to_folder")).toBe(true);
+    // move_to_folder always prefixes Folders/ for an unqualified name, so a
+    // folder literally named "Trash" is not the destructive Trash mailbox.
+    expect(MOVE_TOOLS_WITH_DESTRUCTIVE_TARGET.has("move_to_folder")).toBe(false);
   });
 
   it("DESTRUCTIVE_DESTINATIONS is lowercase for case-insensitive comparison", () => {

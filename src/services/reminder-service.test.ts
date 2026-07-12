@@ -6,8 +6,8 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { ReminderService } from "./reminder-service.js";
-import { rmSync, existsSync, readdirSync, mkdirSync } from "fs";
-import { join } from "path";
+import { rmSync, existsSync, readdirSync, mkdirSync, writeFileSync, readFileSync, statSync } from "fs";
+import { join, basename, dirname } from "path";
 import { tmpdir } from "os";
 import { randomBytes } from "crypto";
 
@@ -24,6 +24,15 @@ describe("ReminderService", () => {
 
   afterEach(() => {
     if (existsSync(path)) rmSync(path, { force: true });
+    // Identity migration/quarantine leaves intentional recovery backups beside
+    // the store. Remove only this test's uniquely named artifacts.
+    const parent = dirname(path);
+    const prefix = `${basename(path)}.`;
+    for (const entry of readdirSync(parent)) {
+      if (entry.startsWith(prefix) && entry.endsWith(".bak")) {
+        rmSync(join(parent, entry), { force: true });
+      }
+    }
   });
 
   it("starts empty when no file exists", () => {
@@ -103,6 +112,194 @@ describe("ReminderService", () => {
     svc.add({ messageId: "<a>", recipient: "a@x", subject: "short", sentAt, afterDays: 1 });
     svc.add({ messageId: "<m>", recipient: "a@x", subject: "mid",   sentAt, afterDays: 7 });
     expect(svc.listPending().map(r => r.subject)).toEqual(["short", "mid", "long"]);
+  });
+
+  it("scopes list, cancel, reply detection, and due scans to the owning account", () => {
+    const sentAt = new Date("2026-04-01T00:00:00Z");
+    const svc = new ReminderService(path, { activeAccountId: "account-a" });
+    const replyA = svc.add({ accountId: "account-a", messageId: "<reply-a>", recipient: "a@x", subject: "a", sentAt, afterDays: 3 });
+    const replyB = svc.add({ accountId: "account-b", messageId: "<reply-b>", recipient: "b@x", subject: "b", sentAt, afterDays: 3 });
+    const dueA = svc.add({ accountId: "account-a", messageId: "<due-a>", recipient: "a@x", subject: "due a", sentAt, afterDays: 1 });
+    const dueB = svc.add({ accountId: "account-b", messageId: "<due-b>", recipient: "b@x", subject: "due b", sentAt, afterDays: 1 });
+
+    expect(svc.listPending("account-a").map(reminder => reminder.id)).toEqual([dueA.id, replyA.id]);
+    expect(svc.cancel(replyB.id, "account-a")).toBe(false);
+    expect(svc.detectRepliesAndCancel([{ headers: { "in-reply-to": "<reply-a>" } }], "account-a"))
+      .toEqual([replyA.id]);
+    expect(svc.listPending("account-b").map(reminder => reminder.id)).toContain(replyB.id);
+
+    const fired = svc.scanDue(new Date("2026-04-03T00:00:00Z"), "account-a");
+    expect(fired.map(reminder => reminder.id)).toEqual([dueA.id]);
+    expect(svc.listPending("account-b").map(reminder => reminder.id)).toContain(dueB.id);
+  });
+
+  it("persists mailbox identity and fails closed for list, cancel, replies, and due scans after repointing", () => {
+    const identities = new Map([["account-a", "mailbox-a-v1"]]);
+    const sentAt = new Date("2026-04-01T00:00:00Z");
+    const svc = new ReminderService(path, {
+      activeAccountId: "account-a",
+      resolveAccountIdentity: accountId => identities.get(accountId),
+    });
+    const reply = svc.add({
+      accountId: "account-a",
+      accountIdentity: "mailbox-a-v1",
+      messageId: "<reply-a>",
+      recipient: "a@example.com",
+      subject: "Reply",
+      sentAt,
+      afterDays: 3,
+    });
+    const due = svc.add({
+      accountId: "account-a",
+      accountIdentity: "mailbox-a-v1",
+      messageId: "<due-a>",
+      recipient: "a@example.com",
+      subject: "Due",
+      sentAt,
+      afterDays: 1,
+    });
+    expect(reply.accountIdentity).toBe("mailbox-a-v1");
+
+    identities.set("account-a", "mailbox-a-v2");
+    expect(svc.listPending("account-a")).toEqual([]);
+    expect(svc.listAll("account-a")).toEqual([]);
+    expect(svc.cancel(reply.id, "account-a")).toBe(false);
+    expect(svc.detectRepliesAndCancel([{ headers: { "in-reply-to": "<reply-a>" } }], "account-a")).toEqual([]);
+    expect(svc.scanDue(new Date("2026-04-05T00:00:00Z"), "account-a")).toEqual([]);
+    expect((svc as unknown as { reminders: Array<{ id: string; status: string }> }).reminders
+      .filter(reminder => reminder.id === reply.id || reminder.id === due.id)
+      .every(reminder => reminder.status === "pending"))
+      .toBe(true);
+  });
+
+  it("migrates unowned legacy reminders with a timestamped recovery backup", () => {
+    const raw = JSON.stringify({
+      version: 1,
+      reminders: [{
+        id: "r-legacy",
+        messageId: "<legacy@pm>",
+        recipient: "legacy@example.com",
+        subject: "Legacy",
+        sentAt: "2026-04-01T00:00:00.000Z",
+        fireAt: "2026-04-02T00:00:00.000Z",
+        status: "pending",
+      }],
+    }, null, 2);
+    writeFileSync(path, raw, "utf-8");
+    const svc = new ReminderService(path, {
+      resolveAccountIdentity: accountId => accountId === "account-b" ? "mailbox-b-v1" : undefined,
+    });
+
+    const migrated = svc.migrateLegacyRecords("account-b");
+
+    expect(migrated).toMatchObject({ migrated: 1 });
+    expect(migrated.backupPath).toMatch(/\.legacy-unowned-.*\.bak$/);
+    expect(readFileSync(migrated.backupPath!, "utf-8")).toBe(raw);
+    expect(svc.listPending("account-b")).toMatchObject([{
+      id: "r-legacy",
+      accountId: "account-b",
+      accountIdentity: "mailbox-b-v1",
+    }]);
+    expect(JSON.parse(readFileSync(path, "utf-8")).reminders[0].accountId).toBe("account-b");
+    expect(JSON.parse(readFileSync(path, "utf-8")).reminders[0].accountIdentity).toBe("mailbox-b-v1");
+    expect(svc.migrateLegacyRecords("account-b")).toEqual({ migrated: 0 });
+  });
+
+  it("migrates an owned legacy reminder using its owner's identity instead of the active account", () => {
+    writeFileSync(path, JSON.stringify({
+      version: 2,
+      reminders: [{
+        id: "r-owned-legacy",
+        accountId: "account-a",
+        messageId: "<owned@pm>",
+        recipient: "a@example.com",
+        subject: "Owned",
+        sentAt: "2026-04-01T00:00:00.000Z",
+        fireAt: "2026-04-03T00:00:00.000Z",
+        status: "pending",
+      }],
+    }), "utf-8");
+    const identities = new Map([
+      ["account-a", "mailbox-a-v1"],
+      ["account-b", "mailbox-b-v1"],
+    ]);
+    const svc = new ReminderService(path, {
+      resolveAccountIdentity: accountId => identities.get(accountId),
+    });
+
+    expect(svc.migrateLegacyRecords("account-b")).toMatchObject({ migrated: 1 });
+    expect(svc.listPending("account-a")).toMatchObject([{
+      id: "r-owned-legacy",
+      accountIdentity: "mailbox-a-v1",
+    }]);
+    expect(svc.listPending("account-b")).toEqual([]);
+  });
+
+  it("quarantines a repointed account's reminders with a 0600 raw audit backup", () => {
+    const identities = new Map([
+      ["account-a", "mailbox-a-v1"],
+      ["account-b", "mailbox-b-v1"],
+    ]);
+    const svc = new ReminderService(path, {
+      activeAccountId: "account-a",
+      resolveAccountIdentity: accountId => identities.get(accountId),
+    });
+    const sentAt = new Date("2026-04-01T00:00:00Z");
+    const a = svc.add({
+      accountId: "account-a", accountIdentity: "mailbox-a-v1", messageId: "<a@pm>",
+      recipient: "a@example.com", subject: "A", sentAt, afterDays: 3,
+    });
+    const b = svc.add({
+      accountId: "account-b", accountIdentity: "mailbox-b-v1", messageId: "<b@pm>",
+      recipient: "b@example.com", subject: "B", sentAt, afterDays: 3,
+    });
+    const rawBefore = readFileSync(path, "utf-8");
+
+    identities.set("account-a", "mailbox-a-v2");
+    const result = svc.quarantineAccount("account-a", "account mailbox identity changed");
+
+    expect(result).toMatchObject({ accountId: "account-a", quarantined: 1, removed: 1 });
+    expect(result.backupPath).toMatch(/\.quarantine-.*\.bak$/);
+    expect(readFileSync(result.backupPath!, "utf-8")).toBe(rawBefore);
+    expect(statSync(result.backupPath!).mode & 0o777).toBe(0o600);
+    expect(svc.listAll("account-a")).toEqual([]);
+    expect(svc.listAll("account-b").map(reminder => reminder.id)).toEqual([b.id]);
+    expect(JSON.parse(readFileSync(path, "utf-8")).reminders.map((reminder: { id: string }) => reminder.id)).not.toContain(a.id);
+  });
+
+  it("automatically quarantines a persisted reminder whose fingerprint is stale after restart", () => {
+    const raw = JSON.stringify({
+      version: 2,
+      reminders: [{
+        id: "r-stale",
+        accountId: "account-a",
+        accountIdentity: "mailbox-a-v1",
+        messageId: "<stale@pm>",
+        recipient: "a@example.com",
+        subject: "Stale",
+        sentAt: "2026-04-01T00:00:00.000Z",
+        fireAt: "2026-04-03T00:00:00.000Z",
+        status: "pending",
+      }],
+    }, null, 2);
+    writeFileSync(path, raw, "utf-8");
+
+    // This mirrors production startup: the reminder store loads before the
+    // keychain-backed account registry supplies its identity resolver.
+    const svc = new ReminderService(path);
+    svc.configureAccountRouting(
+      "account-a",
+      accountId => accountId === "account-a" ? "mailbox-a-v2" : undefined,
+    );
+    const backup = readdirSync(dirname(path)).find(entry =>
+      entry.startsWith(`${basename(path)}.quarantine-`) && entry.endsWith(".bak"),
+    );
+
+    expect(backup).toBeTruthy();
+    expect(readFileSync(join(dirname(path), backup!), "utf-8")).toBe(raw);
+    expect(statSync(join(dirname(path), backup!)).mode & 0o777).toBe(0o600);
+    expect(svc.listAll("account-a")).toEqual([]);
+    expect(JSON.parse(readFileSync(path, "utf-8")).reminders).toEqual([]);
   });
 
   it("prune() removes fired/cancelled records older than the retention window", () => {

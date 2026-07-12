@@ -9,7 +9,14 @@ import { existsSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import { randomBytes } from "crypto";
-import { FtsIndexService, FtsUnavailableError, openFtsIndex } from "./fts-service.js";
+import {
+  FtsIndexService,
+  FtsOwnershipError,
+  FtsUnavailableError,
+  ftsRecordFromEmail,
+  ftsStorageKeyForEmail,
+  openFtsIndex,
+} from "./fts-service.js";
 
 // Quick liveness check — if better-sqlite3 is missing we skip all tests.
 function sqliteAvailable(): boolean {
@@ -55,19 +62,29 @@ function sampleRecord(overrides: Partial<Parameters<FtsIndexService["upsert"]>[0
 describeMaybe("FtsIndexService", () => {
   let dbPath: string;
   let svc: FtsIndexService;
+  let peers: FtsIndexService[];
 
   beforeEach(() => {
     dbPath = tmpDb();
     svc = openFtsIndex(dbPath);
+    svc.ensureOwnerIdentity("test-owner");
+    peers = [];
   });
 
   afterEach(() => {
+    for (const peer of peers) peer.close();
     svc.close();
     for (const ext of ["", "-wal", "-shm"]) {
       const p = `${dbPath}${ext}`;
       if (existsSync(p)) rmSync(p, { force: true });
     }
   });
+
+  function openPeer(): FtsIndexService {
+    const peer = openFtsIndex(dbPath);
+    peers.push(peer);
+    return peer;
+  }
 
   it("upsert + search returns the inserted record", () => {
     svc.upsert(sampleRecord({ body: "Quarterly revenue spreadsheet attached." }));
@@ -150,6 +167,54 @@ describeMaybe("FtsIndexService", () => {
     expect(svc.search({ query: "revenue" })).toHaveLength(1);
   });
 
+  it("keeps generic IMAP UIDs distinct across folders", () => {
+    const inbox = {
+      ...sampleRecord({ id: "42", folder: "INBOX", body: "sameuid inboxunique content" }),
+      storageKey: ftsStorageKeyForEmail({ id: "42", folder: "INBOX" }),
+    };
+    const sent = {
+      ...sampleRecord({ id: "42", folder: "Sent", body: "sameuid sentunique content" }),
+      storageKey: ftsStorageKeyForEmail({ id: "42", folder: "Sent" }),
+    };
+
+    svc.upsertMany([inbox, sent]);
+
+    const hits = svc.search({ query: "sameuid" });
+    expect(hits).toHaveLength(2);
+    expect(hits.map(hit => `${hit.folder}:${hit.id}`).sort()).toEqual([
+      "INBOX:42",
+      "Sent:42",
+    ]);
+    expect(svc.search({ query: "inboxunique" }).map(hit => hit.folder)).toEqual(["INBOX"]);
+    expect(svc.search({ query: "sentunique" }).map(hit => hit.folder)).toEqual(["Sent"]);
+  });
+
+  it("uses a stable Proton key but folder-qualifies generic IMAP UIDs", () => {
+    expect(ftsStorageKeyForEmail({ id: "42", folder: "INBOX" }))
+      .toBe("imap:INBOX:42");
+    expect(ftsStorageKeyForEmail({ id: "42", folder: "Sent" }))
+      .toBe("imap:Sent:42");
+    expect(ftsStorageKeyForEmail({ id: "42", folder: "INBOX", protonId: "proton-42" }))
+      .toBe("proton:proton-42");
+  });
+
+  it("keeps Proton FTS result IDs as IMAP UIDs while using the Proton identity privately", () => {
+    const record = ftsRecordFromEmail({
+      id: "42",
+      protonId: "proton-42",
+      subject: "Subject",
+      from: "alice@example.test",
+      to: ["bob@example.test"],
+      folder: "INBOX",
+      date: new Date(1_700_000_000_000),
+    }, "body");
+    expect(record).toMatchObject({
+      id: "42",
+      storageKey: "proton:proton-42",
+      folder: "INBOX",
+    });
+  });
+
   it("remove drops a record", () => {
     svc.upsert(sampleRecord({ id: "doomed", body: "to be removed" }));
     expect(svc.remove("doomed")).toBe(true);
@@ -161,6 +226,58 @@ describeMaybe("FtsIndexService", () => {
     svc.upsertMany([sampleRecord(), sampleRecord()]);
     svc.clear();
     expect(svc.stats().messageCount).toBe(0);
+  });
+
+  it("clears an index when its durable mailbox owner changes", () => {
+    svc.upsert(sampleRecord({ id: "prior-owner", body: "private old mailbox data" }));
+
+    expect(svc.ensureOwnerIdentity("identity-a")).toBe(true);
+    expect(svc.stats().messageCount).toBe(0);
+    svc.upsert(sampleRecord({ id: "same-owner", body: "current mailbox data" }));
+    expect(svc.ensureOwnerIdentity("identity-a")).toBe(false);
+    expect(svc.stats().messageCount).toBe(1);
+
+    expect(svc.ensureOwnerIdentity("identity-b")).toBe(true);
+    expect(svc.stats().messageCount).toBe(0);
+  });
+
+  it("requires an owner binding before an index can expose or mutate decrypted rows", () => {
+    const unbound = openPeer();
+    expect(() => unbound.upsert(sampleRecord())).toThrow(FtsOwnershipError);
+    expect(() => unbound.upsertMany([sampleRecord()])).toThrow(FtsOwnershipError);
+    expect(() => unbound.rebuild([sampleRecord()])).toThrow(FtsOwnershipError);
+    expect(() => unbound.remove("anything")).toThrow(FtsOwnershipError);
+    expect(() => unbound.clear()).toThrow(FtsOwnershipError);
+    expect(() => unbound.search({ query: "anything" })).toThrow(FtsOwnershipError);
+    expect(() => unbound.stats()).toThrow(FtsOwnershipError);
+  });
+
+  it("atomically invalidates a stale instance after another connection takes ownership", () => {
+    svc.ensureOwnerIdentity("identity-a");
+    svc.upsert(sampleRecord({ id: "old", body: "old mailbox private text" }));
+
+    const successor = openPeer();
+    expect(successor.ensureOwnerIdentity("identity-b")).toBe(true);
+    successor.upsert(sampleRecord({ id: "current", body: "current mailbox private text" }));
+
+    // The first stale write checks the durable marker inside a write
+    // transaction, so it cannot race the successor's clear/rebind and append
+    // data to identity-b's index.
+    expect(() => svc.upsert(sampleRecord({ id: "stale-write", body: "must not leak" })))
+      .toThrow(FtsOwnershipError);
+    expect(successor.search({ query: "current" }).map(hit => hit.id)).toEqual(["current"]);
+    expect(successor.search({ query: "must" })).toEqual([]);
+
+    // Detection trips a one-way fuse. Every read/write surface, including a
+    // later ensure call, remains unavailable to the stale connection.
+    expect(() => svc.upsertMany([sampleRecord()])).toThrow(FtsOwnershipError);
+    expect(() => svc.rebuild([sampleRecord()])).toThrow(FtsOwnershipError);
+    expect(() => svc.remove("current")).toThrow(FtsOwnershipError);
+    expect(() => svc.clear()).toThrow(FtsOwnershipError);
+    expect(() => svc.search({ query: "current" })).toThrow(FtsOwnershipError);
+    expect(() => svc.stats()).toThrow(FtsOwnershipError);
+    expect(() => svc.ensureOwnerIdentity("identity-a")).toThrow(FtsOwnershipError);
+    expect(successor.search({ query: "current" }).map(hit => hit.id)).toEqual(["current"]);
   });
 
   it("stats() returns the row count and a db path", () => {

@@ -54,20 +54,37 @@ describe("singleton-lock", () => {
     if (r.status === "held-by-live-instance") expect(r.pid).toBe(process.pid);
   });
 
-  it("reclaims a stale lock whose recorded pid is dead", () => {
-    // PID 2^31-1 is effectively never a live process.
+  it("fails closed for a stale lock whose recorded pid is dead", () => {
+    // PID 2^31-1 is effectively never a live process. It remains on disk:
+    // automatic PID-check + unlink is racy against another daemon reclaiming
+    // that same pathname between those two operations.
     writeFileSync(lockFile, "2147483646");
     const r = acquireSingletonLock("user@proton.me", 777);
-    expect(r.status).toBe("acquired");
-    if (r.status === "acquired") expect(r.reclaimed).toBe(true);
-    expect(readFileSync(lockFile, "utf8")).toBe("777");
+    expect(r).toMatchObject({ status: "stale-lock", path: lockFile, pid: 2147483646 });
+    expect(readFileSync(lockFile, "utf8")).toBe("2147483646");
   });
 
-  it("reclaims a garbage/non-numeric lock file", () => {
+  it("fails closed for a garbage/non-numeric lock file", () => {
     writeFileSync(lockFile, "not-a-pid");
     const r = acquireSingletonLock("user@proton.me", 999);
-    expect(r.status).toBe("acquired");
-    expect(readFileSync(lockFile, "utf8")).toBe("999");
+    expect(r).toMatchObject({ status: "stale-lock", path: lockFile, pid: null });
+    expect(readFileSync(lockFile, "utf8")).toBe("not-a-pid");
+  });
+
+  it("never unlinks a newly acquired lock after another contender observed an old stale owner", () => {
+    // Contender A observes a stale record and returns fail-closed. An operator
+    // (or a future explicitly-authorized recovery tool) then replaces it with
+    // B's live lock. A later acquisition attempt must only observe B; it must
+    // not perform the old implementation's stale unlink against this pathname.
+    writeFileSync(lockFile, "2147483646");
+    const staleObserver = acquireSingletonLock("user@proton.me", 777);
+    expect(staleObserver.status).toBe("stale-lock");
+
+    writeFileSync(lockFile, String(process.pid));
+    const rival = acquireSingletonLock("user@proton.me", process.pid + 1);
+
+    expect(rival).toMatchObject({ status: "held-by-live-instance", pid: process.pid });
+    expect(readFileSync(lockFile, "utf8")).toBe(String(process.pid));
   });
 
   it("release removes the lock when we still own it", () => {
@@ -86,6 +103,16 @@ describe("singleton-lock", () => {
     releaseSingletonLock(r.path, 4321);
     expect(existsSync(lockFile)).toBe(true);
     expect(readFileSync(lockFile, "utf8")).toBe("5555");
+  });
+
+  it("release requires an exact PID record and does not parse a malformed successor as ours", () => {
+    const r = acquireSingletonLock("user@proton.me", 4321);
+    if (r.status !== "acquired") throw new Error("unexpected");
+    writeFileSync(lockFile, "4321-not-our-lock");
+
+    releaseSingletonLock(r.path, 4321);
+
+    expect(readFileSync(lockFile, "utf8")).toBe("4321-not-our-lock");
   });
 
   it("release is a no-op when the lock is already gone", () => {

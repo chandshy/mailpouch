@@ -74,7 +74,7 @@ export const defs: ToolDef[] = [
     name: "create_folder",
     title: "Create Folder",
     description:
-      "Create a new email folder or label. Use Folders/Name for custom folders, Labels/Name for labels. Must exist before using move_to_label.",
+      "Create one new IMAP mailbox. Use Folders/Name for a custom folder or Labels/Name for a label; the path must be unused across both namespaces. Use rename_folder to change an existing mailbox. Returns success after Proton Bridge accepts the create; create labels before adding them with move_to_label.",
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     inputSchema: {
       type: "object",
@@ -92,7 +92,7 @@ export const defs: ToolDef[] = [
     name: "delete_folder",
     title: "Delete Folder",
     description:
-      "Delete an empty folder or label. Protected system folders (INBOX, Sent, Drafts, Trash, Spam, Archive, All Mail, Starred) cannot be deleted.",
+      "Delete an empty folder or label. Protected system folders (INBOX, Sent, Drafts, Trash, Spam, Archive, All Mail, Starred) cannot be deleted. Requires { confirmed: true }.",
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
     inputSchema: {
       type: "object",

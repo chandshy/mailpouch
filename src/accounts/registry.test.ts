@@ -22,6 +22,7 @@ const CONFIG_PATH = join(homedir(), ".mailpouch.json");
 
 // Mock fs: one in-memory "disk" shared across the loader and the registry.
 let diskByPath = new Map<string, string>();
+let stableConfigMtimeMs: number | null = null;
 
 vi.mock("fs", async () => {
   const actual = await vi.importActual<typeof import("fs")>("fs");
@@ -42,10 +43,20 @@ vi.mock("fs", async () => {
       diskByPath.delete(String(from));
       diskByPath.set(String(to), s);
     }),
-    statSync: vi.fn(),   // returns undefined → mtime check throws → cache bypassed
+    statSync: vi.fn((p: string) => {
+      if (stableConfigMtimeMs !== null && String(p) === CONFIG_PATH) {
+        return { mtimeMs: stableConfigMtimeMs, mode: 0o600 };
+      }
+      // Default test mode: make the loader's cache check fail so existing
+      // cases continue to observe the in-memory disk directly.
+      throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+    }),
     // CRED-008 config-lock primitives: no-op so writeRegistry's lock doesn't
     // touch the real home dir. Real concurrency is covered by config-lock.test.ts.
+    mkdirSync: vi.fn(),
+    rmdirSync: vi.fn(),
     openSync: vi.fn(() => 3),
+    fsyncSync: vi.fn(),
     closeSync: vi.fn(),
     unlinkSync: vi.fn(),
     appendFile: vi.fn((_path: string, _data: string, _enc: string, cb: () => void) => cb()),
@@ -75,7 +86,7 @@ import {
   setActiveAccount,
   listStatuses,
 } from "./registry.js";
-import { defaultConfig } from "../config/loader.js";
+import { defaultConfig, invalidateConfigCache } from "../config/loader.js";
 
 function seedConfig(cfg: Partial<ServerConfig>): void {
   const base = defaultConfig();
@@ -83,8 +94,54 @@ function seedConfig(cfg: Partial<ServerConfig>): void {
   diskByPath.set(CONFIG_PATH, JSON.stringify(merged));
 }
 
+/**
+ * Populate the loader cache with a pre-reset registry, then atomically replace
+ * the mocked file with defaults without changing its observable mtime.
+ */
+function cachePreResetRegistryThenReplaceWithDefaults(): void {
+  stableConfigMtimeMs = 1_234_567;
+  const stale = defaultConfig();
+  stale.accounts = [
+    {
+      id: "primary",
+      name: "Old primary",
+      providerType: "imap",
+      smtpHost: "smtp.old.example",
+      smtpPort: 587,
+      imapHost: "imap.old.example",
+      imapPort: 993,
+      username: "old@example.com",
+      password: "",
+    },
+    {
+      id: "stale-account",
+      name: "Must stay reset",
+      providerType: "imap",
+      smtpHost: "smtp.stale.example",
+      smtpPort: 587,
+      imapHost: "imap.stale.example",
+      imapPort: 993,
+      username: "stale@example.com",
+      password: "",
+    },
+  ];
+  stale.activeAccountId = "stale-account";
+  diskByPath.set(CONFIG_PATH, JSON.stringify(stale));
+  invalidateConfigCache();
+  expect(readRegistry().accounts.map(account => account.id)).toContain("stale-account");
+
+  // Model another process completing reset via atomic rename. Some filesystems
+  // expose the replacement with the same timestamp, so mtime-based cache
+  // validation alone cannot distinguish these two snapshots.
+  diskByPath.set(CONFIG_PATH, JSON.stringify(defaultConfig()));
+}
+
 describe("accounts registry", () => {
-  beforeEach(() => { diskByPath = new Map(); });
+  beforeEach(() => {
+    diskByPath = new Map();
+    stableConfigMtimeMs = null;
+    invalidateConfigCache();
+  });
 
   it("migrates a legacy single-account config into an accounts array on first read", () => {
     seedConfig({
@@ -139,6 +196,107 @@ describe("accounts registry", () => {
     const patched = await updateAccount(created.id, { name: "Renamed" });
     expect(patched?.name).toBe("Renamed");
     expect(patched?.id).toBe(created.id);
+  });
+
+  it("serializes concurrent read-modify-write updates without dropping either account", async () => {
+    seedConfig({});
+    const extra = await createAccount({
+      name: "Concurrent B", providerType: "imap",
+      smtpHost: "s", smtpPort: 1, imapHost: "i", imapPort: 1,
+      username: "b", password: "pw",
+    });
+
+    await Promise.all([
+      updateAccount("primary", { name: "Concurrent A updated" }),
+      updateAccount(extra.id, { name: "Concurrent B updated" }),
+    ]);
+
+    const reg = readRegistry();
+    expect(reg.accounts.find(a => a.id === "primary")?.name).toBe("Concurrent A updated");
+    expect(reg.accounts.find(a => a.id === extra.id)?.name).toBe("Concurrent B updated");
+  });
+
+  it("createAccount does not restore a same-mtime cached registry after an external reset", async () => {
+    cachePreResetRegistryThenReplaceWithDefaults();
+
+    const created = await createAccount({
+      name: "New after reset",
+      providerType: "imap",
+      smtpHost: "smtp.new.example",
+      smtpPort: 587,
+      imapHost: "imap.new.example",
+      imapPort: 993,
+      username: "new@example.com",
+      password: "",
+    });
+
+    const persisted = JSON.parse(diskByPath.get(CONFIG_PATH)!) as ServerConfig;
+    expect(persisted.accounts?.map(account => account.id)).toEqual(["primary", created.id]);
+    expect(persisted.accounts?.some(account => account.id === "stale-account")).toBe(false);
+  });
+
+  it("updateAccount does not patch an account that only exists in a same-mtime stale cache", async () => {
+    cachePreResetRegistryThenReplaceWithDefaults();
+
+    await expect(updateAccount("stale-account", { name: "Restored by stale update" }))
+      .resolves.toBeNull();
+    expect(JSON.parse(diskByPath.get(CONFIG_PATH)!).accounts).toBeUndefined();
+  });
+
+  it("deleteAccount does not restore a same-mtime stale registry while deleting from it", async () => {
+    cachePreResetRegistryThenReplaceWithDefaults();
+
+    await expect(deleteAccount("stale-account")).resolves.toBe(false);
+    expect(JSON.parse(diskByPath.get(CONFIG_PATH)!).accounts).toBeUndefined();
+  });
+
+  it("setActiveAccount does not reactivate an account from a same-mtime stale cache", async () => {
+    cachePreResetRegistryThenReplaceWithDefaults();
+
+    await expect(setActiveAccount("stale-account")).resolves.toBeNull();
+    const persisted = JSON.parse(diskByPath.get(CONFIG_PATH)!) as ServerConfig;
+    expect(persisted.accounts).toBeUndefined();
+    expect(persisted.activeAccountId).toBeUndefined();
+  });
+
+  it("returns detached account specs so keychain hydration cannot mutate the config cache", async () => {
+    const keychain = await import("../security/keychain.js");
+    vi.mocked(keychain.loadAccountCredentials).mockResolvedValue({ password: "keychain-password", smtpToken: "keychain-token" });
+    seedConfig({
+      accounts: [
+        { id: "primary", name: "A", providerType: "imap", smtpHost: "s", smtpPort: 1, imapHost: "i", imapPort: 1, username: "a", password: "", smtpToken: "" },
+      ],
+      activeAccountId: "primary",
+    } as Partial<ServerConfig>);
+
+    const hydrated = await readRegistryWithSecrets();
+    expect(hydrated.accounts[0]).toMatchObject({ password: "keychain-password", smtpToken: "keychain-token" });
+    // A fresh registry read comes from the persisted/config-cache snapshot,
+    // not the secret-filled object returned to AccountManager.
+    expect(readRegistry().accounts[0]).toMatchObject({ password: "", smtpToken: "" });
+  });
+
+  it("does not hydrate stale keychain credentials when reset persisted the mailbox quarantine", async () => {
+    const keychain = await import("../security/keychain.js");
+    const loadAccount = vi.mocked(keychain.loadAccountCredentials);
+    const loadLegacy = vi.mocked(keychain.loadCredentials);
+    loadAccount.mockReset();
+    loadLegacy.mockReset();
+    loadAccount.mockResolvedValue({ password: "stale-account-password", smtpToken: "stale-account-token" });
+    loadLegacy.mockResolvedValue({ password: "stale-legacy-password", smtpToken: "stale-legacy-token" });
+    seedConfig({
+      keychainMailboxCredentialsQuarantined: true,
+      accounts: [
+        { id: "primary", name: "Reset", providerType: "imap", smtpHost: "s", smtpPort: 1, imapHost: "i", imapPort: 1, username: "", password: "", smtpToken: "" },
+      ],
+      activeAccountId: "primary",
+    } as Partial<ServerConfig>);
+
+    const reg = await readRegistryWithSecrets();
+
+    expect(loadAccount).not.toHaveBeenCalled();
+    expect(loadLegacy).not.toHaveBeenCalled();
+    expect(reg.accounts[0]).toMatchObject({ password: "", smtpToken: "" });
   });
 
   it("updateAccount returns null for an unknown id", async () => {
@@ -293,15 +451,15 @@ describe("accounts registry", () => {
     expect(reg.accounts.find(a => a.id === "primary")?.smtpToken).toBe("tok");
   });
 
-  it("the per-account keychain entry is AUTHORITATIVE — it overrides a pre-set (broadcast legacy) password", async () => {
+  it("the per-account keychain entry is AUTHORITATIVE — it overrides a stale pre-set legacy password", async () => {
     const keychain = await import("../security/keychain.js");
     vi.mocked(keychain.loadAccountCredentials).mockReset();
     // The per-account keychain entry holds the FRESH password a Settings save wrote.
     vi.mocked(keychain.loadAccountCredentials).mockResolvedValue({ password: "fresh-per-account", smtpToken: "fresh-tok" });
     vi.mocked(keychain.loadCredentials).mockResolvedValue({ password: "stale-legacy", smtpToken: "stale-tok" });
-    // The spec already carries the STALE legacy password (as applyKeychainCredentials
-    // would have broadcast it before this runs). The fresh per-account entry must win,
-    // not be shadowed by the already-set value.
+    // The spec already carries a stale legacy password from an older config.
+    // The fresh per-account entry must win, not be shadowed by this pre-set
+    // in-memory value.
     seedConfig({
       accounts: [
         { id: "primary", name: "A", providerType: "imap", smtpHost: "s", smtpPort: 1, imapHost: "i", imapPort: 1, username: "a", password: "stale-legacy", smtpToken: "stale-tok" },

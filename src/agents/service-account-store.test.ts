@@ -3,7 +3,8 @@ import { ServiceAccountStore } from "./service-account-store.js";
 import { tmpdir } from "os";
 import { join } from "path";
 import { randomBytes } from "crypto";
-import { rmSync, existsSync, readFileSync, statSync } from "fs";
+import { rmSync, existsSync, readFileSync, statSync, writeFileSync } from "fs";
+import { writeOwnerOnlyJsonAtomically } from "../utils/atomic-json.js";
 
 const paths: string[] = [];
 function newPath(): string {
@@ -66,6 +67,31 @@ describe("ServiceAccountStore", () => {
     expect(b.verify(account.clientId, clientSecret)).toBeNull();
   });
 
+  it("reads a fresh authorization snapshot after an external credential deletion", () => {
+    const path = newPath();
+    const writer = new ServiceAccountStore(path);
+    const { account } = writer.issue({ name: "external-delete", preset: "full" });
+    const staleReader = new ServiceAccountStore(path);
+    expect(staleReader.get(account.clientId)).toBeDefined();
+    // Simulate the credential half of a cross-file revoke being committed
+    // by another process while its grant-file write is interrupted. This
+    // bypasses the in-memory store and any notification path entirely.
+    const external = JSON.parse(readFileSync(path, "utf-8")) as { version: 1; accounts: Array<{ clientId: string }> };
+    external.accounts = external.accounts.filter(entry => entry.clientId !== account.clientId);
+    writeOwnerOnlyJsonAtomically(path, external);
+    expect(staleReader.get(account.clientId)).toBeDefined();
+    expect(staleReader.getAuthorizationSnapshot(account.clientId)).toEqual({ kind: "missing" });
+  });
+
+  it("treats a malformed credential source as unavailable rather than missing", () => {
+    const path = newPath();
+    const store = new ServiceAccountStore(path);
+    const { account, clientSecret } = store.issue({ name: "corrupt-source", preset: "full" });
+    writeFileSync(path, "{ malformed", "utf-8");
+    expect(store.getAuthorizationSnapshot(account.clientId)).toEqual({ kind: "unavailable" });
+    expect(store.verify(account.clientId, clientSecret)).toBeNull();
+  });
+
   it("persists across instances (a cron agent survives a restart)", () => {
     const path = newPath();
     const a = new ServiceAccountStore(path);
@@ -90,6 +116,32 @@ describe("ServiceAccountStore", () => {
     expect(store.revoke(account.clientId)).toBe(false);
     // A fresh instance also sees the deletion.
     expect(new ServiceAccountStore(path).list()).toHaveLength(0);
+  });
+
+  it("preserves valid canonicalized hourly caps for service accounts and drops out-of-range values", () => {
+    const path = newPath();
+    const store = new ServiceAccountStore(path);
+    const { account } = store.issue({
+      name: "capped-cron",
+      preset: "full",
+      conditions: {
+        // Direct callers can still supply an old alias; the shared sanitizer
+        // must retain it under the canonical key for the mirrored grant.
+        maxCallsPerHourByTool: {
+          bulk_delete: 2,
+          get_emails: 10_001,
+        } as never,
+      },
+    });
+
+    expect(store.get(account.clientId)?.conditions?.maxCallsPerHourByTool).toEqual({
+      bulk_delete_emails: 2,
+    });
+    // A reload models daemon startup before ensureActiveServiceGrant mirrors
+    // the condition into AgentGrantStore.
+    expect(new ServiceAccountStore(path).get(account.clientId)?.conditions?.maxCallsPerHourByTool).toEqual({
+      bulk_delete_emails: 2,
+    });
   });
 
   // Windows has no POSIX mode bits (fs reports 0o666 regardless), so this

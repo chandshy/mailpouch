@@ -18,9 +18,10 @@ import { AgentGrantStore } from "../agents/grant-store.js";
 import { AddressInfo, createServer } from "net";
 import { tmpdir } from "os";
 import { join } from "path";
-import { randomBytes } from "crypto";
-import { rmSync } from "fs";
+import { createHash, randomBytes } from "crypto";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import type { IncomingMessage } from "http";
+import { writeOwnerOnlyJsonAtomically } from "../utils/atomic-json.js";
 
 /** Temp service-account store files to clean up after the suite. */
 const saStorePaths: string[] = [];
@@ -29,10 +30,20 @@ function newServiceAccountStore(): ServiceAccountStore {
   saStorePaths.push(p);
   return new ServiceAccountStore(p);
 }
+function newServiceAccountStoreWithPath(): { serviceAccounts: ServiceAccountStore; path: string } {
+  const p = join(tmpdir(), `mp-sa-test-${randomBytes(6).toString("hex")}.json`);
+  saStorePaths.push(p);
+  return { serviceAccounts: new ServiceAccountStore(p), path: p };
+}
 function newGrantStore(): AgentGrantStore {
   const p = join(tmpdir(), `mp-grants-test-${randomBytes(6).toString("hex")}.json`);
   saStorePaths.push(p);
   return new AgentGrantStore(p);
+}
+function newGrantStoreWithPath(): { grants: AgentGrantStore; path: string } {
+  const p = join(tmpdir(), `mp-grants-test-${randomBytes(6).toString("hex")}.json`);
+  saStorePaths.push(p);
+  return { grants: new AgentGrantStore(p), path: p };
 }
 /** Fetch an access token via the client_credentials grant (HTTP Basic). */
 async function clientCredentialsToken(url: string, clientId: string, secret: string): Promise<{ status: number; token: string }> {
@@ -47,6 +58,59 @@ async function clientCredentialsToken(url: string, clientId: string, secret: str
   let token = "";
   try { token = ((await res.json()) as { access_token?: string }).access_token ?? ""; } catch { /* error body */ }
   return { status: res.status, token };
+}
+
+async function mcpInitialize(url: string, token: string): Promise<Response> {
+  return fetch(`${url}/mcp`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json, text/event-stream",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-11-25",
+        capabilities: {},
+        clientInfo: { name: "test", version: "0" },
+      },
+    }),
+  });
+}
+
+async function issuePendingInteractiveToken(url: string): Promise<{ clientId: string; token: string }> {
+  const redirectUri = "http://localhost:9999/cb";
+  const registered = await fetch(`${url}/oauth/register`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ redirect_uris: [redirectUri], client_name: "pending HTTP test" }),
+  });
+  const { client_id: clientId } = await registered.json() as { client_id: string };
+  const verifier = randomBytes(32).toString("base64url");
+  const challenge = createHash("sha256").update(verifier).digest("base64url");
+  const authorize = await fetch(`${url}/oauth/authorize?${new URLSearchParams({
+    client_id: clientId,
+    redirect_uri: redirectUri,
+    code_challenge: challenge,
+    code_challenge_method: "S256",
+  }).toString()}`, { redirect: "manual" });
+  const code = new URL(authorize.headers.get("location") ?? redirectUri).searchParams.get("code") ?? "";
+  const tokenResponse = await fetch(`${url}/oauth/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "authorization_code",
+      code,
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      code_verifier: verifier,
+    }).toString(),
+  });
+  const { access_token: token } = await tokenResponse.json() as { access_token: string };
+  return { clientId, token };
 }
 
 function fakeReq(remote: string, headers: Record<string, string | undefined> = {}): IncomingMessage {
@@ -114,7 +178,10 @@ afterEach(() => {
   // Clean up any temp service-account stores created during a test.
   while (saStorePaths.length) {
     const p = saStorePaths.pop();
-    if (p) { try { rmSync(p, { force: true }); } catch { /* ignore */ } }
+    if (!p) continue;
+    for (const suffix of ["", ".quota.sqlite", ".quota.sqlite-wal", ".quota.sqlite-shm", ".quota.sqlite-journal"]) {
+      try { rmSync(p + suffix, { recursive: suffix === "", force: true }); } catch { /* ignore */ }
+    }
   }
 });
 
@@ -243,6 +310,177 @@ describe("HTTP transport", () => {
       }),
     });
     expect(initRes.status).toBeLessThan(400);
+  });
+
+  it("freshly rejects and revokes existing bearer tokens after an external grant revocation", async () => {
+    const port = await freePort();
+    const serviceAccounts = newServiceAccountStore();
+    const { grants, path } = newGrantStoreWithPath();
+    const { account, clientSecret } = serviceAccounts.issue({ name: "externally-revoked", preset: "full" });
+    grants.ensureActiveServiceGrant({
+      clientId: account.clientId,
+      clientName: account.clientName,
+      preset: account.preset,
+      conditions: account.conditions,
+    });
+    handle = await startHttpTransport({
+      server: buildServer(),
+      port,
+      host: "127.0.0.1",
+      oauthEnabled: true,
+      serviceAccounts,
+      agentGrants: grants,
+    });
+    const url = `http://127.0.0.1:${port}`;
+    const first = await clientCredentialsToken(url, account.clientId, clientSecret);
+    const second = await clientCredentialsToken(url, account.clientId, clientSecret);
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+
+    // Simulate another process writing the authoritative grant file. This
+    // intentionally emits no in-process notification, proving the bearer
+    // gate's fresh snapshot instead of its existing notification fast path.
+    const external = JSON.parse(readFileSync(path, "utf-8")) as { grants: Array<Record<string, unknown>> };
+    const grant = external.grants.find(candidate => candidate.clientId === account.clientId)!;
+    grant.status = "revoked";
+    grant.revokedAt = new Date().toISOString();
+    writeOwnerOnlyJsonAtomically(path, external);
+    expect(grants.get(account.clientId)?.status).toBe("active");
+
+    expect((await mcpInitialize(url, first.token)).status).toBe(401);
+    // The first definitive revoked snapshot purges every cached bearer for
+    // this client, not merely the token used in that request.
+    expect((await mcpInitialize(url, second.token)).status).toBe(401);
+  });
+
+  it("freshly revokes orphaned service-account bearers after an external credential deletion", async () => {
+    const port = await freePort();
+    const { serviceAccounts, path: servicePath } = newServiceAccountStoreWithPath();
+    const { grants } = newGrantStoreWithPath();
+    const { account, clientSecret } = serviceAccounts.issue({ name: "externally-deleted-service-account", preset: "full" });
+    grants.ensureActiveServiceGrant({
+      clientId: account.clientId,
+      clientName: account.clientName,
+      preset: account.preset,
+      conditions: account.conditions,
+    });
+    handle = await startHttpTransport({
+      server: buildServer(), port, host: "127.0.0.1", oauthEnabled: true, serviceAccounts, agentGrants: grants,
+    });
+    const url = `http://127.0.0.1:${port}`;
+    const first = await clientCredentialsToken(url, account.clientId, clientSecret);
+    const second = await clientCredentialsToken(url, account.clientId, clientSecret);
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(grants.getAuthorizationSnapshot(account.clientId)).toMatchObject({
+      kind: "present", grant: { credentialKind: "service_account", status: "active" },
+    });
+
+    // Simulate an interrupted cross-file revoke: an external process removes
+    // the credential but has not yet changed the matching active grant. No
+    // AgentGrant notification is emitted and serviceAccounts.get() is stale.
+    const savedServiceFile = JSON.parse(readFileSync(servicePath, "utf-8"));
+    const external = JSON.parse(readFileSync(servicePath, "utf-8")) as { accounts: Array<Record<string, unknown>> };
+    external.accounts = external.accounts.filter(entry => entry.clientId !== account.clientId);
+    writeOwnerOnlyJsonAtomically(servicePath, external);
+    expect(serviceAccounts.get(account.clientId)).toBeDefined();
+
+    expect((await mcpInitialize(url, first.token)).status).toBe(401);
+    // A definitive missing credential revokes every bearer for the client.
+    expect((await mcpInitialize(url, second.token)).status).toBe(401);
+
+    // Restore the credential file. The old bearer stays revoked, but a fresh
+    // client_credentials exchange recovers normally once durable authority is
+    // consistent again.
+    writeOwnerOnlyJsonAtomically(servicePath, savedServiceFile);
+    expect((await mcpInitialize(url, first.token)).status).toBe(401);
+    const recovered = await clientCredentialsToken(url, account.clientId, clientSecret);
+    expect(recovered.status).toBe(200);
+    expect((await mcpInitialize(url, recovered.token)).status).toBeLessThan(400);
+  });
+
+  it("fails closed on an unavailable service-account source without purging its bearer", async () => {
+    const port = await freePort();
+    const { serviceAccounts, path: servicePath } = newServiceAccountStoreWithPath();
+    const { grants } = newGrantStoreWithPath();
+    const { account, clientSecret } = serviceAccounts.issue({ name: "transient-service-source", preset: "full" });
+    grants.ensureActiveServiceGrant({
+      clientId: account.clientId,
+      clientName: account.clientName,
+      preset: account.preset,
+      conditions: account.conditions,
+    });
+    handle = await startHttpTransport({
+      server: buildServer(), port, host: "127.0.0.1", oauthEnabled: true, serviceAccounts, agentGrants: grants,
+    });
+    const url = `http://127.0.0.1:${port}`;
+    const issued = await clientCredentialsToken(url, account.clientId, clientSecret);
+    expect(issued.status).toBe(200);
+    const goodServiceFile = JSON.parse(readFileSync(servicePath, "utf-8"));
+
+    writeFileSync(servicePath, "{ malformed", "utf-8");
+    // The credential exchange itself must not mint a new bearer from its
+    // stale in-memory map while the authoritative source is unavailable.
+    expect((await clientCredentialsToken(url, account.clientId, clientSecret)).status).toBe(401);
+    expect((await mcpInitialize(url, issued.token)).status).toBe(401);
+
+    // This is not definitive revocation. Restoring the exact credential file
+    // must make the same cached bearer usable again without a new OAuth flow.
+    writeOwnerOnlyJsonAtomically(servicePath, goodServiceFile);
+    expect((await mcpInitialize(url, issued.token)).status).toBeLessThan(400);
+  });
+
+  it("fails closed on corrupt or unreadable fresh grants without irreversibly purging the bearer", async () => {
+    const port = await freePort();
+    const serviceAccounts = newServiceAccountStore();
+    const { grants, path } = newGrantStoreWithPath();
+    const { account, clientSecret } = serviceAccounts.issue({ name: "transient-grant-file", preset: "full" });
+    grants.ensureActiveServiceGrant({ clientId: account.clientId, clientName: account.clientName, preset: account.preset });
+    handle = await startHttpTransport({
+      server: buildServer(), port, host: "127.0.0.1", oauthEnabled: true, serviceAccounts, agentGrants: grants,
+    });
+    const url = `http://127.0.0.1:${port}`;
+    const issued = await clientCredentialsToken(url, account.clientId, clientSecret);
+    expect(issued.status).toBe(200);
+    const goodGrantFile = JSON.parse(readFileSync(path, "utf-8"));
+
+    writeFileSync(path, "{ malformed", "utf-8");
+    expect((await mcpInitialize(url, issued.token)).status).toBe(401);
+
+    // EISDIR represents the same security boundary as an unreadable file. It
+    // must remain unavailable (not "missing"), or the transport would purge
+    // a bearer based on a transient filesystem failure. A directory produces
+    // a deterministic non-ENOENT read error without depending on chmod.
+    rmSync(path, { force: true });
+    mkdirSync(path, { mode: 0o700 });
+    expect((await mcpInitialize(url, issued.token)).status).toBe(401);
+    rmSync(path, { recursive: true, force: true });
+    writeOwnerOnlyJsonAtomically(path, goodGrantFile);
+    // Reuse the SAME token after both transient failures. A purge caused by
+    // either malformed JSON or EISDIR would leave this request at 401.
+    expect((await mcpInitialize(url, issued.token)).status).toBeLessThan(400);
+  });
+
+  it("preserves pending bearer behavior for the dispatcher to report approval status", async () => {
+    const port = await freePort();
+    const grants = newGrantStore();
+    const { serviceAccounts, path: servicePath } = newServiceAccountStoreWithPath();
+    handle = await startHttpTransport({
+      server: buildServer(), port, host: "127.0.0.1", oauthEnabled: true, agentGrants: grants, serviceAccounts,
+    });
+    // A pending DCR grant is interactive, not credential-backed. Even a
+    // transiently unreadable service-account store must not turn it into a
+    // service grant or change the transport's pending behavior.
+    writeFileSync(servicePath, "{ malformed", "utf-8");
+    const url = `http://127.0.0.1:${port}`;
+    const pending = await issuePendingInteractiveToken(url);
+    expect(grants.getAuthorizationSnapshot(pending.clientId)).toMatchObject({
+      kind: "present",
+      grant: { status: "pending" },
+    });
+    // HTTP authenticates the bearer; the full MCP dispatcher owns the
+    // user-facing pending-grant denial/audit when the real server is wired.
+    expect((await mcpInitialize(url, pending.token)).status).toBeLessThan(400);
   });
 
   describe("OAuth 2.1 mode (automatic consent)", () => {

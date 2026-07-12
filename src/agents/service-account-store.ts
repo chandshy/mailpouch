@@ -17,13 +17,15 @@
  * SHA-256 is sufficient (no low-entropy password to slow-hash).
  */
 
-import { readFileSync, writeFileSync, existsSync, renameSync } from "fs";
+import { readFileSync, existsSync } from "fs";
 import { randomBytes, randomUUID, createHash } from "crypto";
 import type { GrantConditions } from "./types.js";
 import type { PermissionPreset } from "../config/schema.js";
 import { constantTimeEqual } from "../utils/crypto.js";
 import { logger } from "../utils/logger.js";
 import { withFileLock } from "../utils/file-lock.js";
+import { writeOwnerOnlyJsonAtomically } from "../utils/atomic-json.js";
+import { isValidAgentToolHourlyCap, sanitizeGrantConditions } from "./grant-conditions.js";
 
 export interface ServiceAccount {
   /** OAuth client_id, `pmc_<32-hex>` — same scheme as DCR clients. */
@@ -58,6 +60,14 @@ interface StoreFile {
   version: 1;
   accounts: ServiceAccount[];
 }
+
+/** Fresh disk-backed credential view used by authorization decisions. */
+export type ServiceAccountAuthorizationSnapshot =
+  | { kind: "present"; account: ServiceAccount }
+  | { kind: "missing" }
+  | { kind: "unavailable" };
+
+const SERVICE_ACCOUNT_PRESETS = new Set<PermissionPreset>(["full", "read_only", "supervised", "send_only", "custom"]);
 
 /** hex SHA-256 of salt+secret — the value persisted and compared against. */
 function hashSecret(salt: string, secret: string): string {
@@ -115,11 +125,7 @@ export class ServiceAccountStore {
 
   private persist(): void {
     const payload: StoreFile = { version: 1, accounts: [...this.accounts.values()] };
-    // tmp next to the destination so rename(2) stays atomic across the same fs
-    // (os.tmpdir() can be a separate mount → EXDEV). Matches AgentGrantStore.
-    const tmp = `${this.path}.${randomBytes(8).toString("hex")}.tmp`;
-    writeFileSync(tmp, JSON.stringify(payload, null, 2), { encoding: "utf-8", mode: 0o600 });
-    renameSync(tmp, this.path);
+    writeOwnerOnlyJsonAtomically(this.path, payload);
   }
 
   /**
@@ -137,7 +143,10 @@ export class ServiceAccountStore {
         secretHash: hashSecret(secretSalt, clientSecret),
         secretSalt,
         preset: args.preset,
-        conditions: args.conditions,
+        // Defend the programmatic/CLI issuance path too. Persisted legacy
+        // records are intentionally left untouched on load so GrantManager can
+        // fail closed on malformed caps rather than silently dropping them.
+        conditions: sanitizeGrantConditions(args.conditions),
         createdAt: new Date().toISOString(),
       };
       this.accounts.set(clientId, account);
@@ -161,17 +170,51 @@ export class ServiceAccountStore {
    * wrong-secret to the caller (the OAuth handler collapses both to
    * `invalid_client`).
    *
-   * Reloads from disk first so a running daemon honors accounts issued (or
-   * revoked) by a separate process since startup — re-auth needs no restart.
-   * client_credentials logins are infrequent (24h token TTL) and the file is
-   * tiny, so the per-verify read is negligible.
+   * Reads a validated disk snapshot so a running daemon honors accounts issued
+   * (or revoked) by a separate process since startup — and cannot mint a new
+   * bearer from a stale map while the credential file is malformed or
+   * unreadable. client_credentials logins are infrequent (24h token TTL) and
+   * the file is tiny, so the per-verify read is negligible.
    */
   verify(clientId: string, secret: string): ServiceAccount | null {
-    this.reloadMerge();
-    const account = this.accounts.get(clientId);
-    if (!account) return null;
+    const snapshot = this.getAuthorizationSnapshot(clientId);
+    if (snapshot.kind !== "present") return null;
+    const account = snapshot.account;
     const candidate = hashSecret(account.secretSalt, secret);
     return constantTimeEqual(candidate, account.secretHash) ? account : null;
+  }
+
+  /**
+   * Read a credential record directly from disk for a security decision.
+   *
+   * The in-memory map remains appropriate for settings rendering, but neither
+   * bearer authorization nor credential exchange can use it: a separate
+   * CLI/settings process may have removed the account while this daemon is
+   * alive. Only a real ENOENT is a definitive absence; malformed or unreadable
+   * storage is unavailable and must be handled fail-closed.
+   */
+  getAuthorizationSnapshot(clientId: string): ServiceAccountAuthorizationSnapshot {
+    try {
+      const parsed = JSON.parse(readFileSync(this.path, "utf-8")) as Partial<StoreFile>;
+      if (parsed.version !== 1 || !Array.isArray(parsed.accounts) || !parsed.accounts.every(isValidAuthorizationAccount)) {
+        logger.warn("ServiceAccountStore: authorization snapshot is malformed; denying access", "ServiceAccountStore");
+        return { kind: "unavailable" };
+      }
+      const ids = new Set<string>();
+      for (const account of parsed.accounts) {
+        if (ids.has(account.clientId)) {
+          logger.warn("ServiceAccountStore: authorization snapshot has duplicate client IDs; denying access", "ServiceAccountStore");
+          return { kind: "unavailable" };
+        }
+        ids.add(account.clientId);
+      }
+      const account = parsed.accounts.find(entry => entry.clientId === clientId);
+      return account ? { kind: "present", account } : { kind: "missing" };
+    } catch (error) {
+      if (isNoEntryError(error)) return { kind: "missing" };
+      logger.warn("ServiceAccountStore: authorization snapshot could not be read; denying access", "ServiceAccountStore", error);
+      return { kind: "unavailable" };
+    }
   }
 
   get(clientId: string): ServiceAccount | undefined {
@@ -192,4 +235,37 @@ export class ServiceAccountStore {
       return existed;
     });
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function isNoEntryError(error: unknown): boolean {
+  return isRecord(error) && error.code === "ENOENT";
+}
+
+/** Validate persisted records before letting their mere presence authorize a grant. */
+function isValidAuthorizationAccount(value: unknown): value is ServiceAccount {
+  if (!isRecord(value)) return false;
+  if (typeof value.clientId !== "string" || !value.clientId) return false;
+  if (typeof value.clientName !== "string") return false;
+  if (typeof value.secretHash !== "string" || !/^[a-f0-9]{64}$/i.test(value.secretHash)) return false;
+  if (typeof value.secretSalt !== "string" || !/^[a-f0-9]{32}$/i.test(value.secretSalt)) return false;
+  if (typeof value.preset !== "string" || !SERVICE_ACCOUNT_PRESETS.has(value.preset as PermissionPreset)) return false;
+  if (typeof value.createdAt !== "string" || !value.createdAt) return false;
+  return validConditions(value.conditions);
+}
+
+function validConditions(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!isRecord(value)) return false;
+  if (value.expiresAt !== undefined && (typeof value.expiresAt !== "string" || !Number.isFinite(Date.parse(value.expiresAt)))) return false;
+  if (value.accountId !== undefined && typeof value.accountId !== "string") return false;
+  if (value.folderAllowlist !== undefined && (!Array.isArray(value.folderAllowlist) || !value.folderAllowlist.every(folder => typeof folder === "string"))) return false;
+  if (value.ipPins !== undefined && (!Array.isArray(value.ipPins) || !value.ipPins.every(ip => typeof ip === "string"))) return false;
+  if (value.maxCallsPerHourByTool !== undefined) {
+    if (!isRecord(value.maxCallsPerHourByTool) || !Object.values(value.maxCallsPerHourByTool).every(isValidAgentToolHourlyCap)) return false;
+  }
+  return true;
 }

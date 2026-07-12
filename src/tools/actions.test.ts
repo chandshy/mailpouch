@@ -5,7 +5,7 @@ import type { ToolCallContext, ToolResult } from "./types.js";
 
 function makeCtx(over: Partial<ToolCallContext>): ToolCallContext {
   const actionOk = (): ToolResult => ({ content: [{ type: "text", text: "Done." }], structuredContent: { success: true } });
-  return { actionOk, ...over } as unknown as ToolCallContext;
+  return { actionOk, invalidateAnalytics: () => {}, ...over } as unknown as ToolCallContext;
 }
 
 describe("mark_answered / mark_forwarded tools (Phase 4 flag gap)", () => {

@@ -11,7 +11,13 @@
 
 import { randomBytes } from "crypto";
 import type { ServerConfig } from "../config/schema.js";
-import { loadConfig, saveConfig, defaultConfig, withConfigWriteLockAsync } from "../config/loader.js";
+import {
+  defaultConfig,
+  invalidateConfigCache,
+  loadConfig,
+  saveConfig,
+  withConfigWriteLockAsync,
+} from "../config/loader.js";
 import type { AccountSpec, AccountRegistry, AccountStatus } from "./types.js";
 import {
   loadAccountCredentials,
@@ -49,18 +55,58 @@ function specFromLegacy(cfg: ServerConfig): AccountSpec {
   };
 }
 
-export function readRegistry(): AccountRegistry {
-  const cfg = loadConfig() ?? defaultConfig();
+function registryFromConfig(cfg: ServerConfig): AccountRegistry {
   if (cfg.accounts && cfg.accounts.length > 0) {
     const activeId = cfg.activeAccountId
       && cfg.accounts.some(a => a.id === cfg.activeAccountId)
       ? cfg.activeAccountId
       : cfg.accounts[0].id;
-    return { accounts: cfg.accounts, activeAccountId: activeId };
+    // Never hand out the loader's cached config objects.  The async secret
+    // hydration path intentionally fills credentials into its returned
+    // AccountSpecs; returning this array by reference put keychain secrets
+    // back into the shared config cache and let unrelated config saves persist
+    // them or settings reads disclose them.
+    return { accounts: cfg.accounts.map(account => ({ ...account })), activeAccountId: activeId };
   }
   // Legacy migration path — lift the singleton connection into an account.
   const primary = specFromLegacy(cfg);
   return { accounts: [primary], activeAccountId: primary.id };
+}
+
+export function readRegistry(): AccountRegistry {
+  return registryFromConfig(loadConfig() ?? defaultConfig());
+}
+
+/**
+ * Load a detached, current config while the caller owns the write lock.
+ *
+ * The normal loader cache is safe for reads because it compares mtimes, but a
+ * rapid atomic replacement can retain the same observable timestamp on some
+ * filesystems. A read-modify-write must therefore invalidate unconditionally
+ * after lock acquisition. Cloning also prevents a failed save from leaving
+ * uncommitted registry state in the shared read cache.
+ */
+function loadFreshConfigForRegistryWrite(): ServerConfig {
+  invalidateConfigCache();
+  const loaded = loadConfig();
+  return loaded ? structuredClone(loaded) : defaultConfig();
+}
+
+/** Resolve a mutation base from the fresh detached config snapshot. */
+function readFreshRegistryForWrite(): AccountRegistry {
+  return registryFromConfig(loadFreshConfigForRegistryWrite());
+}
+
+/**
+ * Whether reset persisted a fail-closed mailbox-keychain quarantine.
+ *
+ * Keep this decision next to the only code that normally hydrates account
+ * specs.  AccountManager and diagnostics both use readRegistryWithSecrets(),
+ * so a restart cannot accidentally resurrect an undeleted legacy/per-account
+ * credential through one caller that forgot to check the reset marker.
+ */
+export function mailboxKeychainCredentialsAreQuarantined(): boolean {
+  return loadConfig()?.keychainMailboxCredentialsQuarantined === true;
 }
 
 /**
@@ -77,16 +123,18 @@ export function readRegistry(): AccountRegistry {
  */
 export async function readRegistryWithSecrets(): Promise<AccountRegistry> {
   const reg = readRegistry();
+  // Reset persisted a durable marker because at least one mailbox keychain
+  // delete failed. Returning the unhydrated registry is intentional: even a
+  // fresh process must fail closed rather than make that old credential live
+  // again. A subsequent successful reset clears the marker.
+  if (mailboxKeychainCredentialsAreQuarantined()) return reg;
+
   const { loadCredentials } = await import("../security/keychain.js");
   for (const acct of reg.accounts) {
     // The per-account keychain entry is AUTHORITATIVE for that account. Load it
-    // unconditionally and PREFER it over any value already on the spec — that
-    // pre-set value may be a broadcast of the LEGACY (no-suffix) keychain entry
-    // applied by applyKeychainCredentials(), and a stale legacy entry must not
-    // shadow the fresh per-account password a Settings save wrote. This was the
-    // recurring daemon-restart staleness (CRED-005 once skipped this load
-    // whenever a password was already set, which is exactly when the shadow
-    // happened). A keychain miss falls back to the existing value / legacy key,
+    // unconditionally and prefer it over any value already on the spec so a
+    // stale legacy primary credential can never shadow a newer account-owned
+    // secret. A keychain miss falls back to the existing value / legacy key,
     // so config-plaintext and single-account installs are unaffected.
     const perAccount = await loadAccountCredentials(acct.id);
     let legacy: Awaited<ReturnType<typeof loadCredentials>> | null | undefined;
@@ -146,7 +194,7 @@ export async function writeRegistry(reg: AccountRegistry): Promise<void> {
   // writeRegistry cannot clobber this write. The inner saveConfig reuses the
   // held lock reentrantly.
   await withConfigWriteLockAsync(async () => {
-  const cfg = loadConfig() ?? defaultConfig();
+  const cfg = loadFreshConfigForRegistryWrite();
 
   // Clone the specs so we can blank secrets without mutating the
   // caller's in-memory view. Downstream code that holds a reference
@@ -236,47 +284,60 @@ export function listStatuses(): AccountStatus[] {
 }
 
 export async function createAccount(spec: Omit<AccountSpec, "id">): Promise<AccountSpec> {
-  const reg = readRegistry();
-  const account: AccountSpec = { ...spec, id: shortId() };
-  reg.accounts.push(account);
-  await writeRegistry(reg);
-  return account;
+  // Keep the read inside the same lock as the write.  writeRegistry() already
+  // serializes its own persistence, but taking the registry snapshot before
+  // that lock let two concurrent settings requests both append to an old array
+  // and silently discard one another's account.
+  return withConfigWriteLockAsync(async () => {
+    const reg = readFreshRegistryForWrite();
+    const account: AccountSpec = { ...spec, id: shortId() };
+    reg.accounts.push(account);
+    await writeRegistry(reg);
+    return account;
+  });
 }
 
 /**
  * Patch fields on an existing account. Unknown IDs return null.
  * Passwords / smtpTokens in the patch are routed to the keychain by
  * writeRegistry(); the returned AccountSpec still carries the
- * plaintext in memory so the caller can hand it to services that
- * need it (AccountManager.applyKeychainCredentials, etc.).
+ * plaintext in memory only for its immediate API response; the running
+ * AccountManager reloads the account-owned keychain entry after a mutation.
  */
 export async function updateAccount(
   id: string,
   patch: Partial<AccountSpec>,
 ): Promise<AccountSpec | null> {
-  const reg = readRegistry();
-  const idx = reg.accounts.findIndex(a => a.id === id);
-  if (idx < 0) return null;
-  const merged = { ...reg.accounts[idx], ...patch, id };
-  reg.accounts[idx] = merged;
-  await writeRegistry(reg);
-  return merged;
+  return withConfigWriteLockAsync(async () => {
+    const reg = readFreshRegistryForWrite();
+    const idx = reg.accounts.findIndex(a => a.id === id);
+    if (idx < 0) return null;
+    const merged = { ...reg.accounts[idx], ...patch, id };
+    reg.accounts[idx] = merged;
+    await writeRegistry(reg);
+    return merged;
+  });
 }
 
 export async function deleteAccount(id: string): Promise<boolean> {
-  const reg = readRegistry();
-  if (reg.accounts.length <= 1) {
-    // Refuse to delete the last account — leaves the server without
-    // anywhere to connect.
-    return false;
-  }
-  const before = reg.accounts.length;
-  reg.accounts = reg.accounts.filter(a => a.id !== id);
-  if (reg.accounts.length === before) return false;
-  if (reg.activeAccountId === id) {
-    reg.activeAccountId = reg.accounts[0].id;
-  }
-  await writeRegistry(reg);
+  const deleted = await withConfigWriteLockAsync(async () => {
+    const reg = readFreshRegistryForWrite();
+    if (reg.accounts.length <= 1) {
+      // Refuse to delete the last account — leaves the server without
+      // anywhere to connect.
+      return false;
+    }
+    const before = reg.accounts.length;
+    reg.accounts = reg.accounts.filter(a => a.id !== id);
+    if (reg.accounts.length === before) return false;
+    if (reg.activeAccountId === id) {
+      reg.activeAccountId = reg.accounts[0].id;
+    }
+    await writeRegistry(reg);
+    return true;
+  });
+  if (!deleted) return false;
+
   // Scrub the deleted account's keychain entries so stale secrets
   // don't accumulate. Non-fatal on failure.
   try { await deleteAccountCredentials(id); } catch { /* non-fatal */ }
@@ -284,10 +345,12 @@ export async function deleteAccount(id: string): Promise<boolean> {
 }
 
 export async function setActiveAccount(id: string): Promise<AccountSpec | null> {
-  const reg = readRegistry();
-  const match = reg.accounts.find(a => a.id === id);
-  if (!match) return null;
-  reg.activeAccountId = id;
-  await writeRegistry(reg);
-  return match;
+  return withConfigWriteLockAsync(async () => {
+    const reg = readFreshRegistryForWrite();
+    const match = reg.accounts.find(a => a.id === id);
+    if (!match) return null;
+    reg.activeAccountId = id;
+    await writeRegistry(reg);
+    return match;
+  });
 }

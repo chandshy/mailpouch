@@ -1,5 +1,4 @@
 // src/settings/shell.ts
-import os from "os";
 import nodePath from "path";
 import { fileURLToPath } from "url";
 import { readFileSync } from "fs";
@@ -9,7 +8,7 @@ import { buildStyles } from "./styles.js";
 const _moduleDir = nodePath.dirname(fileURLToPath(import.meta.url));
 const _pkgJsonPath = nodePath.resolve(_moduleDir, "../../package.json");
 
-export function buildShellHtml(configPath: string, csrfToken: string, runningPort = 8766, cspNonce = ""): string {
+export function buildShellHtml(csrfToken: string, runningPort = 8766, cspNonce = ""): string {
   const toolsJson = JSON.stringify(ALL_TOOLS);
   const categoriesJson = JSON.stringify(TOOL_CATEGORIES);
   const distIndexPath = JSON.stringify(nodePath.resolve(_moduleDir, "../index.js"));
@@ -24,13 +23,6 @@ export function buildShellHtml(configPath: string, csrfToken: string, runningPor
   const pkgVersionJson  = JSON.stringify(pkgVersion);
   const pkgNameJson     = JSON.stringify(pkgName);
   const runningPortJson = JSON.stringify(runningPort);
-
-  const escapeHtml = (s: string): string => s
-    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
-
-  const safeConfigPath = escapeHtml(configPath);
-  void safeConfigPath; // used only in tab HTML, not in shell itself
 
   return `<!DOCTYPE html>
 <!-- NEW WIZARD UI -->
@@ -126,6 +118,10 @@ ${buildStyles(cspNonce)}
   let customSnapshot = null; // saved custom tool state, keyed by tool name
   let _accountsById  = {};
   let __mpReloading  = false;
+  let __mpLanSessionNoticeShown = false;
+  // Empty auxiliary-secret inputs normally mean "not disclosed; retain".
+  // Only the explicit Clear controls below set one of these flags.
+  let pendingAuxiliarySecretClears = { simpleloginApiKey: false, passAccessToken: false };
 
   // Wizard in-progress state
   const W = {
@@ -160,6 +156,21 @@ ${buildStyles(cspNonce)}
           if (body && body.code === 'session_expired') {
             __mpReloading = true;
             try { window.location.reload(); } catch (_) { /* ignore */ }
+          }
+        } catch (_) { /* not JSON — not ours */ }
+      }
+      // LAN browser sessions live only in the settings-server process. After
+      // that process restarts, the HttpOnly cookie is deliberately useless;
+      // reloading cannot recover because the bootstrap bearer was removed from
+      // the URL. Give the operator the actionable next step instead of making
+      // each individual fetch failure look unrelated.
+      if (response.status === 401 && !__mpLanSessionNoticeShown) {
+        try {
+          const clone = response.clone();
+          const body = await clone.json();
+          if (body && body.code === 'lan_session_required') {
+            __mpLanSessionNoticeShown = true;
+            toast('LAN settings session expired. Reopen the secure settings URL shown by mailpouch.', 'warn');
           }
         } catch (_) { /* not JSON — not ours */ }
       }
@@ -211,6 +222,7 @@ ${buildStyles(cspNonce)}
       case 'detectCertPath':            return detectCertPath();
       case 'searchBridgePath':          return searchBridgePath();
       case 'togglePw':                  return togglePw(el.dataset.target);
+      case 'clearAuxiliarySecret':      return clearAuxiliarySecret(el.dataset.secret);
       case 'uploadCertBridge':          return document.getElementById('bridge-cert-file').click();
       case 'setMode':                   return setMode(el.dataset.mode);
       case 'updateSmtpTokenVisibility': return updateSmtpTokenVisibility();
@@ -487,6 +499,7 @@ ${buildStyles(cspNonce)}
     const id = document.getElementById('af-id').value;
     const isEdit = !!id;
     const body = {
+      configResetGeneration: cfg?.configResetGeneration ?? 0,
       name: document.getElementById('af-name').value.trim(),
       providerType: document.getElementById('af-provider').value,
       imapHost: document.getElementById('af-imap-host').value.trim(),
@@ -511,14 +524,20 @@ ${buildStyles(cspNonce)}
       toast('Save failed: ' + (errBody?.error || r.status), 'err');
       return;
     }
+    const result = await r.json().catch(() => null);
     closeAccountForm();
     refreshAccounts();
+    if (result?.restartRequired === true) {
+      toast('Account saved. Restart the MCP server before using this change.', 'ok');
+    } else {
+      toast(isEdit ? 'Account updated.' : 'Account added.', 'ok');
+    }
   }
 
   function activateAccount(id) {
     showConfirm({
-      title: 'Restart required',
-      body:  'Switching the active account requires a server restart. Continue?',
+      title: 'Switch active account?',
+      body:  'New tool calls will use this account by default when the running server can switch live. Existing calls are not interrupted; otherwise you will be asked to restart.',
       label: 'Switch account',
       btnClass: 'btn-primary',
       onConfirm: async () => {
@@ -526,13 +545,19 @@ ${buildStyles(cspNonce)}
           method: 'POST',
           headers: { 'X-CSRF-Token': CSRF },
         });
+        const result = await r.json().catch(() => null);
         if (!r.ok) {
           if (__mpReloading) return;
-          const errBody = await r.json().catch(() => null);
-          toast('Activate failed: ' + (errBody?.error || r.status), 'err');
+          toast('Activate failed: ' + (result?.error || r.status), 'err');
           return;
         }
-        toast('Active account switched. Restart the MCP server to apply (Tray → Quit then relaunch, or restart_server tool).', 'ok');
+        // Fail closed: a successful response without an explicit false
+        // cannot prove that this process rebound every account-scoped service.
+        if (result?.restartRequired !== false) {
+          toast('Active account saved. Restart the MCP server to apply it (Tray → Quit then relaunch, or restart_server tool).', 'ok');
+        } else {
+          toast('Active account switched. New tool calls now use it by default.', 'ok');
+        }
         refreshAccounts();
       },
     });
@@ -548,13 +573,18 @@ ${buildStyles(cspNonce)}
           method: 'DELETE',
           headers: { 'X-CSRF-Token': CSRF },
         });
+        const result = await r.json().catch(() => null);
         if (!r.ok) {
           if (__mpReloading) return;
-          const errBody = await r.json().catch(() => null);
-          toast('Delete failed: ' + (errBody?.error || r.status), 'err');
+          toast('Delete failed: ' + (result?.error || r.status), 'err');
           return;
         }
         refreshAccounts();
+        if (result?.restartRequired === true) {
+          toast('Account deleted. Restart the MCP server before relying on the updated account list.', 'ok');
+        } else {
+          toast('Account deleted.', 'ok');
+        }
       },
     });
   }
@@ -976,6 +1006,7 @@ ${buildStyles(cspNonce)}
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
         body: JSON.stringify({
+          configResetGeneration: cfg?.configResetGeneration ?? 0,
           connection: {
             username,
             password,
@@ -990,9 +1021,13 @@ ${buildStyles(cspNonce)}
         }),
       });
       if (!r.ok) throw new Error(await r.text());
+      const result = await r.json().catch(() => null);
       W.username = username;
       W.debug    = debug;
       W.credsSaved = true;
+      if (result?.restartRequired === true) {
+        toast('Credentials saved. Restart the MCP server before using the updated account.', 'ok');
+      }
       wizShowStep(3);
     } catch(e) {
       toast('Could not save credentials: ' + e.message, 'err');
@@ -1026,7 +1061,7 @@ ${buildStyles(cspNonce)}
       const r = await fetch('/api/preset', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
-        body: JSON.stringify({ preset }),
+        body: JSON.stringify({ preset, configResetGeneration: cfg?.configResetGeneration ?? 0 }),
       });
       if (!r.ok) throw new Error('Save failed');
       W.presetSaved = true;
@@ -1365,6 +1400,9 @@ ${buildStyles(cspNonce)}
     set('sl-base-url',       cn.simpleloginBaseUrl || '');
     set('pass-access-token', cn.passAccessToken    ? '••••••••' : '');
     set('pass-cli-path',     cn.passCliPath        || '');
+    // A fresh server snapshot supersedes any pending clear selected before a
+    // save/reload. Keep the flags scoped to one deliberate save attempt.
+    pendingAuxiliarySecretClears = { simpleloginApiKey: false, passAccessToken: false };
     set('settings-port', c.settingsPort || 8766);
     checkPortMismatch();
     const logsTabBtn = document.getElementById('logs-tab-btn'); if (logsTabBtn) logsTabBtn.style.display = cn.debug ? '' : 'none';
@@ -1434,13 +1472,36 @@ ${buildStyles(cspNonce)}
     if (tokenRow) tokenRow.style.display = isBridge ? 'none' : '';
   }
 
+  function clearAuxiliarySecret(secret) {
+    const fields = {
+      simpleloginApiKey: { inputId: 'sl-api-key', label: 'SimpleLogin API key' },
+      passAccessToken: { inputId: 'pass-access-token', label: 'Proton Pass access token' },
+    };
+    const field = fields[secret];
+    if (!field) return;
+    showConfirm({
+      title: 'Clear ' + field.label + '?',
+      body: 'This will disable the integration when you save the configuration. It cannot be undone.',
+      label: 'Clear on save',
+      onConfirm: function() {
+        const input = document.getElementById(field.inputId);
+        if (input) input.value = '';
+        pendingAuxiliarySecretClears[secret] = true;
+        toast(field.label + ' will be cleared when you save configuration.', 'warn');
+      },
+    });
+  }
+
   async function saveSetup() {
     const btn = document.getElementById('save-btn');
     btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Saving…';
     try {
       var tlsModeEl = document.getElementById('tls-mode');
       var tlsModeVal = tlsModeEl ? tlsModeEl.value : 'starttls';
+      const simpleloginApiKey = get('sl-api-key');
+      const passAccessToken = get('pass-access-token');
       const body = {
+        configResetGeneration: cfg?.configResetGeneration ?? 0,
         connection: {
           username:       get('username'),
           password:       get('password'),
@@ -1455,9 +1516,16 @@ ${buildStyles(cspNonce)}
           debug:            document.getElementById('debug-mode').checked,
           autoStartBridge:  document.getElementById('auto-start-bridge').checked,
           allowInsecureBridge: !!(document.getElementById('allow-insecure-bridge') && document.getElementById('allow-insecure-bridge').checked),
-          simpleloginApiKey:  get('sl-api-key'),
+          simpleloginApiKey,
           simpleloginBaseUrl: get('sl-base-url'),
-          passAccessToken:    get('pass-access-token'),
+          passAccessToken,
+          // A redacted/keychain-backed secret reaches the browser as blank.
+          // Only send a destructive clear flag after the operator used Clear;
+          // typing a replacement cancels that pending clear for this save.
+          ...(pendingAuxiliarySecretClears.simpleloginApiKey && !simpleloginApiKey.trim()
+            ? { clearSimpleloginApiKey: true } : {}),
+          ...(pendingAuxiliarySecretClears.passAccessToken && !passAccessToken.trim()
+            ? { clearPassAccessToken: true } : {}),
           passCliPath:        get('pass-cli-path'),
         },
         requireDestructiveConfirm: !!(document.getElementById('require-destructive-confirm') && document.getElementById('require-destructive-confirm').checked),
@@ -1472,7 +1540,10 @@ ${buildStyles(cspNonce)}
         body: JSON.stringify(body),
       });
       if (!r.ok) throw new Error(await r.text());
-      toast('Configuration saved.', 'ok');
+      const result = await r.json().catch(() => null);
+      toast(result?.restartRequired === true
+        ? 'Configuration saved. Restart the MCP server before using the updated account.'
+        : 'Configuration saved.', 'ok');
       await refresh();
     } catch(e) {
       toast('Save failed: ' + e.message, 'err');
@@ -1774,7 +1845,7 @@ ${buildStyles(cspNonce)}
     const r = await fetch('/api/preset', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
-      body: JSON.stringify({ preset }),
+      body: JSON.stringify({ preset, configResetGeneration: cfg?.configResetGeneration ?? 0 }),
     });
     if (!r.ok) { toast('Failed to apply preset', 'err'); return; }
     await refresh();
@@ -1813,7 +1884,10 @@ ${buildStyles(cspNonce)}
     const r = await fetch('/api/config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
-      body: JSON.stringify({ permissions: { preset, tools } }),
+      body: JSON.stringify({
+        configResetGeneration: cfg?.configResetGeneration ?? 0,
+        permissions: { preset, tools },
+      }),
     });
     if (r.ok) { toast('Permissions saved. Changes take effect within 15 s.', 'ok'); await refresh(); }
     else       { toast('Save failed.', 'err'); }
@@ -2100,7 +2174,10 @@ ${buildStyles(cspNonce)}
       const r = await fetch('/api/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
-        body: JSON.stringify({ responseLimits: gatherResponseLimits() }),
+        body: JSON.stringify({
+          configResetGeneration: cfg?.configResetGeneration ?? 0,
+          responseLimits: gatherResponseLimits(),
+        }),
       });
       if (r.ok) {
         statusEl.textContent = 'Saved. Changes take effect within 15 seconds.';
@@ -2164,8 +2241,21 @@ ${buildStyles(cspNonce)}
       label: 'Reset',
       onConfirm: async () => {
         const r = await fetch('/api/reset', { method: 'POST', headers: { 'X-CSRF-Token': CSRF } });
-        if (r.ok) { toast('Config reset.', 'ok'); await refresh(); }
-        else       { toast('Reset failed.', 'err'); }
+        let result = null;
+        try { result = await r.json(); } catch {}
+        if (r.ok) {
+          const manualKeychainCleanupRequired = result?.manualKeychainCleanupRequired === true
+            || result?.credentialsCleared === false;
+          const message = manualKeychainCleanupRequired
+            ? 'Settings reset, but some OS-keychain credentials could not be removed. Delete them manually before restarting; live credential hydration is disabled.'
+            : result?.restartRequired === true
+              ? 'Settings reset. Restart the MCP server before new calls use the defaults.'
+              : 'Settings reset. Live services now use the defaults.';
+          toast(message, manualKeychainCleanupRequired ? 'warn' : 'ok');
+          await refresh();
+        } else {
+          toast(result?.error || 'Reset failed.', 'err');
+        }
       },
     });
   }
@@ -2356,7 +2446,6 @@ ${buildStyles(cspNonce)}
     const toolOverrides = {};
     if (document.getElementById('gm-deny-delete').checked) {
       toolOverrides.delete_email = false;
-      toolOverrides.bulk_delete = false;
       toolOverrides.bulk_delete_emails = false;
     }
     if (document.getElementById('gm-deny-send').checked) {
@@ -2480,7 +2569,7 @@ ${buildStyles(cspNonce)}
     <div class="field" style="margin-bottom:12px">
       <label style="font-size:12px;color:var(--text2)">Advanced</label>
       <div style="margin-top:4px;display:flex;flex-direction:column;gap:4px">
-        <label><input type="checkbox" id="gm-deny-delete"> Disable deletion tools (delete_email / bulk_delete*)</label>
+        <label><input type="checkbox" id="gm-deny-delete"> Disable deletion tools (delete_email / bulk_delete_emails)</label>
         <label><input type="checkbox" id="gm-deny-send"> Disable sending (send_email / reply_to_email / forward_email)</label>
       </div>
     </div>

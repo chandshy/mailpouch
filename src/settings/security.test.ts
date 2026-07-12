@@ -11,6 +11,9 @@ import {
   generateAccessToken,
   hasValidAccessToken,
   hasValidBootstrapToken,
+  SettingsBrowserSessionStore,
+  SETTINGS_SESSION_COOKIE_NAME,
+  formatSettingsSessionCookie,
   getPrimaryLanIP,
   clientIP,
   tryGenerateSelfSignedCert,
@@ -410,6 +413,55 @@ describe('hasValidBootstrapToken', () => {
     const token = generateAccessToken();
     const req = mockReqWithHeaders({});
     expect(hasValidBootstrapToken(req, makeURL('?token=nope'), token)).toBe(false);
+  });
+});
+
+// ─── LAN browser-session exchange ────────────────────────────────────────────
+
+describe('SettingsBrowserSessionStore', () => {
+  function mockReqWithCookie(cookie?: string) {
+    return { headers: cookie ? { cookie } : {} } as unknown as import('http').IncomingMessage;
+  }
+
+  it('accepts only the server-issued HttpOnly-cookie value', () => {
+    const sessions = new SettingsBrowserSessionStore();
+    const value = sessions.issue();
+    const wrongValue = `${value[0] === "A" ? "B" : "A"}${value.slice(1)}`;
+
+    expect(value).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(sessions.hasValidSession(mockReqWithCookie(`${SETTINGS_SESSION_COOKIE_NAME}=${value}`))).toBe(true);
+    expect(sessions.hasValidSession(mockReqWithCookie(`${SETTINGS_SESSION_COOKIE_NAME}=${wrongValue}`))).toBe(false);
+    expect(sessions.hasValidSession(mockReqWithCookie(`other=value; ${SETTINGS_SESSION_COOKIE_NAME}=${value}`))).toBe(true);
+  });
+
+  it('expires sessions in memory even before the browser closes', () => {
+    vi.useFakeTimers();
+    try {
+      const sessions = new SettingsBrowserSessionStore(100);
+      const value = sessions.issue();
+      const req = mockReqWithCookie(`${SETTINGS_SESSION_COOKIE_NAME}=${value}`);
+      expect(sessions.hasValidSession(req)).toBe(true);
+
+      vi.advanceTimersByTime(101);
+      expect(sessions.hasValidSession(req)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('formats non-persistent SameSite cookies and adds Secure only for HTTPS', () => {
+    const value = new SettingsBrowserSessionStore().issue();
+    const httpCookie = formatSettingsSessionCookie(value, false);
+    const httpsCookie = formatSettingsSessionCookie(value, true);
+
+    expect(httpCookie).toContain(`${SETTINGS_SESSION_COOKIE_NAME}=${value}`);
+    expect(httpCookie).toContain('Path=/');
+    expect(httpCookie).toContain('HttpOnly');
+    expect(httpCookie).toContain('SameSite=Strict');
+    expect(httpCookie).not.toContain('Max-Age=');
+    expect(httpCookie).not.toContain('Secure');
+    expect(httpsCookie).toContain('Secure');
+    expect(() => formatSettingsSessionCookie('not-a-session', true)).toThrow(/256-bit base64url/);
   });
 });
 
