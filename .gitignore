@@ -51,3 +51,6 @@ test/e2e/.tmp/
 # `/tmp/...` patterns (which gitignore interprets relative to repo root) matched
 # nothing. The `mailpouch-*.tgz` line covers a stray local `npm pack`.
 mailpouch-*.tgz
+
+# Local continuous-improvement state and audit history
+.improvement-loop/

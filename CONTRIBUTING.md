@@ -158,7 +158,7 @@ docs/
 ```bash
 npm test              # Run all tests
 npm run test:watch    # Watch mode
-npm run test:coverage # With coverage report
+npm run test:coverage # Generate coverage and enforce the regression ratchet
 ```
 
 ### Manual Testing
@@ -175,6 +175,14 @@ When adding new features:
 - Test error conditions
 - Test edge cases (empty inputs, null values, etc.)
 - Test with Proton Bridge running and stopped
+
+`npm run test:coverage` writes the local (ignored) report to `coverage/` and
+checks its four global metrics against the committed
+[`scripts/coverage-baseline.json`](scripts/coverage-baseline.json). The
+baseline is a regression floor, not an aspirational absolute threshold: raise
+it deliberately after a measured run and review the baseline change alongside
+the tests that improved coverage. CI runs this ratchet once on Ubuntu with Node
+22.
 
 ## Adding New Features
 

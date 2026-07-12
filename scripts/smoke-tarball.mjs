@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 // Pack the package as it would be published, install it into a clean temp
-// directory, then exec the `mailpouch` binary with `--version`. Catches:
+// directory, execute every published bin with `--version`, and exercise the
+// published improvement-loop scripts. Catches:
 //   - missing `bin` entry / wrong shebang / wrong mode
 //   - files omitted from `files` (e.g. `dist/index.js` not shipped)
 //   - ESM/CJS mismatch that boots locally but fails on a fresh install
 //
-// Exit 0 — binary boots and prints the expected version.
-// Exit 1 — pack failed, install failed, or `--version` output is wrong.
+// Exit 0 — installed bins and package scripts work from the tarball.
+// Exit 1 — packing, installation, an installed entrypoint, or a script fails.
 
 import { mkdtemp, rm, readFile, copyFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -63,22 +64,79 @@ try {
     throw new Error(`npm install <tarball> failed (exit ${installRes.status}): ${installRes.stderr || installRes.stdout}`);
   }
 
-  // 3. Run the binary's --version. We use the unpacked dist entry path
-  //    directly to avoid PATH wiring issues with `npm install --prefix`.
+  // 3. Verify the package entry exists, then execute every installed bin shim.
+  //    Running dist/index.js directly only proves the source entry boots; it
+  //    misses a broken `bin` mapping, lost shebang, or non-executable shim.
   const entry = join(installDir, "node_modules", pkg.name, pkg.main);
   if (!existsSync(entry)) {
     throw new Error(`Installed entry missing: ${entry}`);
   }
-  const versionRes = spawnSync("node", [entry, "--version"], {
+
+  const bins = typeof pkg.bin === "object" && pkg.bin !== null ? Object.keys(pkg.bin) : [];
+  if (bins.length === 0) throw new Error("Package declares no bin shims to smoke-test");
+  const binOutputs = [];
+  for (const name of bins) {
+    const shim = join(
+      installDir,
+      "node_modules",
+      ".bin",
+      process.platform === "win32" ? `${name}.cmd` : name,
+    );
+    if (!existsSync(shim)) throw new Error(`Installed bin shim missing: ${shim}`);
+    const versionRes = spawnSync(shim, ["--version"], {
+      encoding: "utf-8",
+      timeout: 15_000,
+      // Windows cannot execute a .cmd shim directly; on POSIX this remains a
+      // direct exec, so it also catches a lost executable bit/shebang.
+      shell: process.platform === "win32",
+    });
+    if (versionRes.status !== 0) {
+      throw new Error(`${name} --version failed (exit ${versionRes.status}): ${versionRes.stderr || versionRes.stdout}`);
+    }
+    const out = (versionRes.stdout || "").trim();
+    if (!out.includes(PKG_VERSION)) {
+      throw new Error(`${name} --version output did not contain ${PKG_VERSION}: got "${out}"`);
+    }
+    binOutputs.push(`${name}=${out}`);
+  }
+
+  // The improvement commands are published in package.json, so verify the
+  // runner is present and usable from the installed package rather than only
+  // from the source checkout. The generated state stays inside installDir and
+  // is removed by the existing finally block.
+  const installedPackageDir = join(installDir, "node_modules", pkg.name);
+  const initLoopRes = spawnSync("npm", ["run", "--silent", "improve", "--", "init"], {
+    cwd: installedPackageDir,
     encoding: "utf-8",
     timeout: 15_000,
   });
-  if (versionRes.status !== 0) {
-    throw new Error(`mailpouch --version failed (exit ${versionRes.status}): ${versionRes.stderr || versionRes.stdout}`);
+  if (initLoopRes.status !== 0) {
+    throw new Error(
+      `installed npm run improve -- init failed (exit ${initLoopRes.status}): ${initLoopRes.stderr || initLoopRes.stdout}`
+    );
   }
-  const out = (versionRes.stdout || "").trim();
-  if (!out.includes(PKG_VERSION)) {
-    throw new Error(`mailpouch --version output did not contain ${PKG_VERSION}: got "${out}"`);
+  const loopSnapshot = join(installedPackageDir, ".improvement-loop", "snapshot.json");
+  if (!existsSync(loopSnapshot)) {
+    throw new Error(`Installed improvement loop did not create its snapshot: ${loopSnapshot}`);
+  }
+
+  const loopStatusRes = spawnSync(
+    "npm",
+    ["run", "--silent", "improve:status", "--", "--json"],
+    { cwd: installedPackageDir, encoding: "utf-8", timeout: 15_000 },
+  );
+  if (loopStatusRes.status !== 0) {
+    throw new Error(
+      `installed npm run improve:status failed (exit ${loopStatusRes.status}): ${loopStatusRes.stderr || loopStatusRes.stdout}`
+    );
+  }
+  try {
+    const status = JSON.parse(loopStatusRes.stdout);
+    if (!status || typeof status !== "object" || !status.counts || typeof status.counts.queued !== "number") {
+      throw new Error("status output is missing numeric backlog counts");
+    }
+  } catch (error) {
+    throw new Error(`installed improve:status returned invalid JSON: ${error.message}`);
   }
 
   // 4. Verify packed files include the native-tray JS shim (BUILD-006). The
@@ -103,6 +161,7 @@ try {
     "package/dist/index.js",
     "package/dist/settings-main.js",
     "package/dist/utils/tray.js",
+    "package/scripts/improvement-loop.mjs",
   ];
   const packedFiles = new Set(tgzListRes.stdout.split("\n").map((s) => s.trim()));
   const missing = REQUIRED_PACKED_FILES.filter((p) => !packedFiles.has(p));
@@ -112,7 +171,7 @@ try {
     );
   }
 
-  console.log(`tarball-smoke OK: ${tgzName} → ${out} (${REQUIRED_PACKED_FILES.length} required files present)`);
+  console.log(`tarball-smoke OK: ${tgzName} → ${binOutputs.join(", ")} (${REQUIRED_PACKED_FILES.length} required files present)`);
 } catch (e) {
   console.error(`tarball-smoke threw: ${e.message}`);
   exitCode = 1;

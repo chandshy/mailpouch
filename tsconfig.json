@@ -8,6 +8,8 @@
     "rootDir": "./src",
     "strict": true,
     "noImplicitOverride": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
     "isolatedModules": true,
     "esModuleInterop": true,
     "skipLibCheck": true,

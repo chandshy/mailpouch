@@ -4,7 +4,7 @@
 
 The pitch in one line: if you picked Proton Mail because you didn't want a third party reading your inbox, you don't suddenly want to hand a chatbot OAuth access to that same inbox so it can triage on your behalf. The usual "connect your email" integrations route everything through someone else's servers and ask for blanket scopes. Hand-rolled IMAP inside the agent is worse — no permission boundary, no audit trail, and the model holds your credentials in its context window. Neither option respects why you chose the provider in the first place.
 
-`mailpouch` runs locally and speaks to Proton Bridge over a TLS socket on your own machine; nothing leaves the box unless you asked it to. 76 tools across reading, sending, drafts, folders, search, analytics, aliases, Proton Pass, and system control, tiered into `core` / `extended` / `complete` so an agent that only reads doesn't burn context on Bridge lifecycle tools it will never call. Every connecting client gets its own grant with folder allowlists, IP pins, per-tool rate caps, expiry, and account binding — all hashed-args in the audit log, never the values. Delete, trash, spam, and alias removal round-trip through MCP elicitation for human confirmation before they execute. That last part sounds like theatre until you watch an agent try to empty a folder and get blocked mid-call.
+`mailpouch` runs locally and speaks to Proton Bridge over a TLS socket on your own machine; nothing leaves the box unless you asked it to. Up to 86 tools (83 canonical plus 3 meta-tools) cover reading, sending, drafts, folders, search, analytics, optional aliases and Proton Pass, plus system control. Tool tiers and capability-aware listing keep unconfigured companion tools out of an agent's context. Every connecting client gets its own grant with folder allowlists, IP pins, per-tool rate caps, expiry, and account binding — all hashed-args in the audit log, never the values. Delete, trash, spam, alias removal, and sensitive Pass retrieval round-trip through MCP elicitation for human confirmation before they execute.
 
 It is real because the primitives are real: OAuth 2.1 with PKCE S256, RFC 7591 dynamic client registration, RFC 8707 resource indicators, RFC 9728 protected-resource metadata, and an OAuth `client_credentials` grant so headless agents authenticate too — every agent gets its own gated, revocable identity. Credentials live in the OS keychain. A local FTS5 index with BM25 ranking handles phrase, boolean, prefix, and column-filter queries so your search terms never leave your laptop. Desktop notifications use native `osascript` / `notify-send` / `powershell.exe` with no added dependency; webhook dispatch auto-detects CloudEvents 1.0, Slack, or Discord, signs with HMAC, and retries with eight-attempt exponential backoff. So how do you point it at your Bridge install and wire up a client?
 
@@ -14,7 +14,7 @@ It is real because the primitives are real: OAuth 2.1 with PKCE S256, RFC 7591 d
 [![Node.js](https://img.shields.io/badge/node-%3E%3D20.0.0-brightgreen.svg)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-6.0-blue.svg)](https://www.typescriptlang.org/)
 [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-1.29+-green.svg)](https://github.com/modelcontextprotocol/sdk)
-[![Tests](https://img.shields.io/badge/tests-2%2C205%20passing-brightgreen.svg)](#development)
+[![Tests](https://img.shields.io/badge/tests-Vitest-brightgreen.svg)](#development)
 
 **Read, compose, and manage your encrypted Proton Mail inbox from any AI assistant — over stdio or remote HTTP — with human-controlled permissions.**
 
@@ -29,7 +29,7 @@ Proton's Terms of Service ([proton.me/legal/terms](https://proton.me/legal/terms
 This server is designed to keep access **user-initiated**, not autonomous:
 
 - Default permission preset is `read_only`. Sending, deletion, and folder mutation require explicit user opt-in via the settings UI.
-- Destructive tools (delete / empty_trash / move-to-trash / move-to-spam / `alias_delete` / `pass_get`) require explicit confirmation. With MCP elicitation-capable clients, the server prompts the user out-of-band before executing; non-elicitation clients must pass `{ confirmed: true }`.
+- Destructive tools (delete / empty_trash / move-to-trash / move-to-spam / alias deletion / sensitive Pass retrieval) require explicit confirmation. With MCP elicitation-capable clients, the server prompts the user out-of-band before executing; non-elicitation clients must pass `{ confirmed: true }`.
 - Elevated permissions require out-of-band human approval (settings UI button or terminal), not an agent-only grant.
 - The settings UI shows a first-run ToS acknowledgement the user must click through before credentials are accepted.
 
@@ -70,10 +70,10 @@ That's it. The sections below cover everything in depth.
 
 ## Key Features
 
-- **76 tools** — 73 categorized across 11 categories (reading, search, analytics, sending, drafts, scheduling, follow-up reminders, folder management, bulk actions, deletion, Bridge/server lifecycle, plus optional companion services: SimpleLogin aliases, Proton Pass, local FTS5 search), plus 3 always-available meta-tools (`setup_status`, `request_permission_escalation`, `check_escalation_status`). See [`src/config/schema.ts`](src/config/schema.ts) (`ALL_TOOLS`, `TOOL_CATEGORIES`, `ALWAYS_AVAILABLE_TOOLS`) for the canonical inventory.
+- **Up to 86 tools** — 83 canonical tools across 11 categories plus 3 always-available meta-tools (`setup_status`, `request_permission_escalation`, `check_escalation_status`). SimpleLogin and Proton Pass groups are listed only when configured. See [`src/config/schema.ts`](src/config/schema.ts) for the canonical inventory.
 - **Two transports** — stdio (default, Claude Desktop) and HTTP (remote / self-host). HTTP is OAuth-only: `authorization_code` + PKCE-S256 for interactive agents and `client_credentials` for headless service accounts, with RFC 7591 Dynamic Client Registration, RFC 8414 authorization-server metadata, and RFC 9728 protected-resource metadata. Per-caller token-bucket rate limiting on every endpoint.
 - **Progressive tool tiering** — `core` / `extended` / `complete` controls how many tools land in the client's `ListTools` response, so context isn't burned on tools you don't use. Configurable via `toolTier` or `MAILPOUCH_TIER`.
-- **Destructive-tool confirmation** — uses MCP elicitation when the client supports it (Claude Desktop, Cline) so the user sees a prompt before any delete / trash / spam / `alias_delete` / `pass_get` runs. Falls back to a required `{ confirmed: true }` argument for clients without elicitation.
+- **Destructive-tool confirmation** — uses MCP elicitation when the client supports it (Claude Desktop, Cline) so the user sees a prompt before delete, trash, spam, alias deletion, server lifecycle, or sensitive Pass retrieval. Falls back to a required `{ confirmed: true }` argument for clients without elicitation.
 - **5 permission presets** — read-only by default; write access requires explicit opt-in. Per-tool overrides and rate limits via the **Custom** preset.
 - **Human-gated escalation** — agents request elevated permissions, you approve via browser UI or terminal; the agent cannot approve its own requests.
 - **Browser-based settings UI** at `localhost:8766` — auto-starts with the daemon; setup wizard, live connection test, per-tool toggles, escalation approval panel, per-agent Approve/Deny.
@@ -81,12 +81,12 @@ That's it. The sections below cover everything in depth.
 - **6 MCP prompts** — triage inbox, compose reply, daily briefing, find subscriptions, thread summary, draft in my voice.
 - **MCP Resources** — individual emails and folders addressable via `email://` and `folder://` URIs.
 - **Scheduled email delivery** — queue emails for future sending; survives server restarts. Plus `remind_if_no_reply` for outbound follow-ups gated on inbox replies.
-- **Optional companion services** — SimpleLogin alias management (6 tools, requires API key), Proton Pass via pass-cli (3 tools, requires PAT), local FTS5 full-text index (3 tools, requires `better-sqlite3`).
+- **Optional companion services** — SimpleLogin alias management (16 tools, requires API key) and Proton Pass via pass-cli (4 tools, requires PAT) are omitted from `ListTools` until configured; local FTS5 full-text index remains available when `better-sqlite3` is installed.
 - **TLS-strict by default** — refuses to connect to localhost Bridge without a pinned cert, requires Bridge ≥ `3.22.0`, exponential backoff on SMTP abuse-signal responses.
-- **Multi-account** — configure more than one Proton / IMAP account; hot-swap the active account from the Settings UI with no server restart. Tools accept an optional `account_id` argument to route a single call to a specific account. See [`src/accounts/`](src/accounts/).
+- **Multi-account** — configure more than one Proton / IMAP account; a running daemon hot-swaps the active account, while standalone settings and failed live rebinds explicitly request a restart. Tools accept an optional `account_id` argument to route a single call to a specific account. See [`src/accounts/`](src/accounts/).
 - **Per-agent grants** — each MCP client (identified by its OAuth `client_id`) is gated by its own approvable grant, with optional folder allowlists, IP pins, per-tool rate caps, expiry, and account binding. Separate from the global preset and the escalation flow. See [`src/agents/`](src/agents/).
 - **Live notifications** — desktop toasts (no extra deps) and outbound webhooks (CloudEvents / Slack / Discord, HMAC-signed, retried) fire on grant-state changes. See [`src/notifications/`](src/notifications/).
-- **2,205 tests passing** (Vitest); minimal `any` usage in production source (private Node.js readline internals only).
+- **Strict TypeScript and a comprehensive Vitest suite**; unused locals and parameters are compiler errors.
 
 **Documentation:** [HELP.md](HELP.md) (task-oriented how-tos) · [README_FIRST_AI.md](README_FIRST_AI.md) (agent API reference) · [docs/index.md](docs/index.md) (full index)
 
@@ -178,7 +178,7 @@ Install only if you plan to use the corresponding tool group:
 | Optional dep | Enables | Install |
 |---|---|---|
 | `better-sqlite3` | `fts_search` / `fts_rebuild` / `fts_status` (local FTS5 index) | `npm install better-sqlite3` |
-| `pass-cli` (Proton's Go CLI) | `pass_list` / `pass_search` / `pass_get` | See [`pass-cli`](https://github.com/ProtonMail/pass-cli); set a Pass PAT in the settings UI |
+| `pass-cli` (Proton's Go CLI) | `pass_list` / `pass_search` / `pass_get` / `pass_totp` | See [`pass-cli`](https://github.com/ProtonMail/pass-cli); set a Pass PAT in the settings UI |
 | SimpleLogin API key | `alias_*` tools | Generate at [app.simplelogin.io](https://app.simplelogin.io/dashboard/api_key); paste in settings UI |
 
 Tools in unconfigured groups return a clean configuration error rather than failing silently.
@@ -297,7 +297,7 @@ The config file grows two fields alongside the existing `connection` block:
 ```
 
 - The **Accounts** tab in the settings UI handles add / edit / activate / delete. The server refuses to delete the last remaining account.
-- `AccountManager` keeps one `{ imap, smtp, spec }` triple per configured account. Saving a new active selection emits an `active-changed` event and the module-level service references hot-swap — no restart required.
+- `AccountManager` keeps one `{ imap, smtp, spec }` triple per configured account. In a running daemon, saving a new active selection emits an `active-changed` event that rebinds active-account services and clears prior-account caches. Standalone settings (or a failed live rebind) reports that a restart is required.
 - Tools accept an optional `account_id` argument. When omitted, the call runs against `activeAccountId`; when present, the dispatcher routes to the named account. Agent grants can pin a client to a single `accountId` via `conditions`.
 - Legacy single-account configs are migrated lazily: the first load with `accounts: []` lifts the top-level `connection` fields into a `primary` account. No manual migration step.
 
@@ -402,14 +402,14 @@ Configuration is stored in `~/.mailpouch.json` and managed via the settings UI �
 | `MAILPOUCH_MACHINE_SECRET` | derived from host | Override the machine-binding secret used to encrypt at-rest credentials |
 | `MAILPOUCH_FORCE_STDIO` | unset | Force stdio for this spawn even if the config has `remoteMode: true`. Set on a stdio MCP-client entry (e.g. Claude Code) so it speaks stdio instead of starting the HTTP server. |
 | `MAILPOUCH_INSECURE_BRIDGE` | unset | Per-launch opt-in to localhost Bridge without a pinned cert |
-| `MAILPOUCH_TIER` | `complete` | Tool-tier override: `core` / `extended` / `complete` |
+| `MAILPOUCH_TIER` | `complete` | Tool-tier override: `core` (30 tools), `extended` (80), or `complete` (up to 86, depending on optional integrations) |
 | `PORT` | `8766` | Override settings UI HTTP server port |
 
 ---
 
 ## Available Tools
 
-**73 tools across 11 categories.** This README lists categories and counts; see [`src/config/schema.ts`](src/config/schema.ts) (`ALL_TOOLS` and `TOOL_CATEGORIES`) for the canonical, machine-checkable inventory.
+**83 canonical tools across 11 categories, plus 3 always-available meta-tools.** Optional companion groups are listed only when configured; see [`src/config/schema.ts`](src/config/schema.ts) for the machine-checkable inventory.
 
 | Category | Tools | Default tier | Risk | Permission required |
 |---|---:|---|---|---|
@@ -419,13 +419,13 @@ Configuration is stored in `~/.mailpouch.json` and managed via the settings UI �
 | System | 5 | `core` | safe | always available |
 | Drafts & Scheduling | 9 | `extended` | moderate | `supervised`, `send_only`, `full` |
 | Folder Management | 5 | `extended` | moderate | `supervised`, `full` |
-| Email Actions | 14 | `extended` | moderate | `supervised`, `full` |
-| SimpleLogin Aliases *(optional)* | 6 | `extended` | moderate | enabled when API key present |
-| Proton Pass *(optional)* | 3 | `extended` | moderate | enabled when PAT + `pass-cli` present |
+| Email Actions | 16 | `extended` | moderate | `supervised`, `full` |
+| SimpleLogin Aliases *(optional)* | 16 | `extended` | moderate | listed when API key is present |
+| Proton Pass *(optional)* | 4 | `extended` | moderate | listed when a PAT is present; calls require `pass-cli` |
 | Deletion | 3 | `complete` | destructive | `full` (capped at 20/hr in `supervised`) |
 | Bridge & Server Control | 3 | `complete` | destructive | mixed; `start_bridge` always available |
 
-Plus **2 always-available escalation tools** (`request_permission_escalation`, `check_escalation_status`) outside the category registry.
+Plus **3 always-available meta-tools**: `setup_status`, `request_permission_escalation`, and `check_escalation_status`.
 
 ### Notable tools worth calling out
 
@@ -508,12 +508,12 @@ The same standalone behaviour is available from the main binary via `mailpouch -
 Tabs:
 
 - **Setup** — credentials, SMTP/IMAP hosts and ports, Bridge TLS certificate, Optional Integrations (SimpleLogin API key, Proton Pass PAT + CLI path), debug mode, auto-start Bridge, insecure-connection toggle, destructive-confirm toggle, desktop notifications toggle, auto-open approval window toggle, settings port
-- **Accounts** — per-account Bridge credentials; hot-swap the active account
+- **Accounts** — per-account Bridge credentials; live active-account switching with an explicit restart fallback
 - **Permissions** — preset selector, per-tool enable/rate-limit toggles, tool-tier (`core` / `extended` / `complete`), destructive-confirm toggle
 - **Agents** — per-client (OAuth `client_id`) approvable grants with folder allowlists, IP pins, per-tool rate caps, expiry, and account binding
 - **Status** — server info, MCP config snippet, live connectivity check, escalation audit log, config reset
 
-Pending escalation requests appear as a full-page banner above the tabs. A **Logs** tab appears automatically when debug mode is enabled. Changes propagate to the running MCP server within 15 s — no restart required.
+Pending escalation requests appear as a full-page banner above the tabs. A **Logs** tab appears automatically when debug mode is enabled. Most settings changes propagate to the running MCP server within 15 s; active-account switching explicitly reports when a restart is required.
 
 ---
 
@@ -524,9 +524,9 @@ This server gives AI agents *controlled* access to sensitive email data. The sec
 | Layer | Mechanism |
 |---|---|
 | Permission gate | Every tool call checked against `~/.mailpouch.json` (refreshed every 15 s) |
-| Tool tiering | `core` / `extended` / `complete` controls the `ListTools` surface — agents can't call what they can't see |
+| Tool tiering | `core` / `extended` / `complete` controls the `ListTools` surface and context budget; permission gates remain the enforcement boundary |
 | Rate limiting | Per-tool sliding-window limits in-process; per-caller token-bucket on the HTTP transport |
-| Destructive confirmation | MCP elicitation prompt (or required `{ confirmed: true }`) on delete / trash / spam / `alias_delete` / `pass_get` |
+| Destructive confirmation | MCP elicitation prompt (or required `{ confirmed: true }`) on delete / trash / spam, SimpleLogin deletion, server lifecycle, and sensitive Pass retrieval |
 | Escalation gate | Privilege increases require explicit human approval via a separate channel |
 | Audit log | Append-only log of all escalation events at `~/.mailpouch.audit.jsonl` |
 | OAuth 2.1 + PKCE-S256 | Spec-compliant DCR + automatic consent; per-agent Approve/Deny is the human gate (HTTP transport) |
@@ -555,7 +555,7 @@ This server gives AI agents *controlled* access to sensitive email data. The sec
 
 ## Agent Grants
 
-The global permission preset gates *what tools exist*; an **agent grant** gates *which MCP client gets to use them*. **Every agent — local and remote — registers and must be approved.** A remote MCP host completes OAuth Dynamic Client Registration and mailpouch creates a `pending` grant keyed by its `client_id`; a **local stdio client** (e.g. Claude Desktop) is registered at the MCP handshake, keyed by its self-reported client name (`stdio:<hash>`) and shown with a 🖥 local marker. Nothing that client calls will succeed until you approve it; approve once and a local client is remembered across relaunches. To restore the legacy "local client is auto-trusted" behavior, set `gateLocalAgents: false` (or `MAILPOUCH_TRUST_LOCAL=1`).
+The global permission preset gates *what actions are allowed*; the selected tool tier controls what is advertised; and an **agent grant** gates which MCP client may use that allowed surface. **Every agent — local and remote — registers and must be approved.** A remote MCP host completes OAuth Dynamic Client Registration and mailpouch creates a `pending` grant keyed by its `client_id`; a **local stdio client** (e.g. Claude Desktop) is registered at the MCP handshake, keyed by its self-reported client name (`stdio:<hash>`) and shown with a 🖥 local marker. Nothing that client calls will succeed until you approve it; approve once and a local client is remembered across relaunches. To restore the legacy "local client is auto-trusted" behavior, set `gateLocalAgents: false` (or `MAILPOUCH_TRUST_LOCAL=1`).
 
 Grant lifecycle: `pending` → `active` → `revoked` | `expired`. Each grant carries:
 
@@ -626,8 +626,8 @@ Canonical code: [`src/notifications/desktop.ts`](src/notifications/desktop.ts), 
 
 ### Tool list looks short / missing tools
 
-- Check your **tool tier** under Permissions. `core` exposes 27 tools + 2 escalation = 29 visible; `extended` adds drafts, folders, actions, aliases, Pass; `complete` (default) exposes everything.
-- Optional companion tools (`alias_*`, `pass_*`, `fts_*`) only appear when their dependency / token is configured.
+- Check your **tool tier** under Permissions. `core` exposes 30 tools; `extended` exposes 80; `complete` exposes up to 86, with unconfigured SimpleLogin and Pass tools omitted.
+- SimpleLogin and Proton Pass tools (`alias_*`, `pass_*`) appear once their API key or PAT is configured. The `fts_*` tools remain listed and require `better-sqlite3` when called.
 
 ### Remote / HTTP client returns 401
 
@@ -658,7 +658,7 @@ npm install
 
 npm run build          # compile TypeScript to dist/
 npm run dev            # watch mode (recompiles on save)
-npm run test           # run test suite (Vitest, 2,205 tests)
+npm run test           # run the Vitest suite
 npm run test:coverage  # coverage report
 npm run lint           # TypeScript type check (tsc --noEmit)
 npm run settings       # start standalone settings UI (after build)
@@ -668,7 +668,7 @@ npm run settings       # start standalone settings UI (after build)
 
 ```
 src/
-  index.ts                    # Unified daemon: MCP server (76 tools, resources, prompts) + settings + tray
+  index.ts                    # Unified daemon: MCP server (up to 86 tools, resources, prompts) + settings + tray
   settings-main.ts            # Standalone settings UI CLI (for headless/SSH environments)
   # (Tray moved to native/tray/ — napi-rs binding around tauri-apps/tray-icon)
   config/

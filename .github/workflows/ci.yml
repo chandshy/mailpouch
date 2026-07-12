@@ -14,7 +14,13 @@ jobs:
     # OS × Node matrix covering every platform Proton Bridge ships on:
     #   - ubuntu-latest  (linux x64 — the primary Bridge target on Linux)
     #   - macos-latest   (darwin arm64 — Apple Silicon; current default runner)
-    #   - windows-latest (win32 x64 — Bridge's Windows target)
+    #   - windows-2022  (win32 x64 — Bridge's Windows target)
+    #
+    # Windows is pinned to 2022 rather than windows-latest. The latter moved to
+    # Server 2025 / Visual Studio 2026, which node-gyp 10 cannot discover when
+    # better-sqlite3 needs a source build (for example when a fresh Node 20
+    # patch has no prebuilt binary). Windows 2022 supplies the supported VS
+    # 2022 C++ toolchain while preserving the same win32-x64 coverage.
     #
     # macos-13 (Intel) was removed: GitHub's Intel runner pool is retired and
     # jobs consistently time out at the 6h limit without starting.
@@ -26,7 +32,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, macos-latest, windows-2022]
         node-version: [20.x, 22.x]
 
     name: ${{ matrix.os }} / node ${{ matrix.node-version }}
@@ -58,6 +64,13 @@ jobs:
     - name: Run tests
       run: npm test
 
+    # Run the coverage report once, on the current LTS Linux lane. The other
+    # matrix jobs still exercise portability without paying for the report six
+    # times. `test:coverage` also enforces scripts/coverage-baseline.json.
+    - name: Run coverage ratchet
+      if: matrix.os == 'ubuntu-latest' && matrix.node-version == '22.x'
+      run: npm run test:coverage
+
     - name: Build project
       run: npm run build
 
@@ -80,7 +93,5 @@ jobs:
     # against the tarball (until we publish to npm proper). A failure here
     # catches packaging regressions — files excluded from the "files" list,
     # missing bins, wrong shebang on Windows.
-    - name: Pack + inspect tarball
-      run: |
-        npm pack
-      shell: bash
+    - name: Install and smoke-test packed tarball
+      run: npm run check:tarball

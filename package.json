@@ -1,7 +1,7 @@
 {
   "name": "mailpouch",
   "version": "3.1.0",
-  "description": "mailpouch — MCP server that exposes Proton Mail via Proton Bridge. 70 tools, Resources, and Prompts for agentic email management with user-initiated permission controls.",
+  "description": "mailpouch — lean, permission-gated MCP access to Proton Mail via Proton Bridge, with up to 86 tools, resources, and prompts.",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
@@ -16,7 +16,7 @@
     "start": "node dist/index.js",
     "test": "vitest run --exclude test/agent-harness.test.ts",
     "test:watch": "vitest --exclude test/agent-harness.test.ts",
-    "test:coverage": "vitest run --coverage --exclude test/agent-harness.test.ts",
+    "test:coverage": "vitest run --coverage --exclude test/agent-harness.test.ts && node scripts/check-coverage.mjs",
     "test:harness": "vitest run test/agent-harness.test.ts --reporter=verbose --testTimeout=30000",
     "test:e2e:local": "docker compose -f test/e2e/fixtures/greenmail-compose.yml up -d && node scripts/wait-for-port.mjs 127.0.0.1 3143 30 && vitest run --config vitest.config.e2e.ts; r=$?; docker compose -f test/e2e/fixtures/greenmail-compose.yml down; exit $r",
     "test:e2e:local:keep": "vitest run --config vitest.config.e2e.ts",
@@ -29,6 +29,8 @@
     "check:licenses": "node scripts/check-licenses.mjs",
     "check:tarball": "node scripts/smoke-tarball.mjs",
     "check:bulk:live": "node scripts/check-bulk-live.mjs",
+    "improve": "node scripts/improvement-loop.mjs",
+    "improve:status": "node scripts/improvement-loop.mjs status",
     "preship:fast": "node scripts/preship.mjs fast",
     "preship": "node scripts/preship.mjs",
     "preship:release": "node scripts/preship.mjs release",
@@ -121,11 +123,14 @@
     "LICENSE",
     "CHANGELOG.md",
     "docs/**/*.md",
+    "!docs/quality-audit.md",
+    "!docs/audit-2026-05-28.md",
     "package.json",
     "native/tray/index.js",
     "native/tray/index.d.ts",
     "native/tray/*.node",
-    "scripts/install-hooks.mjs"
+    "scripts/install-hooks.mjs",
+    "scripts/improvement-loop.mjs"
   ],
   "overrides": {
     "hono": ">=4.12.25",
