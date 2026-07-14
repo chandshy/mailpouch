@@ -228,16 +228,17 @@ describe("scratch guard — non-destructive ownership contract", () => {
     const fake = fakeImap({ [collision]: [] }, { unclaimedScratch: true });
 
     const report = await new ScratchSession(fake.imap, TOKEN_A).cleanup({
-      // Leave enough wall-clock budget for instrumented coverage runs to
-      // observe the semantic retention error instead of only the deadline.
-      settleAfterPurgeMs: 250,
+      // Leave enough wall-clock budget for loaded CI runners to complete a
+      // full reconciliation round and record the semantic retention error
+      // instead of only the deadline (flaked at 250ms on macOS/Windows CI).
+      settleAfterPurgeMs: 5_000,
     });
 
     expect(report.ok).toBe(false);
     expect(report.errors.join(" ")).toMatch(/no positive mailbox-creation proof/i);
     expect(fake.deleted).toEqual([]);
     expect(fake.folders.has(collision)).toBe(true);
-  });
+  }, 20_000);
 
   it("cleans this run across system and scratch folders without touching other mail", async () => {
     const scratch = `Folders/${TOKEN_A}-1`;
@@ -533,14 +534,16 @@ describe("scratch guard — non-destructive ownership contract", () => {
     };
 
     const report = await new ScratchSession(fake.imap, TOKEN_A).cleanup({
-      settleAfterPurgeMs: 250,
+      // 5s so loaded CI runners complete a round before the deadline
+      // (flaked at 250ms on Windows CI).
+      settleAfterPurgeMs: 5_000,
     });
 
     expect(report.ok).toBe(false);
     expect(fake.deleted).toEqual([]);
     expect(fake.folders.has(scratch)).toBe(true);
     expect(report.errors.join(" ")).toMatch(/no positive mailbox-creation proof/i);
-  });
+  }, 20_000);
 
   it("does not delete when a second fresh session reveals foreign folder content", async () => {
     const scratch = `Folders/${TOKEN_A}-transient-empty`;
