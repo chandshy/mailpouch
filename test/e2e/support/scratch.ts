@@ -326,20 +326,36 @@ export class ScratchSession {
         if (allMailView) continue;
         let cleaned: OwnedMoveResult;
         try {
-          cleaned = (options.retainEmptyFolders && scratchPath) || requiresDirectOwnedDelete(path)
-            ? await this.imap.deleteOwnedMessages(path, this.token)
-            : await this.imap.moveOwnedToTrash(path, this.token);
+          const primary = (): Promise<OwnedMoveResult> =>
+            (options.retainEmptyFolders && scratchPath) || requiresDirectOwnedDelete(path)
+              ? this.imap.deleteOwnedMessages(path, this.token)
+              : this.imap.moveOwnedToTrash(path, this.token);
+          // Mutations dispatch in single-UID batches (BRIDGE_MUTATION_UID_BATCH_SIZE),
+          // so one call clears at most one owned message. Drain until an
+          // ownership rescan reports zero or a call stops making progress;
+          // a stalled scan falls through to the fail-closed residue report.
+          cleaned = await primary();
+          while (cleaned.remainingOwned > 0) {
+            const next = await primary();
+            cleaned = {
+              moved: cleaned.moved + next.moved,
+              remainingOwned: next.remainingOwned,
+              remainingTotal: next.remainingTotal,
+            };
+            if (next.moved === 0) break;
+          }
           // Proton can implement MOVE from folders/labels as a copy into Trash
           // while retaining the source association. Remove only the exact
           // owned UIDs from that source so Trash becomes the sole real mailbox;
           // All Mail is an immutable aggregate and is skipped above.
-          if (cleaned.remainingOwned > 0) {
+          while (cleaned.remainingOwned > 0) {
             const removed = await this.imap.deleteOwnedMessages(path, this.token);
             cleaned = {
               moved: cleaned.moved + removed.moved,
               remainingOwned: removed.remainingOwned,
               remainingTotal: removed.remainingTotal,
             };
+            if (removed.moved === 0) break;
           }
         } catch (error) {
           if (!scratchPath) continue;
@@ -398,9 +414,15 @@ export class ScratchSession {
     }
 
     try {
-      report.purgedMessages += await this.imap.purgeOwnedTrash(this.token);
+      // purgeOwnedTrash deletes at most one single-UID batch per call; drain
+      // until a fresh ownership scan finds nothing left to purge.
       // Bridge propagation is asynchronous; the final all-folder audit below
       // is authoritative after the configured settle window.
+      let purged: number;
+      do {
+        purged = await this.imap.purgeOwnedTrash(this.token);
+        report.purgedMessages += purged;
+      } while (purged > 0);
     } catch (error) {
       report.errors.push(`purge owned Trash messages failed: ${errorMessage(error)}`);
     }
