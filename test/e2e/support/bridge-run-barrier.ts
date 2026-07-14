@@ -102,6 +102,21 @@ export function retainedBridgeRecoveryRuns(
   const recoveryConfigRoot = resolve(
     options.recoveryConfigRoot ?? homedir(),
   );
+  // A non-directory config root must fail closed. Windows stat reports ENOENT
+  // (not ENOTDIR) for children of a regular file, which retainedConfigExists
+  // would misread as "config absent", so prove the root is a directory first.
+  try {
+    if (!statSync(recoveryConfigRoot).isDirectory()) {
+      throw new Error("not a directory");
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw new Error(
+        `Bridge E2E preflight could not inspect retained recovery config root at ${recoveryConfigRoot}`,
+        { cause: error },
+      );
+    }
+  }
 
   let names: string[];
   try {

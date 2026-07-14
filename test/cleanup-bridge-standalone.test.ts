@@ -11,9 +11,14 @@ import {
 } from "node:fs";
 import * as actualFs from "node:fs";
 import { createHash } from "node:crypto";
-import { tmpdir } from "node:os";
+import { tmpdir as osTmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+
+// The standalone cleaner requires the recovery clone path to resolve to
+// itself. macOS tmpdir is a /var → /private/var symlink and Windows runners
+// hand out 8.3 short paths, so canonicalize before building fixture roots.
+const tmpdir = (): string => actualFs.realpathSync.native(osTmpdir());
 import { acquireBridgeRunLease } from "./e2e/support/bridge-run-lease.js";
 import { resolveBridgeAuthorityScope } from "./e2e/support/bridge-authority-root.mjs";
 
@@ -321,6 +326,7 @@ vi.mock("imapflow", () => ({
 
 const roots: string[] = [];
 const ORIGINAL_HOME = process.env.HOME;
+const ORIGINAL_USERPROFILE = process.env.USERPROFILE;
 
 function writeHarness(
   root: string,
@@ -342,6 +348,8 @@ function writeHarness(
   writeFileSync(authorityConfigPath, config, { mode: 0o600 });
   writeFileSync(configPath, config, { mode: 0o600 });
   process.env.HOME = root;
+  // os.homedir() reads USERPROFILE on Windows, not HOME.
+  process.env.USERPROFILE = root;
   process.env.MAILPOUCH_E2E_AUTHORITY_CONFIG = authorityConfigPath;
   const authority = resolveBridgeAuthorityScope({
     authorityConfigPath,
@@ -427,6 +435,8 @@ afterEach(() => {
   delete process.env.MAILPOUCH_E2E_REARM_RESCUE_COPY_NONCE;
   if (ORIGINAL_HOME === undefined) delete process.env.HOME;
   else process.env.HOME = ORIGINAL_HOME;
+  if (ORIGINAL_USERPROFILE === undefined) delete process.env.USERPROFILE;
+  else process.env.USERPROFILE = ORIGINAL_USERPROFILE;
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
