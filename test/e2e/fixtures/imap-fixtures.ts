@@ -28,6 +28,7 @@ import { BRIDGE_MUTATION_COMMAND_MS } from "../support/time-budgets.mjs";
 import {
   isFatalCleanupError,
   MutationOutcomeUnknownError,
+  MutationRefusedError,
   requireMutationResult,
 } from "../support/mutation-result.mjs";
 import {
@@ -308,8 +309,15 @@ export class ImapFixtures {
         label,
         onDeadline: () => this.abortCleanupSession(new DeadlineExceededError(label)),
       });
-      return requireMutationResult(result, label);
+      return requireMutationResult(result, label, {
+        connectionUsable: this.client.usable === true,
+      });
     } catch (error) {
+      // A tagged NO with a usable connection is a definite single-UID no-op:
+      // nothing was applied, so the session stays healthy and the bounded
+      // convergence rounds retry after the server settles (Proton refuses
+      // moves of freshly-sent Sent messages until its backend catches up).
+      if (error instanceof MutationRefusedError) throw error;
       if (isFatalCleanupError(error)) {
         this.abortCleanupSession(error instanceof Error ? error : new Error(String(error)));
         throw error;
