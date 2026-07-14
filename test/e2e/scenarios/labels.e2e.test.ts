@@ -8,25 +8,21 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { startE2E, type E2EHarness } from "../mcp-client.js";
+import { bridgeConfigAvailable, startE2E, type E2EHarness } from "../mcp-client.js";
 import * as docker from "../support/docker.js";
 import { PROMO_CREDIT_KARMA, PROMO_RED_LOBSTER } from "../fixtures/seed-data.js";
-
-const LABEL_PRIORITY = "Labels/Priority";
 
 describe("labels.e2e", () => {
   let h: E2EHarness;
 
   beforeAll(async () => {
-    await docker.restart();
-    h = await startE2E();
-  }, 60_000);
+    if (!bridgeConfigAvailable()) await docker.restart();
+    h = await startE2E({ safe: true });
+    expect(h.scratch).toBeDefined();
+  });
 
   afterAll(async () => {
-    if (h) {
-      try { await h.imap.wipe(); } catch { /* ignore */ }
-      await h.close();
-    }
+    if (h) await h.close();
   });
 
   beforeEach(async () => {
@@ -39,34 +35,43 @@ describe("labels.e2e", () => {
       expect(Array.isArray(result.labels)).toBe(true);
     });
 
-    // Same folder-cache-lag pattern as folders.e2e.test.ts — bridge-only.
-    it.skip("lists a label after a Labels/* mailbox is created and synced — bridge-only", async () => {
-      await h.imap.createMailbox(LABEL_PRIORITY);
+    // Disabled for live Bridge because an auto-created label cannot later be
+    // deleted atomically. Greenmail retains label lifecycle coverage through
+    // the action scenarios.
+    it.skip("lists a label after a Labels/* mailbox is created and synced", async () => {
+      const labelFolder = await h.scratch!.create("labels");
+      const label = labelFolder.slice("Labels/".length);
       await h.call("sync_folders");
       const result = h.json<{ labels: { name: string }[] }>(await h.call("list_labels"));
-      expect(result.labels.some((l) => /Priority/i.test(l.name))).toBe(true);
+      expect(result.labels.some((l) => l.name.includes(label))).toBe(true);
     });
   });
 
   describe("get_emails_by_label", () => {
-    it("returns messages from the label folder", async () => {
-      await h.imap.createMailbox(LABEL_PRIORITY);
-      await h.imap.appendSeed(LABEL_PRIORITY, PROMO_CREDIT_KARMA);
-      await h.imap.appendSeed(LABEL_PRIORITY, PROMO_RED_LOBSTER);
+    it.skipIf(bridgeConfigAvailable())("returns messages from the label folder", async () => {
+      const labelFolder = await h.scratch!.create("labels");
+      const label = labelFolder.slice("Labels/".length);
+      await h.imap.appendSeed(labelFolder, PROMO_CREDIT_KARMA);
+      await h.imap.appendSeed(labelFolder, PROMO_RED_LOBSTER);
       await h.call("clear_cache");
       await h.call("sync_folders");
       const result = h.json<{ emails: { subject: string }[] }>(
-        await h.call("get_emails_by_label", { label: "Priority", limit: 20 })
+        await h.call("get_emails_by_label", { label, limit: 20 })
       );
       const subjects = result.emails.map((e) => e.subject);
-      expect(subjects.length).toBeGreaterThanOrEqual(2);
+      expect(subjects).toEqual(expect.arrayContaining([
+        PROMO_CREDIT_KARMA.subject,
+        PROMO_RED_LOBSTER.subject,
+      ]));
     });
 
     it("returns an actionable not-found error for a missing label (Cluster 6)", async () => {
-      const raw = await h.callRaw("get_emails_by_label", { label: "NoSuchLabel", limit: 10 });
+      const missingFolder = h.scratch!.path("labels");
+      const missingLabel = missingFolder.slice("Labels/".length);
+      const raw = await h.callRaw("get_emails_by_label", { label: missingLabel, limit: 10 });
       const text = "message" in raw ? raw.message : raw.content?.[0]?.text ?? "";
       // Names the resolved Labels/<name> folder; never the opaque generic string.
-      expect(text).toContain("Labels/NoSuchLabel");
+      expect(text).toContain(missingFolder);
       expect(text.toLowerCase()).toContain("not found");
       expect(text).not.toBe("An error occurred");
     });

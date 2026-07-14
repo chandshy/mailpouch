@@ -10,12 +10,12 @@
 // Exit 1 — packing, installation, an installed entrypoint, or a script fails.
 
 import { mkdtemp, rm, readFile, copyFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, openSync, closeSync, readFileSync, rmSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { spawnShellFreeSync } from "./lib/cross-platform-spawn.mjs";
+import { spawnShellFree } from "./lib/cross-platform-spawn.mjs";
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const pkg = JSON.parse(await readFile(join(ROOT, "package.json"), "utf-8"));
@@ -26,15 +26,15 @@ const stagingDir = await mkdtemp(join(tmpdir(), "preship-pack-"));
 const installDir = await mkdtemp(join(tmpdir(), "preship-smoke-"));
 let exitCode = 0;
 try {
-  const packRes = spawnShellFreeSync("npm", ["pack", "--pack-destination", stagingDir, "--silent", "--json"], {
+  const packRes = await runNpm(["pack", "--pack-destination", stagingDir, "--silent", "--json"], {
     cwd: ROOT,
-    encoding: "utf-8",
+    extraArgs: ["--ignore-scripts"],
   });
   // BUILD-007: every early-exit path throws so the catch/finally below runs
   // the staging/install cleanup and the single `exitCode` accumulator owns the
   // process exit code — no bare `process.exit(1)` that skips cleanup.
   if (packRes.error || packRes.status !== 0) {
-    throw new Error(`npm pack failed (exit ${packRes.status}): ${packRes.error?.message || packRes.stderr || packRes.stdout}`);
+    throw new Error(`npm pack failed (exit ${packRes.status}, signal ${packRes.signal ?? "none"}): ${packRes.error?.message || packRes.stderr || packRes.stdout}`);
   }
   let packReport;
   try {
@@ -53,8 +53,7 @@ try {
   // 2. Install the tarball into a fresh dir. `--no-package-lock` keeps the
   //    install lean; `--omit=optional` avoids architecture-specific native
   //    deps that aren't installable on every runner.
-  const installRes = spawnShellFreeSync(
-    "npm",
+  const installRes = await runNpm(
     [
       "install",
       "--no-package-lock",
@@ -64,10 +63,10 @@ try {
       "--omit=optional",
       tgzPath,
     ],
-    { encoding: "utf-8", timeout: 120_000 }
+    { timeout: 300_000, extraArgs: ["--ignore-scripts"] }
   );
   if (installRes.error || installRes.status !== 0) {
-    throw new Error(`npm install <tarball> failed (exit ${installRes.status}): ${installRes.error?.message || installRes.stderr || installRes.stdout}`);
+    throw new Error(`npm install <tarball> failed (exit ${installRes.status}, signal ${installRes.signal ?? "none"}): ${installRes.error?.message || installRes.stderr || installRes.stdout}`);
   }
 
   // 3. Verify the package entry exists, then execute every installed bin shim.
@@ -111,14 +110,13 @@ try {
   // from the source checkout. The generated state stays inside installDir and
   // is removed by the existing finally block.
   const installedPackageDir = join(installDir, "node_modules", pkg.name);
-  const initLoopRes = spawnShellFreeSync("npm", ["run", "--silent", "improve", "--", "init"], {
+  const initLoopRes = await runNpm(["run", "--silent", "improve", "--", "init"], {
     cwd: installedPackageDir,
-    encoding: "utf-8",
     timeout: 15_000,
   });
   if (initLoopRes.error || initLoopRes.status !== 0) {
     throw new Error(
-      `installed npm run improve -- init failed (exit ${initLoopRes.status}): ${initLoopRes.error?.message || initLoopRes.stderr || initLoopRes.stdout}`
+      `installed npm run improve -- init failed (exit ${initLoopRes.status}, signal ${initLoopRes.signal ?? "none"}): ${initLoopRes.error?.message || initLoopRes.stderr || initLoopRes.stdout}`
     );
   }
   const loopSnapshot = join(installedPackageDir, ".improvement-loop", "snapshot.json");
@@ -126,14 +124,13 @@ try {
     throw new Error(`Installed improvement loop did not create its snapshot: ${loopSnapshot}`);
   }
 
-  const loopStatusRes = spawnShellFreeSync(
-    "npm",
+  const loopStatusRes = await runNpm(
     ["run", "--silent", "improve:status", "--", "--json"],
-    { cwd: installedPackageDir, encoding: "utf-8", timeout: 15_000 },
+    { cwd: installedPackageDir, timeout: 15_000 },
   );
   if (loopStatusRes.error || loopStatusRes.status !== 0) {
     throw new Error(
-      `installed npm run improve:status failed (exit ${loopStatusRes.status}): ${loopStatusRes.error?.message || loopStatusRes.stderr || loopStatusRes.stdout}`
+      `installed npm run improve:status failed (exit ${loopStatusRes.status}, signal ${loopStatusRes.signal ?? "none"}): ${loopStatusRes.error?.message || loopStatusRes.stderr || loopStatusRes.stdout}`
     );
   }
   try {
@@ -184,3 +181,31 @@ try {
   await rm(installDir, { recursive: true, force: true });
 }
 process.exit(exitCode);
+
+function runNpm(args, options = {}) {
+  return new Promise((resolve) => {
+    const outPath = join(tmpdir(), `mailpouch-npm-out-${process.pid}-${Date.now()}.json`);
+    const errPath = join(tmpdir(), `mailpouch-npm-err-${process.pid}-${Date.now()}.log`);
+    const outFd = openSync(outPath, "w");
+    const errFd = openSync(errPath, "w");
+    const child = spawnShellFree("npm", [...args, ...(options.extraArgs ?? [])], {
+      cwd: options.cwd,
+      timeout: options.timeout,
+      stdio: ["ignore", outFd, errFd],
+    });
+    child.on("error", (error) => {
+      closeSync(outFd);
+      closeSync(errFd);
+      resolve({ error, status: 1, signal: null, stdout: "", stderr: "" });
+    });
+    child.on("close", (status, signal) => {
+      closeSync(outFd);
+      closeSync(errFd);
+      const stdout = readFileSync(outPath, "utf8");
+      const stderr = readFileSync(errPath, "utf8");
+      rmSync(outPath, { force: true });
+      rmSync(errPath, { force: true });
+      resolve({ status, signal, stdout, stderr, error: null });
+    });
+  });
+}

@@ -7,7 +7,7 @@ vi.mock('imapflow', () => {
     return {
       connect: vi.fn().mockResolvedValue(undefined),
       logout: vi.fn().mockResolvedValue(undefined),
-      mailboxCreate: vi.fn().mockResolvedValue(undefined),
+      mailboxCreate: vi.fn().mockImplementation(async (path: string) => ({ path, created: true })),
       mailboxDelete: vi.fn().mockResolvedValue(undefined),
       mailboxRename: vi.fn().mockResolvedValue(undefined),
       on: vi.fn(), // enables client.on('close'/'error') event handler registration
@@ -54,6 +54,23 @@ describe('Folder Management', () => {
       await expect(service.createFolder('INBOX')).rejects.toThrow(
         /already exists/
       );
+    });
+
+    it('rejects ImapFlow created:false instead of claiming an existing mailbox', async () => {
+      const mockClient = (service as any).client;
+      mockClient.mailboxCreate.mockResolvedValueOnce({ path: 'Existing', created: false });
+
+      await expect(service.createFolder('Existing')).rejects.toThrow(/already exists/i);
+    });
+
+    it('rejects an unconfirmed mailbox creation result', async () => {
+      const mockClient = (service as any).client;
+      mockClient.mailboxCreate.mockResolvedValueOnce(undefined);
+      mockClient.list.mockResolvedValueOnce([
+        { path: 'INBOX', name: 'INBOX', delimiter: '/', flags: new Set() },
+      ]);
+
+      await expect(service.createFolder('Unconfirmed')).rejects.toThrow(/not confirmed/i);
     });
 
     it('surfaces the Proton 409 (Code=2500) cross-namespace collision as "already exists"', async () => {

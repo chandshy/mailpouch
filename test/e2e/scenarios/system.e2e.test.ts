@@ -6,16 +6,16 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { startE2E, type E2EHarness } from "../mcp-client.js";
+import { bridgeConfigAvailable, startE2E, type E2EHarness } from "../mcp-client.js";
 import * as docker from "../support/docker.js";
 
 describe("system.e2e", () => {
   let h: E2EHarness;
 
   beforeAll(async () => {
-    await docker.restart();
+    if (!bridgeConfigAvailable()) await docker.restart();
     h = await startE2E();
-  }, 60_000);
+  });
 
   afterAll(async () => {
     if (h) await h.close();

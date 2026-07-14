@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { join } from "path";
 import { homedir } from "os";
-import { buildPermissions, defaultConfig, getConfigPath, configExists, loadConfig, saveConfig, loadCredentialsFromKeychain, loadAuxiliaryCredentialsFromKeychain, saveConfigWithCredentials, migrateCredentials } from "./loader.js";
+import { buildPermissions, defaultConfig, getConfigPath, configExists, loadConfig, saveConfig, loadCredentialsFromConfigFile, loadCredentialsFromKeychain, loadAuxiliaryCredentialsFromKeychain, saveConfigWithCredentials, migrateCredentials } from "./loader.js";
 import { ALL_TOOLS, TOOL_CATEGORIES, DEFAULT_RESPONSE_LIMITS } from "./schema.js";
 import { CredentialEncryption } from "../crypto/credential-encryption.js";
 
@@ -685,6 +685,29 @@ describe("loadCredentialsFromKeychain", () => {
 
     expect(mockedLoad).not.toHaveBeenCalled();
     expect(result).toBeNull();
+  });
+
+  it("config-file-only loading never reads the OS keychain even without a quarantine marker", async () => {
+    process.env.MAILPOUCH_MACHINE_SECRET = "test-machine-secret-deterministic";
+    mockedLoad.mockResolvedValue({ password: "operator-password", smtpToken: "operator-token" });
+    mockedExistsSync.mockReturnValue(true);
+    mockedReadFileSync.mockReturnValue(JSON.stringify({
+      configVersion: 3,
+      connection: {
+        smtpHost: "localhost", smtpPort: 1025, imapHost: "localhost", imapPort: 1143,
+        username: "e2e@example.test", password: "", smtpToken: "",
+        passwordEncrypted: CredentialEncryption.encrypt("clone-password"),
+        bridgeCertPath: "", debug: false,
+      },
+      permissions: { preset: "full", tools: {} },
+    }) as unknown as Buffer);
+
+    await expect(loadCredentialsFromConfigFile()).resolves.toEqual({
+      password: "clone-password",
+      smtpToken: "",
+      storage: "encrypted-file",
+    });
+    expect(mockedLoad).not.toHaveBeenCalled();
   });
 
   it("falls back to config file when keychain returns empty credentials", async () => {

@@ -12,11 +12,9 @@ const mockRegistry: { value: AccountRegistry } = {
   value: { accounts: [], activeAccountId: "" },
 };
 const readRegistryWithSecretsMock = vi.fn(async (): Promise<AccountRegistry> => mockRegistry.value);
-const mailboxKeychainCredentialsAreQuarantinedMock = vi.fn(() => false);
 vi.mock("./registry.js", () => ({
   readRegistry: () => mockRegistry.value,
   readRegistryWithSecrets: () => readRegistryWithSecretsMock(),
-  mailboxKeychainCredentialsAreQuarantined: () => mailboxKeychainCredentialsAreQuarantinedMock(),
 }));
 
 // Mock the services so they don't open real sockets. We use `class` stubs
@@ -87,8 +85,6 @@ describe("AccountManager", () => {
     mockRegistry.value = { accounts: [], activeAccountId: "" };
     readRegistryWithSecretsMock.mockReset();
     readRegistryWithSecretsMock.mockImplementation(async () => mockRegistry.value);
-    mailboxKeychainCredentialsAreQuarantinedMock.mockReset();
-    mailboxKeychainCredentialsAreQuarantinedMock.mockReturnValue(false);
     smtpCloseMock.mockReset();
     smtpCloseMock.mockResolvedValue(undefined);
     smtpReinit.mockReset();
@@ -419,16 +415,17 @@ describe("AccountManager", () => {
       accounts: [mkSpec("primary", { password: "", smtpToken: undefined })],
       activeAccountId: "primary",
     };
-    mailboxKeychainCredentialsAreQuarantinedMock.mockReturnValue(true);
     readRegistryWithSecretsMock.mockResolvedValue({
-      accounts: [mkSpec("primary", { password: "stale-keychain-password", smtpToken: "stale-keychain-token" })],
+      // The registry layer owns durable quarantine enforcement and returns an
+      // unhydrated snapshot for a normal restarted profile.
+      accounts: [mkSpec("primary", { password: "", smtpToken: undefined })],
       activeAccountId: "primary",
     });
 
     const mgr = new AccountManager();
     await mgr.rebuildFromRegistryAsync();
 
-    expect(readRegistryWithSecretsMock).not.toHaveBeenCalled();
+    expect(readRegistryWithSecretsMock).toHaveBeenCalledOnce();
     expect(mgr.getActive().spec).toMatchObject({ password: "", smtpToken: undefined });
   });
 

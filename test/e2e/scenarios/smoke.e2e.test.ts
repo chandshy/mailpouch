@@ -6,7 +6,7 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { startE2E, type E2EHarness } from "../mcp-client.js";
+import { bridgeConfigAvailable, startE2E, type E2EHarness } from "../mcp-client.js";
 import * as docker from "../support/docker.js";
 import { PROMO_CREDIT_KARMA } from "../fixtures/seed-data.js";
 import { advertisedToolDefs } from "../../../src/tools/registry.js";
@@ -16,15 +16,12 @@ describe("smoke.e2e — harness boots and round-trips", () => {
   let h: E2EHarness;
 
   beforeAll(async () => {
-    await docker.up();
+    if (!bridgeConfigAvailable()) await docker.up();
     h = await startE2E();
-  }, 60_000);
+  });
 
   afterAll(async () => {
-    if (h) {
-      try { await h.imap.wipe(); } catch { /* container may already be gone */ }
-      await h.close();
-    }
+    if (h) await h.close();
   });
 
   beforeEach(async () => {
@@ -32,7 +29,7 @@ describe("smoke.e2e — harness boots and round-trips", () => {
   });
 
   it("MCP listTools returns the mailpouch tool surface", async () => {
-    const { tools } = await h.client.listTools();
+    const { tools } = await h.listTools();
     const names = tools.map((t) => t.name).sort();
     const set = new Set(names);
     // Sample assertions across categories.
@@ -75,11 +72,8 @@ describe("smoke.e2e — harness boots and round-trips", () => {
     // ImapFixtures.append → mailpouch IMAP fetch → MCP response. Using
     // get_email_by_id (which does a fresh UID FETCH) sidesteps the
     // mailbox-EXISTS cache lag that get_emails can hit on Greenmail.
-    const uid = await h.imap.appendSeed("INBOX", PROMO_CREDIT_KARMA);
-    await h.call("clear_cache");
-    const result = h.json<{ subject: string }>(
-      await h.call("get_email_by_id", { emailId: String(uid), folder: "INBOX" })
-    );
-    expect(result.subject).toBe(PROMO_CREDIT_KARMA.subject);
-  });
+    const visible = await h.appendVisibleSeed("INBOX", PROMO_CREDIT_KARMA);
+    expect(visible.uid).toBeGreaterThan(0);
+    expect(visible.email.subject).toBe(PROMO_CREDIT_KARMA.subject);
+  }, 75_000);
 });

@@ -138,7 +138,7 @@ export const defs: ToolDef[] = [
     name: "schedule_email",
     title: "Schedule Email",
     description:
-      "Schedule an email for future delivery (minimum 60 seconds from now, maximum 30 days). Scheduled emails are retried up to 3 times on failure. Use list_scheduled_emails to view pending sends and cancel_scheduled_email to cancel before delivery.",
+      "Schedule an email for future delivery (minimum 60 seconds from now, maximum 30 days). Definite failures are retried up to 3 times; ambiguous deliveries are never retried automatically. Use list_scheduled_emails to view pending sends and cancel_scheduled_email to cancel before delivery.",
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     inputSchema: {
       type: "object",
@@ -169,7 +169,7 @@ export const defs: ToolDef[] = [
   {
     name: "list_scheduled_emails",
     title: "List Scheduled Emails",
-    description: "List all scheduled emails (pending, sent, failed, and cancelled). Sorted by scheduledAt ascending.",
+    description: "List all scheduled emails, including in-flight and outcome-unknown deliveries. Sorted by scheduledAt ascending.",
     annotations: { readOnlyHint: true },
     inputSchema: { type: "object", properties: {} },
     outputSchema: {
@@ -182,7 +182,11 @@ export const defs: ToolDef[] = [
             properties: {
               id: { type: "string" },
               scheduledAt: { type: "string", format: "date-time" },
-              status: { type: "string", enum: ["pending", "sent", "failed", "cancelled"] },
+              status: {
+                type: "string",
+                enum: ["pending", "sending", "sent", "failed", "cancelled", "outcome_unknown"],
+                description: "outcome_unknown means SMTP was interrupted after dispatch; inspect Sent mail before retrying manually",
+              },
               subject: { type: "string" },
               to: { type: "string" },
               createdAt: { type: "string", format: "date-time" },

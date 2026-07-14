@@ -245,7 +245,7 @@ export interface ScheduledEmail {
   accountIdentity?: string;
   scheduledAt: string; // ISO 8601
   options: SendEmailOptions;
-  status: "pending" | "sending" | "sent" | "failed" | "cancelled";
+  status: "pending" | "sending" | "sent" | "failed" | "cancelled" | "outcome_unknown";
   createdAt: string; // ISO 8601
   error?: string;
   retryCount?: number;

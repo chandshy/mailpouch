@@ -22,6 +22,14 @@ import { buildBridgeTlsConfig } from './bridge-tls.js';
 import { classifyError, ConnectionStateError } from '../utils/error-classify.js';
 import { tracer, type SpanTags } from '../utils/tracer.js';
 import { BRIDGE_MIN_VERSION } from '../config/schema.js';
+import {
+  assertE2EMailboxIdentity,
+  assertE2EUidPlusCapability,
+} from '../config/e2e-mailbox-identity.js';
+import {
+  MailboxMutationDeadlineError,
+  runMailboxMutation,
+} from './mailbox-mutation-deadline.js';
 
 /** imapflow's append() return value includes uid at runtime but it is omitted from the type declaration. */
 interface AppendResult { uid?: number }
@@ -80,6 +88,10 @@ export class SimpleIMAPService {
   /** TTL for folderCache entries. After expiry, getFolders() fetches fresh data from IMAP. */
   private static readonly FOLDER_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
   private connectionConfig: { host: string; port: number; username?: string; password?: string; bridgeCertPath?: string; secure?: boolean; allowInsecureBridge?: boolean } | null = null;
+  /** Coalesces concurrent mutation retries onto one primary reconnect. */
+  private mutationReconnectPromise: Promise<void> | null = null;
+  /** Invalidates stale connect completions, failures, and event callbacks. */
+  private connectionGeneration = 0;
   /** Tracks UIDVALIDITY per folder path to detect server-side mailbox rebuilds. */
   private uidValidityMap: Map<string, bigint> = new Map();
   /** True when TLS certificate validation is disabled (no Bridge cert configured). */
@@ -314,19 +326,25 @@ export class SimpleIMAPService {
     /** Label for logs (e.g. "Bulk move"). */
     opName: string;
     folder: string;
+    /** Live Bridge E2E revalidation immediately before every wire mutation. */
+    beforeMutation?: () => void;
     /** Optional single trailing step run once, only if a per-UID fallback was
      *  used (IMAP-016: e.g. one EXPUNGE for all \Deleted-flagged UIDs). */
     finalize?: () => Promise<unknown>;
   }): Promise<void> {
-    const { present, perChunk, perUid, onSuccess, onFailure, opName, folder, finalize } = opts;
+    const { present, perChunk, perUid, onSuccess, onFailure, opName, folder, beforeMutation, finalize } = opts;
     const chunks = chunkUidsForWire(present);
     let fallbackUsed = false;
     for (const uidSet of chunks) {
       const chunkUids = uidSet.split(',');
       try {
-        await perChunk(uidSet);
+        await runMailboxMutation(this, async () => {
+          beforeMutation?.();
+          await perChunk(uidSet);
+        });
         for (const id of chunkUids) onSuccess(id);
       } catch (batchErr: unknown) {
+        if (batchErr instanceof MailboxMutationDeadlineError) throw batchErr;
         logger.warn(
           `${opName} batch failed for folder ${folder} (chunk size=${chunkUids.length}), falling back to per-email`,
           'IMAPService',
@@ -334,10 +352,14 @@ export class SimpleIMAPService {
         );
         for (const id of chunkUids) {
           try {
-            await perUid(id);
+            await runMailboxMutation(this, async () => {
+              beforeMutation?.();
+              await perUid(id);
+            });
             fallbackUsed = true;
             onSuccess(id);
           } catch (e: unknown) {
+            if (e instanceof MailboxMutationDeadlineError) throw e;
             const m = e instanceof Error ? e.message : String(e);
             onFailure(id, m);
             logger.warn(`${opName} failed for UID ${id} in folder ${folder}`, 'IMAPService', e);
@@ -510,6 +532,8 @@ export class SimpleIMAPService {
   async connect(host: string = 'localhost', port: number = 1143, username?: string, password?: string, bridgeCertPath?: string, secure?: boolean, allowInsecureBridge: boolean = false): Promise<void> {
     return tracer.span('imap.connect', { host, port, hasCert: !!bridgeCertPath }, async () => {
     logger.debug('Connecting to IMAP server', 'IMAPService', { host, port });
+    const connectionGeneration = ++this.connectionGeneration;
+    let connectingClient: ImapFlow | null = null;
 
     try {
       // Store connection config for reconnection
@@ -547,6 +571,13 @@ export class SimpleIMAPService {
         catch { try { (stale as unknown as { close?: () => void }).close?.(); } catch { /* already gone */ } }
       }
 
+      // logout() yields. A newer connect may have installed its own client
+      // while this attempt was retiring the predecessor; never let the stale
+      // continuation construct and overwrite that newer winner.
+      if (this.connectionGeneration !== connectionGeneration) {
+        throw new ConnectionStateError('IMAP connection attempt was superseded during client retirement');
+      }
+
       const client = new ImapFlow({
         host,
         port,
@@ -557,8 +588,12 @@ export class SimpleIMAPService {
         } : undefined,
         logger: false,
         tls: tlsOptions,
-        connectionTimeout: 30000,
+        // Bound connection establishment only. Command cancellation/deadlines
+        // are request-scoped (mailbox-mutation-deadline.ts); a global 45-second
+        // socket inactivity timeout would also kill legitimate long reads.
+        connectionTimeout: 30_000,
       });
+      connectingClient = client;
       this.client = client;
 
       // Setup connection event handlers (only if client has event emitter methods)
@@ -567,24 +602,38 @@ export class SimpleIMAPService {
           logger.warn('IMAP connection closed', 'IMAPService');
           // A retired client's socket can emit close after a replacement is
           // already connected. Never let that stale event mutate new state.
-          if (this.client === client) this.isConnected = false;
+          if (this.connectionGeneration === connectionGeneration && this.client === client) {
+            this.isConnected = false;
+          }
         });
 
         client.on('error', (err) => {
           logger.error('IMAP connection error', 'IMAPService', err);
-          if (this.client === client) this.isConnected = false;
+          if (this.connectionGeneration === connectionGeneration && this.client === client) {
+            this.isConnected = false;
+          }
         });
       }
 
       await client.connect();
-      if (this.client === client) this.isConnected = true;
+      if (this.connectionGeneration !== connectionGeneration || this.client !== client) {
+        try { (client as unknown as { close?: () => void }).close?.(); }
+        catch { /* a newer generation already owns service state */ }
+        throw new ConnectionStateError('IMAP connection attempt was superseded by a newer connection');
+      }
+      this.isConnected = true;
 
       logger.info('IMAP connection established', 'IMAPService');
 
       // Fire-and-forget Bridge version probe — never block connect on this.
       void this.checkBridgeVersion();
     } catch (error) {
-      this.isConnected = false;
+      // An older attempt may reject after a replacement has authenticated.
+      // Only the generation/client that still owns service state may clear it.
+      if (this.connectionGeneration === connectionGeneration
+          && (connectingClient === null || this.client === connectingClient)) {
+        this.isConnected = false;
+      }
       logger.error('IMAP connection failed', 'IMAPService', error);
       throw error;
     }
@@ -637,6 +686,7 @@ export class SimpleIMAPService {
   /** Log out and close the IMAP connection gracefully. */
   async disconnect(): Promise<void> {
     return tracer.span('imap.disconnect', {}, async () => {
+    this.connectionGeneration += 1;
     const client = this.client;
     const wasConnected = this.isConnected;
 
@@ -674,6 +724,59 @@ export class SimpleIMAPService {
     }
     logger.info('IMAP disconnected', 'IMAPService');
     }); // end tracer.span('imap.disconnect')
+  }
+
+  /**
+   * Abort a timed-out/cancelled mutation without touching the dedicated IDLE
+   * client. Detach first so an abandoned async chain cannot discover this
+   * transport through `this.client`, then hard-close synchronously rather than
+   * awaiting LOGOUT on a connection that is already known to be wedged.
+   */
+  abortPrimaryMutationTransport(reason: string): void {
+    this.connectionGeneration += 1;
+    const client = this.client;
+    this.client = null;
+    this.isConnected = false;
+    if (!client) return;
+    logger.warn(`Aborting primary IMAP transport: ${reason}`, 'IMAPService');
+    const close = (client as unknown as { close?: () => void }).close;
+    if (typeof close !== 'function') {
+      throw new Error('ImapFlow primary client does not expose close()');
+    }
+    close.call(client);
+  }
+
+  /**
+   * Re-establish the primary command connection before a mailbox-mutation
+   * handler runs. Deadline cancellation detaches the poisoned client, so every
+   * later mutation request must pass this gate before service methods are
+   * allowed to interpret `!isConnected` as an ordinary false/no-op result.
+   */
+  async ensureMutationConnection(): Promise<void> {
+    if (this.isConnected && this.client) return;
+    if (this.mutationReconnectPromise) return this.mutationReconnectPromise;
+
+    const reconnecting = (async () => {
+      await this.ensureConnection();
+      if (!this.isConnected || !this.client) {
+        throw this.mutationConnectionUnavailable();
+      }
+    })();
+    this.mutationReconnectPromise = reconnecting;
+    try {
+      await reconnecting;
+    } finally {
+      if (this.mutationReconnectPromise === reconnecting) {
+        this.mutationReconnectPromise = null;
+      }
+    }
+  }
+
+  private mutationConnectionUnavailable(): ConnectionStateError {
+    return new ConnectionStateError(
+      "mailpouch couldn't perform the mailbox change because the IMAP connection is unavailable. " +
+      "Make sure Proton Bridge is running and signed in, then try again.",
+    );
   }
 
   /**
@@ -1542,9 +1645,7 @@ export class SimpleIMAPService {
     return tracer.span('imap.saveDraft', { hasAttachments: !!(options.attachments?.length), attachmentCount: options.attachments?.length || 0 }, async () => {
     logger.debug('Saving draft', 'IMAPService', { subject: options.subject });
 
-    if (!this.client || !this.isConnected) {
-      return { success: false, error: 'IMAP not connected' };
-    }
+    if (!this.client || !this.isConnected) throw this.mutationConnectionUnavailable();
 
     try {
       // SMTP-012: strip CR/LF/NUL from header-bound fields (subject, to, cc,
@@ -1625,12 +1726,16 @@ export class SimpleIMAPService {
         logger.warn('No Drafts folder found for this account', 'IMAPService');
         return { success: false, error: 'No Drafts folder found for this account; create or configure a Drafts mailbox.' };
       }
-      const result = await this.client.append(draftsPath, rawMime, ['\\Draft']);
+      const result = await runMailboxMutation(
+        this,
+        () => this.client!.append(draftsPath, rawMime, ['\\Draft']),
+      );
 
       const uid = result && typeof result === 'object' ? (result as AppendResult).uid : undefined;
       logger.info('Draft saved', 'IMAPService', { uid });
       return { success: true, uid };
     } catch (error: unknown) {
+      if (error instanceof MailboxMutationDeadlineError) throw error;
       logger.error('Failed to save draft', 'IMAPService', error);
       return { success: false, error: error instanceof Error ? error.message : String(error) };
     }
@@ -1644,7 +1749,7 @@ export class SimpleIMAPService {
    * @param sourceFolder When provided, operate directly on this folder. Skips
    *   the cache lookup that can collide on cross-folder UIDs. Strongly
    *   recommended whenever the UID came from a folder other than INBOX.
-   * @returns true on success, false if not connected. Throws if the UID does
+   * @returns true on success. Throws when disconnected or when the UID does
    *   not exist in the resolved folder.
    */
   async markEmailRead(emailId: string, isRead: boolean = true, sourceFolder?: string): Promise<boolean> {
@@ -1655,7 +1760,7 @@ export class SimpleIMAPService {
 
     if (!this.client || !this.isConnected) {
       logger.warn('IMAP not connected', 'IMAPService');
-      return false;
+      throw this.mutationConnectionUnavailable();
     }
 
     try {
@@ -1673,15 +1778,22 @@ export class SimpleIMAPService {
       const lock = await this.client.getMailboxLock(folder);
 
       try {
+        assertE2EMailboxIdentity(folder, [emailId], this.client.mailbox);
         const existing = await this.findExistingUidsInLockedFolder([emailId]);
         if (!existing.has(emailId)) {
           throw new Error(`Email ${emailId} not found in folder ${folder}`);
         }
 
         if (isRead) {
-          await this.client.messageFlagsAdd(emailId, ['\\Seen'], { uid: true });
+          await runMailboxMutation(this, () => {
+            assertE2EMailboxIdentity(folder, [emailId], this.client!.mailbox);
+            return this.client!.messageFlagsAdd(emailId, ['\\Seen'], { uid: true });
+          });
         } else {
-          await this.client.messageFlagsRemove(emailId, ['\\Seen'], { uid: true });
+          await runMailboxMutation(this, () => {
+            assertE2EMailboxIdentity(folder, [emailId], this.client!.mailbox);
+            return this.client!.messageFlagsRemove(emailId, ['\\Seen'], { uid: true });
+          });
         }
 
         // Update cache
@@ -1709,7 +1821,7 @@ export class SimpleIMAPService {
    * @param isStarred true to star, false to unstar (default: true)
    * @param sourceFolder Folder containing the UID. See markEmailRead for why
    *   passing this avoids cross-folder UID collisions.
-   * @returns true on success, false if not connected. Throws if the UID does
+   * @returns true on success. Throws when disconnected or when the UID does
    *   not exist in the resolved folder.
    */
   async starEmail(emailId: string, isStarred: boolean = true, sourceFolder?: string): Promise<boolean> {
@@ -1720,7 +1832,7 @@ export class SimpleIMAPService {
 
     if (!this.client || !this.isConnected) {
       logger.warn('IMAP not connected', 'IMAPService');
-      return false;
+      throw this.mutationConnectionUnavailable();
     }
 
     try {
@@ -1738,15 +1850,22 @@ export class SimpleIMAPService {
       const lock = await this.client.getMailboxLock(folder);
 
       try {
+        assertE2EMailboxIdentity(folder, [emailId], this.client.mailbox);
         const existing = await this.findExistingUidsInLockedFolder([emailId]);
         if (!existing.has(emailId)) {
           throw new Error(`Email ${emailId} not found in folder ${folder}`);
         }
 
         if (isStarred) {
-          await this.client.messageFlagsAdd(emailId, ['\\Flagged'], { uid: true });
+          await runMailboxMutation(this, () => {
+            assertE2EMailboxIdentity(folder, [emailId], this.client!.mailbox);
+            return this.client!.messageFlagsAdd(emailId, ['\\Flagged'], { uid: true });
+          });
         } else {
-          await this.client.messageFlagsRemove(emailId, ['\\Flagged'], { uid: true });
+          await runMailboxMutation(this, () => {
+            assertE2EMailboxIdentity(folder, [emailId], this.client!.mailbox);
+            return this.client!.messageFlagsRemove(emailId, ['\\Flagged'], { uid: true });
+          });
         }
 
         const cachedForStar = this.getCacheEntry(emailId, folder);
@@ -1774,7 +1893,7 @@ export class SimpleIMAPService {
    * @param sourceFolder Folder currently holding the UID. Strongly recommended
    *   whenever the UID came from a folder other than INBOX — IMAP UIDs are
    *   folder-scoped, so without this the wrong folder may be selected.
-   * @returns true on success, false if not connected. Throws if the UID does
+   * @returns true on success. Throws when disconnected or when the UID does
    *   not exist in the resolved source folder.
    */
   async moveEmail(emailId: string, targetFolder: string, sourceFolder?: string): Promise<boolean> {
@@ -1786,7 +1905,7 @@ export class SimpleIMAPService {
 
     if (!this.client || !this.isConnected) {
       logger.warn('IMAP not connected', 'IMAPService');
-      return false;
+      throw this.mutationConnectionUnavailable();
     }
 
     try {
@@ -1827,6 +1946,8 @@ export class SimpleIMAPService {
       const lock = await this.client.getMailboxLock(folder);
 
       try {
+        assertE2EUidPlusCapability(this.client.capabilities);
+        assertE2EMailboxIdentity(folder, [emailId], this.client.mailbox);
         const existing = await this.findExistingUidsInLockedFolder([emailId]);
         if (!existing.has(emailId)) {
           throw new Error(`Email ${emailId} not found in folder ${folder}`);
@@ -1836,7 +1957,12 @@ export class SimpleIMAPService {
         // no-UIDPLUS fallback identity.
         movedMid = (await this.fetchMessageIdsForUids([emailId])).get(emailId);
 
-        uidplus = this.recordRelocatedUids(await this.client.messageMove(emailId, targetFolder, { uid: true }), relocated);
+        const moveResult = await runMailboxMutation(this, () => {
+          assertE2EUidPlusCapability(this.client!.capabilities);
+          assertE2EMailboxIdentity(folder, [emailId], this.client!.mailbox);
+          return this.client!.messageMove(emailId, targetFolder, { uid: true });
+        });
+        uidplus = this.recordRelocatedUids(moveResult, relocated);
 
         // Evict old cache entry — after MOVE the UID in the target folder may differ
         this.evictCacheEntry(`${folder}:${emailId}`);
@@ -1874,7 +2000,7 @@ export class SimpleIMAPService {
    * @param targetFolder Destination folder path (e.g. "Labels/Work")
    * @param sourceFolder Folder currently holding the UID. Strongly recommended
    *   whenever the UID came from a folder other than INBOX.
-   * @returns true on success, false if not connected. Throws if the UID does
+   * @returns true on success. Throws when disconnected or when the UID does
    *   not exist in the resolved source folder.
    */
   async copyEmailToFolder(emailId: string, targetFolder: string, sourceFolder?: string): Promise<boolean> {
@@ -1886,7 +2012,7 @@ export class SimpleIMAPService {
 
     if (!this.client || !this.isConnected) {
       logger.warn('IMAP not connected', 'IMAPService');
-      return false;
+      throw this.mutationConnectionUnavailable();
     }
 
     try {
@@ -1907,13 +2033,18 @@ export class SimpleIMAPService {
       const lock = await this.client.getMailboxLock(folder);
 
       try {
+        assertE2EMailboxIdentity(folder, [emailId], this.client.mailbox);
         const existing = await this.findExistingUidsInLockedFolder([emailId]);
         if (!existing.has(emailId)) {
           throw new Error(`Email ${emailId} not found in folder ${folder}`);
         }
 
         copiedMid = (await this.fetchMessageIdsForUids([emailId])).get(emailId);
-        uidplus = this.recordRelocatedUids(await this.client.messageCopy(emailId, targetFolder, { uid: true }), relocated);
+        const copyResult = await runMailboxMutation(this, () => {
+          assertE2EMailboxIdentity(folder, [emailId], this.client!.mailbox);
+          return this.client!.messageCopy(emailId, targetFolder, { uid: true });
+        });
+        uidplus = this.recordRelocatedUids(copyResult, relocated);
       } finally {
         lock.release();
       }
@@ -1945,7 +2076,7 @@ export class SimpleIMAPService {
    * Opens a lock on the given folder and deletes the message there.
    * @param emailId Numeric UID string
    * @param folder The folder from which to delete (e.g. "Labels/Work")
-   * @returns true on success, false if not connected
+   * @returns true on success. Throws when disconnected.
    */
   async deleteFromFolder(emailId: string, folder: string): Promise<boolean> {
     this.validateEmailId(emailId);
@@ -1955,19 +2086,25 @@ export class SimpleIMAPService {
 
     if (!this.client || !this.isConnected) {
       logger.warn('IMAP not connected', 'IMAPService');
-      return false;
+      throw this.mutationConnectionUnavailable();
     }
 
     try {
       const lock = await this.client.getMailboxLock(folder);
 
       try {
+        assertE2EUidPlusCapability(this.client.capabilities);
+        assertE2EMailboxIdentity(folder, [emailId], this.client.mailbox);
         const existing = await this.findExistingUidsInLockedFolder([emailId]);
         if (!existing.has(emailId)) {
           throw new Error(`Email ${emailId} not found in folder ${folder}`);
         }
 
-        await this.client.messageDelete(emailId, { uid: true });
+        await runMailboxMutation(this, () => {
+          assertE2EUidPlusCapability(this.client!.capabilities);
+          assertE2EMailboxIdentity(folder, [emailId], this.client!.mailbox);
+          return this.client!.messageDelete(emailId, { uid: true });
+        });
         // Remove from cache using folder-qualified key
         this.evictCacheEntry(`${folder}:${emailId}`);
         logger.info(`Email ${emailId} deleted from ${folder}`, 'IMAPService');
@@ -2003,7 +2140,7 @@ export class SimpleIMAPService {
 
     if (!this.client || !this.isConnected) {
       logger.warn('IMAP not connected', 'IMAPService');
-      return false;
+      throw this.mutationConnectionUnavailable();
     }
 
     try {
@@ -2049,14 +2186,21 @@ export class SimpleIMAPService {
 
       const lock = await this.client.getMailboxLock(folder);
       try {
+        assertE2EMailboxIdentity(folder, [emailId], this.client.mailbox);
         const existing = await this.findExistingUidsInLockedFolder([emailId]);
         if (!existing.has(emailId)) {
           throw new Error(`Email ${emailId} not found in folder ${folder}`);
         }
         if (set) {
-          await this.client.messageFlagsAdd(emailId, [flag], { uid: true });
+          await runMailboxMutation(this, () => {
+            assertE2EMailboxIdentity(folder, [emailId], this.client!.mailbox);
+            return this.client!.messageFlagsAdd(emailId, [flag], { uid: true });
+          });
         } else {
-          await this.client.messageFlagsRemove(emailId, [flag], { uid: true });
+          await runMailboxMutation(this, () => {
+            assertE2EMailboxIdentity(folder, [emailId], this.client!.mailbox);
+            return this.client!.messageFlagsRemove(emailId, [flag], { uid: true });
+          });
         }
         logger.info(`Flag ${flag} ${set ? 'set' : 'cleared'} on email ${emailId} in ${folder}`, 'IMAPService');
         return true;
@@ -2182,6 +2326,8 @@ export class SimpleIMAPService {
       }
       const lock = await this.client.getMailboxLock(folder);
       try {
+        assertE2EUidPlusCapability(this.client.capabilities);
+        assertE2EMailboxIdentity(folder, ids, this.client.mailbox);
         let existing: Set<string>;
         try {
           existing = await this.findExistingUidsInLockedFolder(ids);
@@ -2215,6 +2361,10 @@ export class SimpleIMAPService {
         let uidplus = false;
         await this.chunkedBatchOp({
           present,
+          beforeMutation: () => {
+            assertE2EUidPlusCapability(this.client!.capabilities);
+            assertE2EMailboxIdentity(folder, ids, this.client!.mailbox);
+          },
           perChunk: async (uidSet) => { uidplus = this.recordRelocatedUids(await this.client!.messageMove(uidSet, targetFolder, { uid: true }), relocated) || uidplus; },
           perUid: async (id) => { uidplus = this.recordRelocatedUids(await this.client!.messageMove(id, targetFolder, { uid: true }), relocated) || uidplus; },
           onSuccess: (id) => { this.evictCacheEntry(`${folder}:${id}`); accepted.push(id); },
@@ -2302,7 +2452,7 @@ export class SimpleIMAPService {
 
     if (!this.client || !this.isConnected) {
       logger.warn('IMAP not connected', 'IMAPService');
-      return false;
+      throw this.mutationConnectionUnavailable();
     }
 
     const trash = await this.resolveTrashPath();
@@ -2409,6 +2559,7 @@ export class SimpleIMAPService {
       for (const [folder, ids] of grouped.entries()) {
         const lock = await this.client.getMailboxLock(folder);
         try {
+          assertE2EMailboxIdentity(folder, ids, this.client.mailbox);
           let existing: Set<string>;
           try {
             existing = await this.findExistingUidsInLockedFolder(ids);
@@ -2431,6 +2582,7 @@ export class SimpleIMAPService {
 
           await this.chunkedBatchOp({
             present,
+            beforeMutation: () => assertE2EMailboxIdentity(folder, ids, this.client!.mailbox),
             perChunk: (uidSet) => options.value
               ? this.client!.messageFlagsAdd(uidSet, [options.flag], { uid: true })
               : this.client!.messageFlagsRemove(uidSet, [options.flag], { uid: true }),
@@ -2515,6 +2667,7 @@ export class SimpleIMAPService {
     for (const [folder, ids] of grouped.entries()) {
       const lock = await this.client.getMailboxLock(folder);
       try {
+        assertE2EMailboxIdentity(folder, ids, this.client.mailbox);
         let existing: Set<string>;
         try {
           existing = await this.findExistingUidsInLockedFolder(ids);
@@ -2547,6 +2700,7 @@ export class SimpleIMAPService {
         let uidplus = false;
         await this.chunkedBatchOp({
           present,
+          beforeMutation: () => assertE2EMailboxIdentity(folder, ids, this.client!.mailbox),
           perChunk: async (uidSet) => { uidplus = this.recordRelocatedUids(await this.client!.messageCopy(uidSet, targetFolder, { uid: true }), relocated) || uidplus; },
           perUid: async (id) => { uidplus = this.recordRelocatedUids(await this.client!.messageCopy(id, targetFolder, { uid: true }), relocated) || uidplus; },
           onSuccess: (id) => { accepted.push(id); },
@@ -2605,6 +2759,8 @@ export class SimpleIMAPService {
 
     const lock = await this.client.getMailboxLock(folder);
     try {
+      assertE2EUidPlusCapability(this.client.capabilities);
+      assertE2EMailboxIdentity(folder, validIds, this.client.mailbox);
       let existing: Set<string>;
       try {
         existing = await this.findExistingUidsInLockedFolder(validIds);
@@ -2633,6 +2789,10 @@ export class SimpleIMAPService {
         const flaggedForExpunge: string[] = [];
         await this.chunkedBatchOp({
           present,
+          beforeMutation: () => {
+            assertE2EUidPlusCapability(this.client!.capabilities);
+            assertE2EMailboxIdentity(folder, validIds, this.client!.mailbox);
+          },
           perChunk: (uidSet) => this.client!.messageDelete(uidSet, { uid: true }),
           perUid: async (id) => { await this.client!.messageFlagsAdd(id, ['\\Deleted'], { uid: true }); flaggedForExpunge.push(id); },
           onSuccess: (id) => { this.evictCacheEntry(`${folder}:${id}`); results.success++; },
@@ -2643,7 +2803,11 @@ export class SimpleIMAPService {
           // bulkDeleteEmails. Bounds the command line; O(N/chunk) round-trips.
           finalize: async () => {
             for (const uidSet of chunkUidsForWire(flaggedForExpunge)) {
-              await this.client!.messageDelete(uidSet, { uid: true });
+              await runMailboxMutation(this, () => {
+                assertE2EUidPlusCapability(this.client!.capabilities);
+                assertE2EMailboxIdentity(folder, validIds, this.client!.mailbox);
+                return this.client!.messageDelete(uidSet, { uid: true });
+              });
             }
           },
         });
@@ -2673,6 +2837,7 @@ export class SimpleIMAPService {
 
     const lock = await this.client!.getMailboxLock(trash);
     try {
+      assertE2EUidPlusCapability(this.client!.capabilities);
       this.checkAndUpdateUidValidity(trash);
 
       // Short-circuit an already-empty Trash: Bridge errors on a FETCH/SEARCH
@@ -2687,10 +2852,17 @@ export class SimpleIMAPService {
       const uids = await this.client!.search({ all: true }, { uid: true });
       if (!uids || uids.length === 0) return { deleted: 0 };
 
+      const uidStrings = uids.map(String);
+      assertE2EMailboxIdentity(trash, uidStrings, this.client!.mailbox);
+
       // messageDelete flags \Deleted + EXPUNGEs; chunk the UID set so a large
       // Trash can't blow the IMAP command-line length.
-      for (const uidSet of chunkUidsForWire(uids.map(String))) {
-        await this.client!.messageDelete(uidSet, { uid: true });
+      for (const uidSet of chunkUidsForWire(uidStrings)) {
+        await runMailboxMutation(this, () => {
+          assertE2EUidPlusCapability(this.client!.capabilities);
+          assertE2EMailboxIdentity(trash, uidStrings, this.client!.mailbox);
+          return this.client!.messageDelete(uidSet, { uid: true });
+        });
       }
       for (const uid of uids) this.evictCacheEntry(`${trash}:${uid}`);
       this.clearFolderCache(); // Trash count is now 0 → next get_folders refetches
@@ -2731,10 +2903,11 @@ export class SimpleIMAPService {
     this.validateFolderName(folderName);
     if (!this.isConnected || !this.client) throw new Error('IMAP client not connected');
     try {
-      await this.client.mailboxCreate(folderName);
+      await runMailboxMutation(this, () => this.client!.mailboxCreate(folderName));
       this.clearFolderCache();
       logger.info(`Folder created: ${folderName}`, 'IMAPService');
     } catch (error: unknown) {
+      if (error instanceof MailboxMutationDeadlineError) throw error;
       const rt = (error as { responseText?: string }).responseText || '';
       if (/ALREADYEXISTS/i.test(rt) || /already exists/i.test(rt)) return;
       throw error;
@@ -2752,8 +2925,17 @@ export class SimpleIMAPService {
     try {
       logger.debug(`Creating folder: ${folderName}`, 'IMAPService');
 
-      // Create the mailbox
-      await this.client.mailboxCreate(folderName);
+      // ImapFlow reports an ALREADYEXISTS response as { created: false }
+      // instead of throwing. Require positive creation proof so callers never
+      // claim, rename, or delete a mailbox which another actor created first.
+      const result = await runMailboxMutation(
+        this,
+        () => this.client!.mailboxCreate(folderName),
+      );
+      if (result?.created === false) {
+        throw new Error(`Mailbox creation was not confirmed because '${folderName}' already exists`);
+      }
+      if (result?.created !== true) throw new Error(`Mailbox creation was not confirmed for '${folderName}'`);
 
       // Clear folder cache to refresh (also resets TTL so next getFolders() re-fetches)
       this.clearFolderCache();
@@ -2761,6 +2943,7 @@ export class SimpleIMAPService {
       logger.info(`Folder created: ${folderName}`, 'IMAPService');
       return true;
     } catch (error: unknown) {
+      if (error instanceof MailboxMutationDeadlineError) throw error;
       const rt = (error as { responseText?: string }).responseText || '';
       const em = error instanceof Error ? error.message : String(error);
       const hay = `${rt} ${em}`.toLowerCase();
@@ -2839,7 +3022,7 @@ export class SimpleIMAPService {
     try {
       logger.debug(`Deleting folder: ${folderName}`, 'IMAPService');
 
-      await this.client.mailboxDelete(folderName);
+      await runMailboxMutation(this, () => this.client!.mailboxDelete(folderName));
 
       // Clear folder cache to refresh (also resets TTL so next getFolders() re-fetches)
       this.clearFolderCache();
@@ -2847,6 +3030,7 @@ export class SimpleIMAPService {
       logger.info(`Folder deleted: ${folderName}`, 'IMAPService');
       return true;
     } catch (error: unknown) {
+      if (error instanceof MailboxMutationDeadlineError) throw error;
       const rt = (error as { responseText?: string }).responseText;
       if (rt?.includes('NONEXISTENT')) {
         throw new Error(`Folder '${folderName}' does not exist`);
@@ -2883,7 +3067,7 @@ export class SimpleIMAPService {
     try {
       logger.debug(`Renaming folder: ${oldName} -> ${newName}`, 'IMAPService');
 
-      await this.client.mailboxRename(oldName, newName);
+      await runMailboxMutation(this, () => this.client!.mailboxRename(oldName, newName));
 
       // Clear folder cache to refresh (also resets TTL so next getFolders() re-fetches)
       this.clearFolderCache();
@@ -2891,6 +3075,7 @@ export class SimpleIMAPService {
       logger.info(`Folder renamed: ${oldName} -> ${newName}`, 'IMAPService');
       return true;
     } catch (error: unknown) {
+      if (error instanceof MailboxMutationDeadlineError) throw error;
       const rt = (error as { responseText?: string }).responseText || '';
       const em = error instanceof Error ? error.message : String(error);
       const hay = `${rt} ${em}`.toLowerCase();

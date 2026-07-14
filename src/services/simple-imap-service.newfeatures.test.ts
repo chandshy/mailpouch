@@ -345,12 +345,12 @@ describe("SimpleIMAPService.saveDraft", () => {
     });
   };
 
-  it("returns error when not connected", async () => {
+  it("throws actionable guidance when not connected", async () => {
     const svc = new SimpleIMAPService();
     // client is null, isConnected is false by default
-    const result = await svc.saveDraft({ subject: "Test", body: "Hello" });
-    expect(result.success).toBe(false);
-    expect(result.error).toMatch(/not connected/i);
+    await expect(svc.saveDraft({ subject: "Test", body: "Hello" })).rejects.toThrow(
+      /IMAP connection is unavailable.*Proton Bridge/is,
+    );
   });
 
   it("returns success with uid when IMAP append succeeds", async () => {

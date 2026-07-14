@@ -10,6 +10,7 @@ import { spawnSync } from "child_process";
 import { createConnection } from "net";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
+import { bridgeModeRequested } from "./backend.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const COMPOSE_FILE = join(__dirname, "..", "fixtures", "greenmail-compose.yml");
@@ -93,7 +94,12 @@ function isContainerRunning(): boolean {
 const externallyManaged = (): boolean =>
   process.env.MAILPOUCH_E2E_GREENMAIL_EXTERNAL === "1";
 
+/** A live Bridge run does not use Greenmail at all. The explicit backend
+ * request, rather than an inherited config path, controls this lifecycle. */
+const bridgeManaged = (): boolean => bridgeModeRequested();
+
 export async function up(): Promise<void> {
+  if (bridgeManaged()) return;
   if (externallyManaged()) {
     await waitForReady(GREENMAIL_IMAP_PORT);
     await waitForReady(GREENMAIL_SMTP_PORT);
@@ -108,6 +114,7 @@ export async function up(): Promise<void> {
 }
 
 export async function down(): Promise<void> {
+  if (bridgeManaged()) return;
   if (externallyManaged()) return;
   try {
     runArgv("docker", ["compose", "-f", COMPOSE_FILE, "down"], /* inherit */ true);
@@ -129,6 +136,7 @@ export async function down(): Promise<void> {
  * full suite once per workflow so the risk is small.
  */
 export async function restart(): Promise<void> {
+  if (bridgeManaged()) return;
   if (externallyManaged()) {
     await waitForReady(GREENMAIL_IMAP_PORT);
     await waitForReady(GREENMAIL_SMTP_PORT);

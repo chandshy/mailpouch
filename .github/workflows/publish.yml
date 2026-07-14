@@ -14,7 +14,9 @@ jobs:
   verify-release:
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: read
+      statuses: read
     outputs:
       commit_sha: ${{ steps.release_ref.outputs.commit_sha }}
 
@@ -32,6 +34,18 @@ jobs:
         node scripts/check-release-ref.mjs "$RELEASE_TAG"
         echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
+    # A release tag is not evidence that the tagged bytes passed CI. Require
+    # both hosted workflows and the local Proton Bridge E2E attestation on the
+    # exact immutable SHA resolved above. The checker rejects missing evidence,
+    # a newer failed/in-progress run, and a Bridge status for any other commit.
+    - name: Verify exact-SHA release attestations
+      env:
+        COMMIT_SHA: ${{ steps.release_ref.outputs.commit_sha }}
+        GITHUB_API_URL: ${{ github.api_url }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
+        GITHUB_TOKEN: ${{ github.token }}
+      run: node scripts/check-release-attestations.mjs "$COMMIT_SHA"
+
     - name: Use Node.js
       uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
       with:
@@ -46,6 +60,18 @@ jobs:
 
     - name: Run shared release verification
       run: npm run preship:fast
+
+    # `preship:release` cannot run after tagging because its pre-tag
+    # `git-tag-free` check would correctly fail. Run the tagged-release checks
+    # that remain meaningful here; check-release-ref above is the stronger
+    # post-tag replacement for git-tag-free, while the exact-SHA preship
+    # attestation covers Greenmail and tarball validation.
+    - name: Run tagged-release verification
+      env:
+        CHECK_CHANGELOG_BODY: "1"
+      run: |
+        npm run build:clean
+        node scripts/check-version-sync.mjs
 
   publish-npm:
     needs: verify-release
@@ -101,8 +127,9 @@ jobs:
           echo "Version ${VERSION} already published to npm — skipping"
         else
           # --ignore-scripts: this job already ran typecheck/lint/test/build as
-          # explicit steps, and CI gated the commit (incl. the Greenmail E2E). A
-          # bare `npm publish` would fire the `prepublishOnly` hook
+          # explicit steps, and verify-release required exact-SHA CI, Greenmail,
+          # tarball, and Proton Bridge evidence. A bare `npm publish` would fire
+          # the `prepublishOnly` hook
           # (`preship:release`), whose release tier runs e2e:greenmail (Docker)
           # and e2e:bridge — neither exists in this job, so it hangs. Skipping
           # lifecycle scripts here is also consistent with the BUILD-011
@@ -171,8 +198,8 @@ jobs:
             fs.writeFileSync('package.json', JSON.stringify(p, null, 2));
           "
           # --ignore-scripts: same rationale as the npm job — build already ran,
-          # and a bare publish would fire prepublishOnly → preship:release (E2E)
-          # which can't run in this job.
+          # exact-SHA release evidence passed upstream, and a bare publish would
+          # fire prepublishOnly → preship:release (E2E), which can't run here.
           npm publish --ignore-scripts
           mv /tmp/pkg.bak package.json
         fi

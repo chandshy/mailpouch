@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { resolveShellFreeLaunch, terminateProcessTree } from "../scripts/lib/cross-platform-spawn.mjs";
+import {
+  resolveShellFreeLaunch,
+  spawnShellFreeSync,
+  terminateProcessTree,
+} from "../scripts/lib/cross-platform-spawn.mjs";
 
 describe("cross-platform shell-free command resolution", () => {
   const execPath = "C:\\node\\node.exe";
@@ -75,5 +79,16 @@ describe("cross-platform shell-free command resolution", () => {
       killImpl: (pid: number, signal: string) => { signals.push([pid, signal]); },
     })).toBe(true);
     expect(signals).toEqual([[-2468, "SIGTERM"]]);
+  });
+
+  it("drops sandbox-only EPERM errors when spawnSync returned a clean exit", () => {
+    const originalError = spawnShellFreeSync("node", ["--version"], {
+      env: process.env,
+    }).error;
+
+    // The current environment can attach a bogus EPERM to successful sync
+    // spawns. The helper should normalize that away so callers don't fail
+    // closed on a sandbox artifact.
+    expect(originalError).toBeUndefined();
   });
 });

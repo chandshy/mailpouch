@@ -39,6 +39,14 @@ import {
 import { ProtonMailConfig, EmailMessage } from "./types/index.js";
 import { SMTPService } from "./services/smtp-service.js";
 import { SimpleIMAPService, stripHtml } from "./services/simple-imap-service.js";
+import {
+  ACCOUNT_MAIL_MUTATION_TOOLS,
+  MAILBOX_MUTATION_DEADLINE_MS,
+  MAILBOX_MUTATION_TOOLS,
+  MailboxMutationDeadlineError,
+  SMTP_MUTATION_TOOLS,
+  withMailboxMutationDeadline,
+} from "./services/mailbox-mutation-deadline.js";
 import { SimpleLoginService } from "./services/simplelogin-service.js";
 import { SchedulerService } from "./services/scheduler.js";
 import { ReminderService } from "./services/reminder-service.js";
@@ -71,7 +79,9 @@ import { acquireSingletonLock, releaseSingletonLock } from "./utils/singleton-lo
 import { isValidEmail, validateTargetFolder, requireNumericEmailId } from "./utils/helpers.js";
 import { classifyError, ConnectionStateError } from "./utils/error-classify.js";
 import { permissions } from "./permissions/manager.js";
-import { loadConfig, defaultConfig, migrateCredentials, loadCredentialsFromKeychain, loadAuxiliaryCredentialsFromKeychain, getConfigPath } from "./config/loader.js";
+import { loadConfig, defaultConfig, migrateCredentials, loadCredentialsFromConfigFile, loadCredentialsFromKeychain, loadAuxiliaryCredentialsFromKeychain, getConfigPath } from "./config/loader.js";
+import { StartupCredentialAccess } from "./config/startup-credential-access.js";
+import { withE2EMailboxIdentity } from "./config/e2e-mailbox-identity.js";
 import type { ToolName } from "./config/schema.js";
 import {
   DESTRUCTIVE_TOOLS,
@@ -222,7 +232,9 @@ let passService: PassService | null = null;
  * captured service until it completes.
  */
 let auxiliaryServiceRefreshGeneration = 0;
-async function refreshAuxiliaryServicesFromConfig(): Promise<void> {
+async function refreshAuxiliaryServicesFromConfig(
+  startupAccess = new StartupCredentialAccess(process.env, getConfigPath()),
+): Promise<void> {
   const generation = ++auxiliaryServiceRefreshGeneration;
   try {
     const cn = loadConfig()?.connection;
@@ -234,7 +246,7 @@ async function refreshAuxiliaryServicesFromConfig(): Promise<void> {
       return;
     }
 
-    const auxCreds = await loadAuxiliaryCredentialsFromKeychain();
+    const auxCreds = await startupAccess.readExternal(loadAuxiliaryCredentialsFromKeychain);
     // A newer settings save started another refresh while the keychain call
     // was pending. Its snapshot is authoritative.
     if (generation !== auxiliaryServiceRefreshGeneration) return;
@@ -715,6 +727,11 @@ function safeErrorMessage(error: unknown): string {
   // McpError instances originate from our own validated handlers — their
   // messages are already safe to surface directly to the caller.
   if (error instanceof McpError) return error.message;
+  // Request-scoped mutation cancellation messages deliberately distinguish a
+  // safe retry from an already-dispatched command whose outcome is unknown.
+  // Preserve that safety guidance verbatim; generic timeout classification
+  // would erase the inspect-before-retry warning.
+  if (error instanceof MailboxMutationDeadlineError) return error.message;
   // ConnectionStateError carries operator-actionable guidance (fix the Bridge
   // password / start Bridge) written for a human — surface it verbatim so the
   // agent can relay exactly what the user needs to go fix.
@@ -904,7 +921,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 const _toolHandlers = allHandlers();
 const _escalationHandlers = escalationHandlers();
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
+server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+  // Capture an absolute deadline at request receipt. Permission gates and an
+  // elicitation prompt may consume part of the budget; they must never extend
+  // how long a client-visible mailbox mutation can remain live.
+  const mailboxMutationDeadlineAt = Date.now() + MAILBOX_MUTATION_DEADLINE_MS;
   const name = request.params.name;
   const args = request.params.arguments ?? {};
 
@@ -1312,7 +1333,36 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       MAX_SUBJECT_LENGTH,
       state: sharedState,
     };
-    const result = await handler(ctx);
+    const invokeHandler = async () => {
+      if (MAILBOX_MUTATION_TOOLS.has(name)) {
+        await routedImapService.ensureMutationConnection();
+      }
+      return withE2EMailboxIdentity(
+        args as Record<string, unknown>,
+        () => handler(ctx),
+      );
+    };
+    const result = ACCOUNT_MAIL_MUTATION_TOOLS.has(name)
+      ? await withMailboxMutationDeadline({
+        tool: name,
+        signal: extra.signal,
+        deadlineAt: mailboxMutationDeadlineAt,
+        transports: [
+          ...(MAILBOX_MUTATION_TOOLS.has(name) ? [{
+            scope: routedImapService,
+            abort: () => routedImapService.abortPrimaryMutationTransport(
+              `MCP account mail mutation '${name}' was cancelled or exceeded ${MAILBOX_MUTATION_DEADLINE_MS}ms`,
+            ),
+          }] : []),
+          ...(SMTP_MUTATION_TOOLS.has(name) ? [{
+            scope: routedSmtpService,
+            abort: () => routedSmtpService.abortActiveMutationTransport(
+              `MCP account mail mutation '${name}' was cancelled or exceeded ${MAILBOX_MUTATION_DEADLINE_MS}ms`,
+            ),
+          }] : []),
+        ],
+      }, invokeHandler)
+      : await invokeHandler();
     if (!isCurrentAccountRoute(requestedAccountId, routedAccountIdentity, routedAccountServices)) {
       resultIsError = true;
       logger.warn("Discarded a completed tool result after its account route changed", "MCPServer", {
@@ -2963,9 +3013,16 @@ async function main() {
 
   logger.info(`Starting mailpouch v${_pkgVersion}`, "MCPServer");
 
+  // Live-mail E2E uses a private, short-lived config clone. It must neither
+  // migrate that clone's plaintext into the operator's real keychain slots nor
+  // let an existing legacy keychain entry override the clone. The bypass is
+  // accepted only when the exact UUID token and canonical temp filename agree;
+  // setting the environment flag against a normal config fails closed.
+  const startupCredentialAccess = new StartupCredentialAccess(process.env, getConfigPath());
+
   // Migrate plaintext credentials to OS keychain if available
   try {
-    const migrated = await migrateCredentials();
+    const migrated = await startupCredentialAccess.migrate(migrateCredentials);
     if (migrated) {
       logger.info("Credentials migrated to OS keychain", "MCPServer");
     }
@@ -3023,12 +3080,19 @@ async function main() {
       // CRED-001: Pass PAT + SimpleLogin API key are keychain-routable. Use
       // the same replacement path as live Settings saves so startup and
       // hot-refresh semantics cannot drift.
-      await refreshAuxiliaryServicesFromConfig();
+      await refreshAuxiliaryServicesFromConfig(startupCredentialAccess);
       logger.setDebugMode(!!cn.debug);
       tracer.setEnabled(!!cn.debug);
 
       // Password: keychain takes priority over config file plaintext
-      const keychainCreds = await loadCredentialsFromKeychain();
+      // The strict E2E clone carries the normal quarantine marker plus
+      // encrypted-file fields, so this helper decrypts the clone while
+      // skipping every OS-keychain read. Normal configs retain the existing
+      // keychain-first behavior.
+      const keychainCreds = await startupCredentialAccess.readMailbox(
+        loadCredentialsFromConfigFile,
+        loadCredentialsFromKeychain,
+      );
       // CRED-010: an encrypted blob that failed authenticated decryption is a
       // tamper indicator. loadCredentialsFromKeychain signals this distinctly so
       // we must NOT fall back to the coexisting plaintext field — leave the
@@ -3333,7 +3397,7 @@ async function main() {
     // config-file values. When both are present the keychain wins, matching
     // the loadCredentialsFromKeychain priority chain for password/smtpToken.
     const { loadRemoteSecrets } = await import("./security/keychain.js");
-    const remoteSecrets = await loadRemoteSecrets();
+    const remoteSecrets = await startupCredentialAccess.readExternal(loadRemoteSecrets);
     // OAuth is now the ONLY remote-auth mechanism: every agent authenticates as
     // its own client (authorization_code for interactive, client_credentials for
     // service accounts) so each is independently gated, audited, and revocable.

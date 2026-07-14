@@ -6,10 +6,11 @@
  * the user's home directory.
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { homedir } from "os";
 import { join } from "path";
 import type { ServerConfig } from "../config/schema.js";
+import { CredentialEncryption } from "../crypto/credential-encryption.js";
 
 // Resolve the config path the SAME way the loader does (`path.join(homedir(), ...)`),
 // not via `${process.env.HOME}/...` — that would fail on Windows twice:
@@ -141,6 +142,10 @@ describe("accounts registry", () => {
     diskByPath = new Map();
     stableConfigMtimeMs = null;
     invalidateConfigCache();
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
   });
 
   it("migrates a legacy single-account config into an accounts array on first read", () => {
@@ -297,6 +302,112 @@ describe("accounts registry", () => {
     expect(loadAccount).not.toHaveBeenCalled();
     expect(loadLegacy).not.toHaveBeenCalled();
     expect(reg.accounts[0]).toMatchObject({ password: "", smtpToken: "" });
+  });
+
+  it("hydrates only the selected account from an exact quarantined E2E encrypted clone without OS keychain reads", async () => {
+    const token = "mpE2E-00000000-0000-4000-8000-000000000004";
+    const configPath = join(homedir(), `.mailpouch-e2e-bridge-${token}.json`);
+    vi.stubEnv("MAILPOUCH_CONFIG", configPath);
+    vi.stubEnv("MAILPOUCH_E2E_CONFIG_ONLY_CREDENTIALS", "1");
+    vi.stubEnv("MAILPOUCH_E2E_RUN_TOKEN", token);
+    vi.stubEnv("MAILPOUCH_MACHINE_SECRET", "registry-e2e-machine-secret");
+
+    const keychain = await import("../security/keychain.js");
+    const loadAccount = vi.mocked(keychain.loadAccountCredentials);
+    const loadLegacy = vi.mocked(keychain.loadCredentials);
+    loadAccount.mockClear();
+    loadLegacy.mockClear();
+
+    const cfg = defaultConfig();
+    cfg.keychainMailboxCredentialsQuarantined = true;
+    cfg.connection.passwordEncrypted = CredentialEncryption.encrypt("clone-password");
+    cfg.connection.smtpTokenEncrypted = CredentialEncryption.encrypt("clone-smtp-token");
+    cfg.accounts = [
+      { id: "account-a", name: "A", providerType: "imap", smtpHost: "s", smtpPort: 1, imapHost: "i", imapPort: 1, username: "a", password: "", smtpToken: "" },
+      { id: "account-b", name: "B", providerType: "imap", smtpHost: "s", smtpPort: 1, imapHost: "i", imapPort: 1, username: "b", password: "", smtpToken: "" },
+    ];
+    cfg.activeAccountId = "account-b";
+    diskByPath.set(configPath, JSON.stringify(cfg));
+    invalidateConfigCache();
+
+    const reg = await readRegistryWithSecrets();
+
+    expect(reg.activeAccountId).toBe("account-b");
+    expect(reg.accounts.find(account => account.id === "account-a")).toMatchObject({ password: "" });
+    expect(reg.accounts.find(account => account.id === "account-a")?.smtpToken).toBeUndefined();
+    expect(reg.accounts.find(account => account.id === "account-b")).toMatchObject({
+      password: "clone-password",
+      smtpToken: "clone-smtp-token",
+    });
+    expect(loadAccount).not.toHaveBeenCalled();
+    expect(loadLegacy).not.toHaveBeenCalled();
+  });
+
+  it("hydrates an exact quarantined Greenmail profile from config without any OS keychain read", async () => {
+    const token = "mpE2E-00000000-0000-4000-8000-000000000006";
+    const configPath = join(homedir(), `.mailpouch-e2e-greenmail-${token}.json`);
+    vi.stubEnv("MAILPOUCH_CONFIG", configPath);
+    vi.stubEnv("MAILPOUCH_E2E_CONFIG_ONLY_CREDENTIALS", "1");
+    vi.stubEnv("MAILPOUCH_E2E_CREDENTIAL_TOKEN", token);
+
+    const keychain = await import("../security/keychain.js");
+    const loadAccount = vi.mocked(keychain.loadAccountCredentials);
+    const loadLegacy = vi.mocked(keychain.loadCredentials);
+    loadAccount.mockClear();
+    loadLegacy.mockClear();
+
+    const cfg = defaultConfig();
+    cfg.keychainMailboxCredentialsQuarantined = true;
+    cfg.connection.username = "alice";
+    cfg.connection.password = "greenmail-password";
+    cfg.connection.smtpToken = "";
+    diskByPath.set(configPath, JSON.stringify(cfg));
+    invalidateConfigCache();
+
+    const reg = await readRegistryWithSecrets();
+
+    expect(reg.accounts).toHaveLength(1);
+    expect(reg.accounts[0]).toMatchObject({
+      id: "primary",
+      username: "alice",
+      password: "greenmail-password",
+    });
+    expect(loadAccount).not.toHaveBeenCalled();
+    expect(loadLegacy).not.toHaveBeenCalled();
+  });
+
+  it("leaves the active exact-E2E account blank when encrypted clone authentication fails", async () => {
+    const token = "mpE2E-00000000-0000-4000-8000-000000000005";
+    const configPath = join(homedir(), `.mailpouch-e2e-bridge-${token}.json`);
+    vi.stubEnv("MAILPOUCH_CONFIG", configPath);
+    vi.stubEnv("MAILPOUCH_E2E_CONFIG_ONLY_CREDENTIALS", "1");
+    vi.stubEnv("MAILPOUCH_E2E_RUN_TOKEN", token);
+    vi.stubEnv("MAILPOUCH_MACHINE_SECRET", "registry-e2e-machine-secret");
+
+    const encrypted = CredentialEncryption.encrypt("real-clone-password");
+    const bytes = Buffer.from(encrypted.encryptedData, "base64");
+    bytes[0] ^= 0xff;
+
+    const cfg = defaultConfig();
+    cfg.keychainMailboxCredentialsQuarantined = true;
+    cfg.connection.password = "untrusted-legacy-plaintext";
+    cfg.connection.passwordEncrypted = { ...encrypted, encryptedData: bytes.toString("base64") };
+    cfg.accounts = [
+      { id: "account-a", name: "A", providerType: "imap", smtpHost: "s", smtpPort: 1, imapHost: "i", imapPort: 1, username: "a", password: "non-active-value", smtpToken: "non-active-token" },
+      { id: "account-b", name: "B", providerType: "imap", smtpHost: "s", smtpPort: 1, imapHost: "i", imapPort: 1, username: "b", password: "untrusted-account-plaintext", smtpToken: "untrusted-account-token" },
+    ];
+    cfg.activeAccountId = "account-b";
+    diskByPath.set(configPath, JSON.stringify(cfg));
+    invalidateConfigCache();
+
+    const reg = await readRegistryWithSecrets();
+
+    expect(reg.accounts.find(account => account.id === "account-b")).toMatchObject({ password: "" });
+    expect(reg.accounts.find(account => account.id === "account-b")?.smtpToken).toBeUndefined();
+    expect(reg.accounts.find(account => account.id === "account-a")).toMatchObject({ password: "" });
+    expect(reg.accounts.find(account => account.id === "account-a")?.smtpToken).toBeUndefined();
+    expect(vi.mocked((await import("../security/keychain.js")).loadAccountCredentials)).not.toHaveBeenCalled();
+    expect(vi.mocked((await import("../security/keychain.js")).loadCredentials)).not.toHaveBeenCalled();
   });
 
   it("updateAccount returns null for an unknown id", async () => {

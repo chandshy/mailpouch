@@ -8,6 +8,11 @@ import type { SMTPService } from "./smtp-service.js";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync, readdirSync, statSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
+import {
+  MailboxMutationDeadlineError,
+  runAccountMailMutation,
+  withMailboxMutationDeadline,
+} from "./mailbox-mutation-deadline.js";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -27,6 +32,15 @@ function makeOptions() {
 
 function futureDate(secondsFromNow: number): Date {
   return new Date(Date.now() + secondsFromNow * 1000);
+}
+
+function deferred<T = void>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+} {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(done => { resolve = done; });
+  return { promise, resolve };
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -161,6 +175,65 @@ describe("SchedulerService", () => {
     const item = svc.list().find(i => i.id === id)!;
     expect(item.status).toBe("sent");
     expect(smtp.sendEmail).toHaveBeenCalledTimes(1);
+  });
+
+  it("persists outcome_unknown and never retries when an interactive abort closes a shared scheduled-send transport", async () => {
+    const scheduledDispatched = deferred();
+    const interactiveDispatched = deferred();
+    const scheduledReply = deferred<{ success: boolean; messageId: string }>();
+    const interactiveReply = deferred();
+    const abortTransport = vi.fn();
+    const smtp = {
+      backoff: { isBlocked: () => false },
+      abortActiveMutationTransport: abortTransport,
+      sendEmail: vi.fn(),
+    } as unknown as SMTPService;
+    vi.mocked(smtp.sendEmail).mockImplementation(() => runAccountMailMutation(
+      smtp,
+      async () => {
+        scheduledDispatched.resolve();
+        return scheduledReply.promise;
+      },
+    ));
+
+    const svc = new SchedulerService(smtp, storePath);
+    const id = svc.schedule(makeOptions(), futureDate(120));
+    vi.advanceTimersByTime(121 * 1000);
+    const processing = svc.processDue();
+
+    const controller = new AbortController();
+    const interactive = withMailboxMutationDeadline({
+      tool: "send_email",
+      signal: controller.signal,
+      deadlineAt: Date.now() + 10_000,
+      transports: [{
+        scope: smtp,
+        abort: () => smtp.abortActiveMutationTransport("interactive cancellation"),
+      }],
+    }, () => runAccountMailMutation(smtp, async () => {
+      interactiveDispatched.resolve();
+      await interactiveReply.promise;
+    }));
+
+    await Promise.all([scheduledDispatched.promise, interactiveDispatched.promise]);
+    controller.abort();
+    await expect(interactive).rejects.toBeInstanceOf(MailboxMutationDeadlineError);
+    await processing;
+
+    const item = svc.list().find(candidate => candidate.id === id)!;
+    expect(item.status).toBe("outcome_unknown");
+    expect(item.error).toMatch(/outcome is unknown/i);
+    expect(item.retryCount).toBe(1);
+    expect(item.nextAttemptAt).toBeUndefined();
+    expect(abortTransport).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(readFileSync(storePath, "utf-8"))).toContainEqual(
+      expect.objectContaining({ id, status: "outcome_unknown" }),
+    );
+
+    await svc.processDue();
+    expect(smtp.sendEmail).toHaveBeenCalledTimes(1);
+    scheduledReply.resolve({ success: true, messageId: "possibly-delivered" });
+    interactiveReply.resolve();
   });
 
   it("does not send unless the in-flight transition is durably persisted", async () => {
@@ -375,6 +448,31 @@ describe("SchedulerService", () => {
   });
 
   // ── persistence ─────────────────────────────────────────────────────────────
+
+  it("recovers a persisted in-flight send as outcome_unknown and never resends it", async () => {
+    const now = new Date().toISOString();
+    writeFileSync(storePath, JSON.stringify([{
+      id: "interrupted-send",
+      accountId: "primary",
+      scheduledAt: new Date(Date.now() - 60_000).toISOString(),
+      createdAt: now,
+      options: makeOptions(),
+      status: "sending",
+    }]), "utf-8");
+    const smtp = makeSMTP();
+    const svc = new SchedulerService(smtp, storePath);
+
+    (svc as unknown as { load: () => void }).load();
+    await svc.processDue();
+
+    const recovered = svc.list().find(item => item.id === "interrupted-send")!;
+    expect(recovered.status).toBe("outcome_unknown");
+    expect(recovered.error).toMatch(/outcome is unknown/i);
+    expect(smtp.sendEmail).not.toHaveBeenCalled();
+    expect(JSON.parse(readFileSync(storePath, "utf-8"))).toContainEqual(
+      expect.objectContaining({ id: "interrupted-send", status: "outcome_unknown" }),
+    );
+  });
 
   it("stop() persists scheduled items to disk; start() loads them", () => {
     const smtp = makeSMTP();

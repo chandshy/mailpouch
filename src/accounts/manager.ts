@@ -28,7 +28,6 @@ import { SimpleIMAPService } from "../services/simple-imap-service.js";
 import type { ProtonMailConfig } from "../types/index.js";
 import type { AccountRegistry, AccountSpec } from "./types.js";
 import {
-  mailboxKeychainCredentialsAreQuarantined,
   readRegistry,
   readRegistryWithSecrets,
 } from "./registry.js";
@@ -196,7 +195,11 @@ export class AccountManager extends EventEmitter {
       // process; this in-memory suspension also invalidates an already-running
       // async read before reset returns. A settings save or delayed startup
       // task must not make a stale keychain entry usable again.
-      const registry = this.keychainHydrationSuspended || mailboxKeychainCredentialsAreQuarantined()
+      // readRegistryWithSecrets() already enforces the durable quarantine for
+      // normal profiles. It also owns the tightly validated encrypted E2E-clone
+      // exception, so bypass it only for this manager's explicit in-memory
+      // suspension during a reset race.
+      const registry = this.keychainHydrationSuspended
         ? readRegistry()
         : await readRegistryWithSecrets();
       // The registry/keychain read yielded; never let an older result win.

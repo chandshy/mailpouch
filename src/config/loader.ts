@@ -867,13 +867,17 @@ export async function withConfigWriteLockAsync<T>(fn: () => Promise<T>): Promise
  * Load credentials with priority: keychain > encrypted-file > plaintext config.
  * Returns the credentials and the storage method used.
  */
-export async function loadCredentialsFromKeychain(): Promise<{
+export interface LoadedMailboxCredentials {
   password: string;
   smtpToken: string;
   storage: "keychain" | "encrypted-file" | "config" | "decrypt-failed";
-} | null> {
+}
+
+async function loadMailboxCredentials(
+  allowOsKeychain: boolean,
+): Promise<LoadedMailboxCredentials | null> {
   const tags: { hasPassword?: boolean; hasSmtpToken?: boolean; storage?: string } = {};
-  return tracer.span('config.loadKeychain', tags, async () => {
+  return tracer.span(allowOsKeychain ? 'config.loadKeychain' : 'config.loadFileCredentials', tags, async () => {
   const config = loadConfig();
 
   // A reset can complete its file transition even when the OS keychain
@@ -888,7 +892,7 @@ export async function loadCredentialsFromKeychain(): Promise<{
   // accept one credential write and reject its sibling, leaving an older value
   // in the failed entry that must not override the newer config fallback.
   let keychainCreds: { password: string; smtpToken: string } | null = null;
-  if (!keychainQuarantined) {
+  if (allowOsKeychain && !keychainQuarantined) {
     keychainCreds = await loadKeychainCredentials();
   }
 
@@ -988,7 +992,23 @@ export async function loadCredentialsFromKeychain(): Promise<{
   tags.hasPassword = false;
   tags.hasSmtpToken = false;
   return null;
-  }); // end tracer.span('config.loadKeychain')
+  });
+}
+
+export async function loadCredentialsFromKeychain(): Promise<LoadedMailboxCredentials | null> {
+  return loadMailboxCredentials(true);
+}
+
+/**
+ * Load mailbox credentials exclusively from the selected config file.
+ *
+ * This is the live Bridge E2E startup path. Its filename/token gate is checked
+ * by the caller before reaching here; this helper provides the second half of
+ * the invariant by making an OS-keychain read impossible even if the clone is
+ * malformed or accidentally loses its quarantine marker.
+ */
+export async function loadCredentialsFromConfigFile(): Promise<LoadedMailboxCredentials | null> {
+  return loadMailboxCredentials(false);
 }
 
 /**

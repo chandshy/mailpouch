@@ -13,11 +13,14 @@ import { randomBytes } from "crypto";
 import type { ServerConfig } from "../config/schema.js";
 import {
   defaultConfig,
+  getConfigPath,
   invalidateConfigCache,
   loadConfig,
+  loadCredentialsFromConfigFile,
   saveConfig,
   withConfigWriteLockAsync,
 } from "../config/loader.js";
+import { e2eConfigOnlyCredentialsRequested } from "../config/e2e-credential-mode.js";
 import type { AccountSpec, AccountRegistry, AccountStatus } from "./types.js";
 import {
   loadAccountCredentials,
@@ -127,7 +130,38 @@ export async function readRegistryWithSecrets(): Promise<AccountRegistry> {
   // delete failed. Returning the unhydrated registry is intentional: even a
   // fresh process must fail closed rather than make that old credential live
   // again. A subsequent successful reset clears the marker.
-  if (mailboxKeychainCredentialsAreQuarantined()) return reg;
+  if (mailboxKeychainCredentialsAreQuarantined()) {
+    // A live-mail E2E clone deliberately sets the quarantine marker and stores
+    // only encrypted legacy connection fields. Its exact UUID filename/env
+    // gate authorizes decrypting that clone into its single in-memory account,
+    // while still forbidding every real keychain read. Ordinary quarantined
+    // profiles continue to return unhydrated and fail closed.
+    if (e2eConfigOnlyCredentialsRequested(process.env, getConfigPath())) {
+      const credentials = await loadCredentialsFromConfigFile();
+      // The detached child is intended to represent one selected mailbox.
+      // Blank every account first so a malformed clone carrying extra
+      // plaintext accounts cannot make those credentials live after an
+      // in-process account switch.
+      for (const account of reg.accounts) {
+        account.password = "";
+        account.smtpToken = undefined;
+      }
+      const active = reg.accounts.find(account => account.id === reg.activeAccountId) ?? reg.accounts[0];
+      if (active) {
+        if (credentials && credentials.storage !== "decrypt-failed") {
+          active.password = credentials.password;
+          active.smtpToken = credentials.smtpToken || undefined;
+        } else if (credentials?.storage === "decrypt-failed") {
+          // Do not retain a plaintext account fallback from the same clone
+          // after authenticated decryption failed. The encrypted blob is the
+          // clone's credential authority; a failed tag must leave it blank.
+          active.password = "";
+          active.smtpToken = undefined;
+        }
+      }
+    }
+    return reg;
+  }
 
   const { loadCredentials } = await import("../security/keychain.js");
   for (const acct of reg.accounts) {

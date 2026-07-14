@@ -1,195 +1,230 @@
 /**
- * safe-bridge.e2e — the NON-DESTRUCTIVE live-Bridge gate.
+ * Live Proton Bridge safety gate.
  *
- * Runs the Bridge-unique validations (the All-Mail bulk-move "false-success"
- * class / Bug A, plus move/copy/label/flag/folder/search) entirely inside a
- * token-scoped scratch namespace. It CREATES its own folders + messages
- * (`mpE2E-<runid>`-tagged) and on teardown deletes ONLY those — it never wipes,
- * never touches INBOX/system folders, and never alters any pre-existing mail.
- * So it is safe to run against a real Proton Bridge account:
- *
- *   MAILPOUCH_E2E_BRIDGE_CONFIG=<bridge.json> npm run test:e2e:bridge:safe
- *
- * Runs `safe: true` explicitly, so it also exercises the scratch logic on the
- * disposable Greenmail server in the normal `test:e2e:local` run.
- *
- * The one real folder it reads is "All Mail" — as a MOVE source, acting solely
- * on a single self-seeded, token-subjected message id. That test self-skips
- * when "All Mail" is absent (e.g. Greenmail).
+ * Pre-existing mail and folders are read-only. Every mutation operand below is
+ * a message appended by this run with the exact ownership header, Message-ID,
+ * folder UIDVALIDITY, and UID recorded before dispatch. Folder lifecycle tests
+ * stay on disposable Greenmail because IMAP has no atomic delete-if-empty
+ * operation for a live mailbox.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { startE2E, bridgeConfigAvailable, type E2EHarness } from "../mcp-client.js";
-import * as docker from "../support/docker.js";
+import { bridgeConfigAvailable, startE2E, type E2EHarness } from "../mcp-client.js";
 import type { SeedEmail } from "../support/mime-builder.js";
-import { PROMO_CREDIT_KARMA, PROMO_RED_LOBSTER, RELEASE_NVIDIA } from "../fixtures/seed-data.js";
+import { PROMO_CREDIT_KARMA, PROMO_RED_LOBSTER } from "../fixtures/seed-data.js";
 
 type BulkResult = { success: number; failed: number; errors: string[] };
-type SearchResult = { emails: Array<{ id?: string; uid?: number; subject: string }> };
+type SearchResult = { emails: Array<{ subject: string }> };
+type SubjectExpectation = { folder: string; subject: string; present: boolean };
 
-const A = PROMO_CREDIT_KARMA;
-const B = PROMO_RED_LOBSTER;
-const C = RELEASE_NVIDIA;
-
-describe("safe-bridge.e2e — non-destructive Bridge audit (scratch-scoped)", () => {
+describe.skipIf(!bridgeConfigAvailable())("safe-bridge.e2e — exact-owned messages only", () => {
   let h: E2EHarness;
   let token: string;
 
   beforeAll(async () => {
-    // Greenmail only: bring up the disposable server. Bridge mode uses the real
-    // backend (no docker).
-    if (!bridgeConfigAvailable()) await docker.restart();
     h = await startE2E({ safe: true });
     token = h.runToken!;
+    expect(h.mode).toBe("bridge");
     expect(h.scratch).toBeDefined();
-    // Wait for the mailpouch IMAP connection to be LIVE before any test runs.
-    // docker.restart() only TCP-probes the port, and a cold Bridge connect also
-    // lags — the server can be mid-(re)connect (1-min backoff) when the port is
-    // already open, so without this the first scratch ops race it and fail
-    // "IMAP client not connected". get_folders calls ensureConnection(); retry
-    // until it lands.
-    let ready = false;
-    for (let i = 0; i < 20 && !ready; i++) {
-      const r = await h.callRaw("get_folders");
-      ready = r.ok === true && r.isError !== true;
-      if (!ready) await new Promise((res) => setTimeout(res, 1000));
+  });
+
+  afterAll(async () => {
+    if (h) await h.close();
+  });
+
+  const seed = (tag: string, base: SeedEmail = PROMO_CREDIT_KARMA): SeedEmail => ({
+    ...base,
+    subject: `${token} ${tag}`,
+  });
+
+  /**
+   * APPEND through the independent fixture, then wait until mailpouch's own
+   * IMAP connection can read the same exact Message-ID, subject, and ownership
+   * header. Dispatching a mutation before this read-only readiness proof can
+   * race Bridge's per-session projection and produce a false "UID not found".
+   */
+  async function appendVisible(folder: string, owned: SeedEmail, flags: string[] = []): Promise<number> {
+    return (await h.appendVisibleSeed(folder, owned, flags)).uid;
+  }
+
+  async function waitForSubjects(expectations: readonly SubjectExpectation[]): Promise<void> {
+    const byFolder = new Map<string, SubjectExpectation[]>();
+    for (const expectation of expectations) {
+      const folderExpectations = byFolder.get(expectation.folder) ?? [];
+      folderExpectations.push(expectation);
+      byFolder.set(expectation.folder, folderExpectations);
     }
-    expect(ready).toBe(true);
+    const deadline = Date.now() + 30_000;
+    let observed = new Map<string, Map<string, number[]>>();
+    do {
+      observed = new Map();
+      let matched = true;
+      // ImapFixtures owns one mutable IMAP client, so folders are observed
+      // sequentially. Each folder call reconnects once, then checks every
+      // subject under that one fresh selected-mailbox session.
+      for (const [folder, folderExpectations] of byFolder) {
+        const matches = await h.imap.searchSubjects(
+          folder,
+          folderExpectations.map(({ subject }) => subject),
+        );
+        observed.set(folder, matches);
+        if (folderExpectations.some(
+          ({ subject, present }) => (matches.get(subject)?.length ?? 0) > 0 !== present,
+        )) matched = false;
+      }
+      if (matched) return;
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+    } while (Date.now() < deadline);
+    for (const { folder, subject, present } of expectations) {
+      expect(
+        (observed.get(folder)?.get(subject)?.length ?? 0) > 0,
+        `${folder} subject ${subject}`,
+      ).toBe(present);
+    }
+  }
+
+  async function waitForFlags(folder: string, uids: number[], expected: string[]): Promise<void> {
+    const deadline = Date.now() + 30_000;
+    let observed = new Map<number, string[] | null>();
+    do {
+      observed = await h.imap.getFlagsForUids(folder, uids);
+      if ([...observed.values()].every(
+        (flags) => flags && expected.every((flag) => flags.includes(flag)),
+      )) return;
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+    } while (Date.now() < deadline);
+    for (const uid of uids) {
+      expect(observed.get(uid), `UID ${uid} flags`).toEqual(expect.arrayContaining(expected));
+    }
+  }
+
+  it("marks and stars only exact run-owned INBOX UIDs", async () => {
+    const first = seed("owned-flags-1");
+    const second = seed("owned-flags-2", PROMO_RED_LOBSTER);
+    const uid1 = await appendVisible("INBOX", first);
+    const uid2 = await appendVisible("INBOX", second);
+
+    const read = h.json<BulkResult>(await h.call("bulk_mark_read", {
+      emailIds: [String(uid1), String(uid2)],
+      isRead: true,
+      sourceFolder: "INBOX",
+    }));
+    expect(read).toMatchObject({ success: 2, failed: 0 });
+
+    const starred = h.json<BulkResult>(await h.call("bulk_star", {
+      emailIds: [String(uid1), String(uid2)],
+      isStarred: true,
+      sourceFolder: "INBOX",
+    }));
+    expect(starred).toMatchObject({ success: 2, failed: 0 });
+    await waitForFlags("INBOX", [uid1, uid2], ["\\Seen", "\\Flagged"]);
+  }, 60_000);
+
+  it("moves only exact run-owned INBOX UIDs into Archive", async () => {
+    const first = seed("owned-archive-1");
+    const second = seed("owned-archive-2", PROMO_RED_LOBSTER);
+    const uid1 = await appendVisible("INBOX", first);
+    const uid2 = await appendVisible("INBOX", second);
+
+    const result = h.json<BulkResult>(await h.call("bulk_move_emails", {
+      emailIds: [String(uid1), String(uid2)],
+      targetFolder: "Archive",
+      sourceFolder: "INBOX",
+    }));
+    expect(result).toMatchObject({ success: 2, failed: 0 });
+    await waitForSubjects([
+      { folder: "INBOX", subject: first.subject, present: false },
+      { folder: "INBOX", subject: second.subject, present: false },
+      { folder: "Archive", subject: first.subject, present: true },
+      { folder: "Archive", subject: second.subject, present: true },
+    ]);
   }, 90_000);
 
-  afterAll(async () => { if (h) await h.close(); }); // cleanup() deletes only token folders
+  it("moves one exact run-owned INBOX UID into Archive", async () => {
+    const owned = seed("owned-archive-single");
+    const uid = await appendVisible("INBOX", owned);
 
-  /** Sorted subjects actually present in a folder (real server state). */
-  async function subjectsIn(folder: string): Promise<string[]> {
-    const uids = await h.imap.listUids(folder);
-    const subs: string[] = [];
-    for (const u of uids) { const s = await h.imap.getSubject(folder, u); if (s) subs.push(s); }
-    return subs.sort();
-  }
-  const sorted = (xs: string[]) => [...xs].sort();
-  /** A seed whose subject carries the run token — unambiguous even in All Mail. */
-  const tokenSeed = (tag: string): SeedEmail => ({ ...A, subject: `${token} ${tag}` });
-
-  it("bulk_move_emails relocates every message from a non-INBOX scratch source (no loss)", async () => {
-    const src = await h.scratch!.create("folders");
-    const dst = await h.scratch!.create("folders");
-    const u1 = await h.imap.appendScratch(src, token, A);
-    const u2 = await h.imap.appendScratch(src, token, B);
-    const u3 = await h.imap.appendScratch(src, token, C);
-
-    const r = h.json<BulkResult>(await h.call("bulk_move_emails", {
-      emailIds: [u1, u2, u3].map(String), targetFolder: dst, sourceFolder: src,
+    const result = h.json<{ success: boolean }>(await h.call("move_email", {
+      emailId: String(uid),
+      targetFolder: "Archive",
+      sourceFolder: "INBOX",
     }));
-    expect(r.success).toBe(3);
-    expect(r.failed).toBe(0);
-    expect(await subjectsIn(src)).toEqual([]);
-    expect(await subjectsIn(dst)).toEqual(sorted([A.subject, B.subject, C.subject]));
-  });
+    expect(result.success).toBe(true);
+    await waitForSubjects([
+      { folder: "INBOX", subject: owned.subject, present: false },
+      { folder: "Archive", subject: owned.subject, present: true },
+    ]);
+  }, 90_000);
 
-  it("bulk_move_emails works from a space-named source (the Bug-A space-in-name shape)", async () => {
-    const src = await h.scratch!.create("spaced"); // `Folders/<token> spaced N` — spaces, no reserved word
-    const dst = await h.scratch!.create("folders");
-    const u1 = await h.imap.appendScratch(src, token, A);
-    const u2 = await h.imap.appendScratch(src, token, C);
+  it("deletes only exact run-owned INBOX UIDs by moving them to Trash", async () => {
+    const first = seed("owned-trash-1");
+    const second = seed("owned-trash-2", PROMO_RED_LOBSTER);
+    const uid1 = await appendVisible("INBOX", first);
+    const uid2 = await appendVisible("INBOX", second);
 
-    const r = h.json<BulkResult>(await h.call("bulk_move_emails", {
-      emailIds: [u1, u2].map(String), targetFolder: dst, sourceFolder: src,
+    const result = h.json<BulkResult>(await h.call("bulk_delete_emails", {
+      emailIds: [String(uid1), String(uid2)],
+      sourceFolder: "INBOX",
+      confirmed: true,
     }));
-    expect(r.success).toBe(2);
-    expect(r.failed).toBe(0);
-    expect(await subjectsIn(src)).toEqual([]);
-    expect(await subjectsIn(dst)).toEqual(sorted([A.subject, C.subject]));
-  });
+    expect(result).toMatchObject({ success: 2, failed: 0 });
+    await waitForSubjects([
+      { folder: "INBOX", subject: first.subject, present: false },
+      { folder: "INBOX", subject: second.subject, present: false },
+      { folder: "Trash", subject: first.subject, present: true },
+      { folder: "Trash", subject: second.subject, present: true },
+    ]);
+  }, 90_000);
 
-  it("bulk_move_to_label copies into an auto-created label, source retained (the bug-report tool)", async () => {
-    const src = await h.scratch!.create("folders");
-    const label = `${token}-lbl`;            // token-bearing → cleaned up
-    const labelFolder = `Labels/${label}`;
-    const u1 = await h.imap.appendScratch(src, token, A);
-    const u2 = await h.imap.appendScratch(src, token, B);
-    expect(await h.imap.mailboxExists(labelFolder)).toBe(false);
+  it("deletes one exact run-owned INBOX UID by moving it to Trash", async () => {
+    const owned = seed("owned-trash-single");
+    const uid = await appendVisible("INBOX", owned);
 
-    const r = h.json<BulkResult>(await h.call("bulk_move_to_label", {
-      emailIds: [u1, u2].map(String), label, sourceFolder: src,
+    const result = h.json<{ success: boolean }>(await h.call("delete_email", {
+      emailId: String(uid),
+      sourceFolder: "INBOX",
+      confirmed: true,
     }));
-    expect(r.success).toBe(2);
-    expect(r.failed).toBe(0);
-    expect(await subjectsIn(src)).toEqual(sorted([A.subject, B.subject]));        // source RETAINED
-    expect(await subjectsIn(labelFolder)).toEqual(sorted([A.subject, B.subject])); // copies present
-  });
+    expect(result.success).toBe(true);
+    await waitForSubjects([
+      { folder: "INBOX", subject: owned.subject, present: false },
+      { folder: "Trash", subject: owned.subject, present: true },
+    ]);
+  }, 90_000);
 
-  it("bulk_mark_read sets \\Seen on a scratch folder without relocating or losing mail", async () => {
-    const src = await h.scratch!.create("folders");
-    const u1 = await h.imap.appendScratch(src, token, A);
-    const u2 = await h.imap.appendScratch(src, token, B);
-
-    const r = h.json<BulkResult>(await h.call("bulk_mark_read", {
-      emailIds: [u1, u2].map(String), isRead: true, sourceFolder: src,
+  it("searches a run-owned message without mutating existing mail", async () => {
+    const owned = seed("owned-search");
+    await appendVisible("INBOX", owned);
+    const result = h.json<SearchResult>(await h.call("search_emails", {
+      folder: "INBOX",
+      subject: owned.subject,
     }));
-    expect(r.success).toBe(2);
-    expect(await subjectsIn(src)).toEqual(sorted([A.subject, B.subject])); // nothing moved/lost
-    expect(await h.imap.getFlags(src, u1)).toContain("\\Seen");
+    expect(result.emails.some((email) => email.subject === owned.subject)).toBe(true);
   });
 
-  it("bulk_star sets \\Flagged on a scratch folder without relocating or losing mail", async () => {
-    const src = await h.scratch!.create("folders");
-    const u1 = await h.imap.appendScratch(src, token, A);
+  it("refuses every All Mail UID even when the message is run-owned", async () => {
+    const owned = seed("owned-all-mail-refusal");
+    await appendVisible("INBOX", owned);
 
-    const r = h.json<BulkResult>(await h.call("bulk_star", {
-      emailIds: [String(u1)], isStarred: true, sourceFolder: src,
-    }));
-    expect(r.success).toBe(1);
-    expect(await subjectsIn(src)).toEqual([A.subject]);
-    expect(await h.imap.getFlags(src, u1)).toContain("\\Flagged");
-  });
-
-  it("folder create + rename via tools (token-named, cleaned up)", async () => {
-    const a = `Folders/${token}-crud`;
-    const b = `Folders/${token}-crud2`;
-    h.json(await h.call("create_folder", { folderName: a }));
-    expect((await h.imap.listMailboxes()).includes(a)).toBe(true);
-    h.json(await h.call("rename_folder", { oldName: a, newName: b }));
-    const paths = await h.imap.listMailboxes();
-    expect(paths.includes(b)).toBe(true);
-    expect(paths.includes(a)).toBe(false);
-  });
-
-  it("search_emails finds a seeded message within a scratch folder", async () => {
-    const src = await h.scratch!.create("folders");
-    await h.imap.appendScratch(src, token, tokenSeed("searchable"));
-    const r = h.json<SearchResult>(await h.call("search_emails", { folder: src, subject: token }));
-    expect(r.emails.some((e) => e.subject.includes(token))).toBe(true);
-  });
-
-  // GENUINE Bug A — move OUT of the real "All Mail" union. Bridge-only. Acts
-  // solely on ONE self-seeded, token-subjected message id, located via a direct
-  // IMAP SUBJECT search of All Mail — never other mail.
-  it("bulk_move_emails relocates a self-seeded message OUT of the real All Mail union", async () => {
-    if (!(await h.imap.mailboxExists("All Mail"))) {
-      // No Proton All-Mail union (e.g. Greenmail) — the spaced-name analog above covers the name shape.
-      return;
+    let allMailUids: number[] = [];
+    for (let attempt = 0; attempt < 120 && allMailUids.length === 0; attempt += 1) {
+      allMailUids = await h.imap.searchSubject("All Mail", owned.subject);
+      if (allMailUids.length === 0) await new Promise((resolve) => setTimeout(resolve, 1_000));
     }
-    const src = await h.scratch!.create("folders");
-    const dst = await h.scratch!.create("folders");
-    const seed = tokenSeed("allmail-union");
-    await h.imap.appendScratch(src, token, seed); // also surfaces in the All Mail union
+    expect(allMailUids).toHaveLength(1);
 
-    // All Mail indexing can lag a moment after APPEND — poll for OUR message.
-    let amUids: number[] = [];
-    for (let i = 0; i < 12 && amUids.length === 0; i++) {
-      amUids = await h.imap.searchSubject("All Mail", seed.subject);
-      if (amUids.length === 0) await new Promise((r) => setTimeout(r, 500));
-    }
-    if (amUids.length === 0) {
-      console.warn("All-Mail-union test skipped: seeded message did not surface in All Mail within 6s");
-      return; // Proton indexing lag, not a mailpouch defect — the non-INBOX moves above cover the core axis
-    }
+    await expect(h.call("bulk_move_emails", {
+      emailIds: [String(allMailUids[0])],
+      targetFolder: "Archive",
+      sourceFolder: "All Mail",
+    })).rejects.toThrow(/remap All Mail UIDs/i);
+    expect(await h.imap.isOwnedUid("All Mail", allMailUids[0]!, token)).toBe(true);
+  }, 90_000);
 
-    const r = h.json<BulkResult>(await h.call("bulk_move_emails", {
-      emailIds: [String(amUids[0])], targetFolder: dst, sourceFolder: "All Mail",
-    }));
-    expect(r.success).toBe(1);
-    expect(r.failed).toBe(0);
-    expect(await subjectsIn(dst)).toEqual([seed.subject]); // verified landing — the Bug-A property
+  it("refuses live folder creation before MCP dispatch", async () => {
+    await expect(h.call("create_folder", {
+      folderName: `Folders/${token}-must-not-exist`,
+    })).rejects.toThrow(/cannot later be deleted atomically/i);
+    expect(await h.imap.mailboxExists(`Folders/${token}-must-not-exist`)).toBe(false);
   });
 });

@@ -12,6 +12,10 @@ import { ScheduledEmail, SendEmailOptions } from "../types/index.js";
 import { SMTPService } from "./smtp-service.js";
 import { logger } from "../utils/logger.js";
 import { tracer } from "../utils/tracer.js";
+import {
+  MailboxMutationDeadlineError,
+  withBackgroundAccountMailMutation,
+} from "./mailbox-mutation-deadline.js";
 
 /** Maximum number of seconds in the future for a scheduled send (30 days). */
 const MAX_SCHEDULE_AHEAD_MS = 30 * 24 * 60 * 60 * 1000;
@@ -40,7 +44,14 @@ const MAX_HISTORY_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 /** Hard cap on non-pending records retained in history (safety valve). */
 const MAX_HISTORY_RECORDS = 1000;
 
-const VALID_STATUSES = new Set(["pending", "sending", "sent", "failed", "cancelled"]);
+const VALID_STATUSES = new Set([
+  "pending",
+  "sending",
+  "sent",
+  "failed",
+  "cancelled",
+  "outcome_unknown",
+]);
 
 /**
  * Result of cancelling a scheduled email.
@@ -418,7 +429,7 @@ export class SchedulerService {
    *   status-to-sent flip, but the SMTP send is already on the wire and may
    *   succeed. Returns `{ ok: false, error: "in_flight" }` so the caller can
    *   warn the user that the message may still be delivered.
-   * - `"sent" | "failed" | "cancelled"`: terminal state, no-op, returns
+   * - `"sent" | "failed" | "cancelled" | "outcome_unknown"`: terminal state, no-op, returns
    *   `{ ok: false, error: "already_final" }`.
    * - unknown id: `{ ok: false, error: "not_found" }`.
    */
@@ -564,7 +575,15 @@ export class SchedulerService {
           throw err;
         }
         try {
-          const result = await smtpService.sendEmail(item.options);
+          const result = await withBackgroundAccountMailMutation({
+            tool: `scheduled_email:${item.id}`,
+            transports: [{
+              scope: smtpService,
+              abort: () => smtpService.abortActiveMutationTransport(
+                `shared cancellation while scheduled email ${item.id} was in flight`,
+              ),
+            }],
+          }, () => smtpService.sendEmail(item.options));
           // SMTP-001: a cancel() landing between the await and this assignment
           // flips item.status to "cancelled" — respect that signal and don't
           // clobber it back to "sent"/"failed".
@@ -598,6 +617,19 @@ export class SchedulerService {
           if (item.status !== "sending") {
             const errMsg = err instanceof Error ? err.message : String(err);
             logger.info(`Scheduled send threw but state changed mid-flight; preserving ${item.status}`, "Scheduler", { id: item.id, finalStatus: item.status, error: errMsg });
+            continue;
+          }
+          if (err instanceof MailboxMutationDeadlineError && err.outcomeUnknown) {
+            item.retryCount = (item.retryCount ?? 0) + 1;
+            item.status = "outcome_unknown";
+            item.error = err.message;
+            delete item.nextAttemptAt;
+            logger.error(
+              "Scheduled email delivery outcome is unknown; automatic retry is disabled to prevent a duplicate",
+              "Scheduler",
+              { id: item.id, accountId: item.accountId, error: err.message },
+            );
+            this.persist();
             continue;
           }
           item.retryCount = (item.retryCount ?? 0) + 1;
@@ -636,7 +668,22 @@ export class SchedulerService {
           logger.warn(`Skipped ${skipped} malformed record(s) from scheduled email store`, "Scheduler");
         }
         this.items = this.pruneHistory(valid);
+        const interrupted = this.items.filter(item => item.status === "sending");
+        for (const item of interrupted) {
+          item.status = "outcome_unknown";
+          item.error = item.error
+            ? `${item.error} Delivery was still marked in flight when mailpouch restarted; its outcome is unknown.`
+            : "mailpouch restarted while this delivery was in flight; its outcome is unknown. Inspect Sent mail before retrying manually.";
+          delete item.nextAttemptAt;
+        }
         logger.debug(`Loaded ${this.items.length} scheduled emails from disk`, "Scheduler");
+        if (interrupted.length > 0) {
+          logger.error(
+            `Recovered ${interrupted.length} interrupted scheduled email(s) as outcome_unknown; automatic retry is disabled`,
+            "Scheduler",
+          );
+          this.persist();
+        }
       }
     } catch (err: unknown) {
       logger.warn("Failed to load scheduled emails from disk — starting fresh", "Scheduler", err);
@@ -653,7 +700,7 @@ export class SchedulerService {
    *
    * Strategy:
    *   1. Keep all pending items (they must not be dropped).
-   *   2. For non-pending (sent/failed/cancelled), keep only those created
+   *   2. For non-pending history, including ambiguous outcomes, keep only records created
    *      within MAX_HISTORY_AGE_MS.
    *   3. If the remaining non-pending count still exceeds MAX_HISTORY_RECORDS,
    *      keep only the most-recently-created MAX_HISTORY_RECORDS entries.

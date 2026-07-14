@@ -13,19 +13,16 @@
 // Exit 1 — drift OR write requested.
 
 import { readFile, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, openSync, closeSync, readFileSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { spawnShellFreeSync } from "./lib/cross-platform-spawn.mjs";
+import { tmpdir } from "node:os";
+import { spawnShellFree } from "./lib/cross-platform-spawn.mjs";
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const INVENTORY = join(ROOT, "LICENSES.json");
 
-const res = spawnShellFreeSync("npm", ["ls", "--all", "--json", "--omit=dev", "--long"], {
-  encoding: "utf-8",
-  cwd: ROOT,
-  maxBuffer: 32 * 1024 * 1024,
-});
+const res = await runNpmJson(["ls", "--all", "--json", "--omit=dev", "--long"]);
 if (res.error || (res.status !== 0 && !res.stdout)) {
   console.error(`npm ls failed (exit ${res.status}): ${res.error?.message || res.stderr}`);
   process.exit(1);
@@ -153,3 +150,30 @@ if (unknown.length > 0) {
 }
 
 console.log(`license-inv OK: ${current.length} prod deps, no drift.`);
+
+function runNpmJson(args) {
+  return new Promise((resolve) => {
+    const outPath = join(tmpdir(), `mailpouch-npm-out-${process.pid}-${Date.now()}.json`);
+    const errPath = join(tmpdir(), `mailpouch-npm-err-${process.pid}-${Date.now()}.log`);
+    const outFd = openSync(outPath, "w");
+    const errFd = openSync(errPath, "w");
+    const child = spawnShellFree("npm", args, {
+      cwd: ROOT,
+      stdio: ["ignore", outFd, errFd],
+    });
+    child.on("error", (error) => {
+      closeSync(outFd);
+      closeSync(errFd);
+      resolve({ error, status: 1, stdout: "", stderr: "" });
+    });
+    child.on("close", (status) => {
+      closeSync(outFd);
+      closeSync(errFd);
+      const stdout = readFileSync(outPath, "utf8");
+      const stderr = readFileSync(errPath, "utf8");
+      rmSync(outPath, { force: true });
+      rmSync(errPath, { force: true });
+      resolve({ status, stdout, stderr, error: null });
+    });
+  });
+}

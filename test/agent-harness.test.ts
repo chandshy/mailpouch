@@ -19,8 +19,10 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { allToolDefs } from "../src/tools/registry.js";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
-import { writeFileSync, readFileSync, unlinkSync } from "fs";
-import { execSync } from "child_process";
+import { writeFileSync, readFileSync, unlinkSync, mkdtempSync, rmSync } from "fs";
+import { homedir } from "os";
+import { randomUUID } from "crypto";
+import { localAgentId } from "../src/agents/caller-context.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SERVER = join(__dirname, "../dist/index.js");
@@ -34,6 +36,13 @@ type RawOutcome =
   | { ok: false; code?: number; message: string };
 
 let client: Client;
+let runtimeRoot: string | undefined;
+
+/** Allocate a mailbox path which this harness invocation alone may create.
+ * Existing mailbox paths and messages remain read-only. */
+function ownedHarnessFolder(purpose: string): string {
+  return `Folders/agent-harness-${randomUUID()}-${purpose}`;
+}
 
 /**
  * Call a tool. Returns the raw SDK result.
@@ -100,10 +109,45 @@ function assertWellFormed(outcome: RawOutcome): void {
 // ─── Lifecycle ────────────────────────────────────────────────────────────────
 
 beforeAll(async () => {
+  runtimeRoot = mkdtempSync(join(homedir(), ".mailpouch-agent-harness-"));
+  const grantsPath = join(runtimeRoot, "agents.json");
+  const now = new Date().toISOString();
+  writeFileSync(grantsPath, JSON.stringify({
+    version: 1,
+    grants: [{
+      clientId: localAgentId("agent-harness"),
+      clientName: "agent-harness",
+      status: "active",
+      preset: "full",
+      createdAt: now,
+      approvedAt: now,
+      totalCalls: 0,
+      transport: "stdio",
+      note: "agent harness — pre-approved in isolated test state",
+    }],
+  }, null, 2), { mode: 0o600 });
+  const childEnv = {
+    ...process.env,
+    MAILPOUCH_INSECURE_BRIDGE: "1",
+    MAILPOUCH_FORCE_STDIO: "1",
+    MAILPOUCH_TIER: "complete",
+    MAILPOUCH_AGENTS: grantsPath,
+    MAILPOUCH_AGENT_AUDIT: join(runtimeRoot, "agent-audit.jsonl"),
+    MAILPOUCH_AUDIT: join(runtimeRoot, "audit.jsonl"),
+    MAILPOUCH_FTS_DB: join(runtimeRoot, "fts.db"),
+    MAILPOUCH_LOCK_PATH: join(runtimeRoot, "singleton.lock"),
+    MAILPOUCH_LOG_FILE: join(runtimeRoot, "mailpouch.log"),
+    MAILPOUCH_OAUTH_TOKENS: join(runtimeRoot, "oauth-tokens.json"),
+    MAILPOUCH_PASS_AUDIT: join(runtimeRoot, "pass-audit.jsonl"),
+    MAILPOUCH_PENDING: join(runtimeRoot, "pending.json"),
+    MAILPOUCH_REMINDERS: join(runtimeRoot, "reminders.json"),
+    MAILPOUCH_SCHEDULER_STORE: join(runtimeRoot, "scheduler.json"),
+    MAILPOUCH_SERVICE_ACCOUNTS: join(runtimeRoot, "service-accounts.json"),
+  };
   const transport = new StdioClientTransport({
     command: "node",
     args: [SERVER],
-    env: { ...process.env, MAILPOUCH_INSECURE_BRIDGE: "1" },
+    env: childEnv,
   });
 
   client = new Client(
@@ -115,7 +159,11 @@ beforeAll(async () => {
 }, 20_000);
 
 afterAll(async () => {
-  await client.close();
+  try { await client?.close(); }
+  finally {
+    if (runtimeRoot) rmSync(runtimeRoot, { recursive: true, force: true });
+    runtimeRoot = undefined;
+  }
 });
 
 // ─── Discovery ────────────────────────────────────────────────────────────────
@@ -334,91 +382,34 @@ describe("folders", () => {
     expect(data.folders.some((f) => f.path === "Sent")).toBe(true);
   });
 
-  it("create_folder then delete_folder round-trip (skips if permission-blocked)", async () => {
-    const folderName = `Folders/Harness-Test-${Date.now()}`;
-
-    const created = await callRaw("create_folder", { folderName });
-    if (isPermissionBlocked(created)) return; // gate working — skip rest
-
-    expect("ok" in created && created.ok && !created.isError).toBe(true);
-
-    const deleted = await callRaw("delete_folder", { folderName, confirmed: true });
-    expect("ok" in deleted && deleted.ok && !deleted.isError).toBe(true);
-  });
-
-  it("create_folder returns error for duplicate name (or permission-blocked)", async () => {
-    const result = await callRaw("create_folder", { folderName: "INBOX" });
-    const isErrorOrBlocked =
-      isPermissionBlocked(result) ||
-      ("ok" in result && result.ok && result.isError === true);
-    expect(isErrorOrBlocked).toBe(true);
-  });
-
-  it("delete_folder with nonexistent path returns error (or permission-blocked)", async () => {
-    const result = await callRaw("delete_folder", {
-      folderName: "Folders/DoesNotExist-99999",
-    });
-    const isErrorOrBlocked =
-      isPermissionBlocked(result) ||
-      ("ok" in result && result.ok && result.isError === true);
-    expect(isErrorOrBlocked).toBe(true);
-  });
+  // IMAP mailbox DELETE is not atomic with the preceding emptiness check. Even
+  // a UUID-created live folder could receive a foreign message in that gap, so
+  // folder lifecycle execution belongs only to isolated Greenmail E2E.
+  it.skip("create/delete folder lifecycle requires an isolated backend", () => {});
+  it.skip("missing-folder delete probes require an isolated backend", () => {});
 });
 
 // ─── Actions ─────────────────────────────────────────────────────────────────
 
 describe("actions", () => {
-  let targetId: string;
+  let readOnlyTargetId: string;
 
   beforeAll(async () => {
     const r = await call("get_emails", { folder: "INBOX", limit: 1 });
     const data = json(r) as { emails: Record<string, unknown>[] };
-    targetId = data.emails[0]?.id as string;
+    readOnlyTargetId = data.emails[0]?.id as string;
   }, 30_000);
 
-  it("mark_email_read succeeds or is permission-blocked", async () => {
-    if (!targetId) return;
-    const result = await callRaw("mark_email_read", {
-      emailId: targetId,
-      folder: "INBOX",
-      read: true,
-    });
-    const isOkOrBlocked =
-      isPermissionBlocked(result) ||
-      ("ok" in result && result.ok && !result.isError);
-    expect(isOkOrBlocked).toBe(true);
-  });
-
-  it("mark_email_read with invalid id returns error (or permission-blocked)", async () => {
-    const result = await callRaw("mark_email_read", {
-      emailId: "999999999",
-      folder: "INBOX",
-      read: true,
-    });
-    const isErrorOrBlocked =
-      isPermissionBlocked(result) ||
-      ("ok" in result && result.ok && result.isError === true) ||
-      ("ok" in result && !result.ok);
-    expect(isErrorOrBlocked).toBe(true);
-  });
-
-  it("star_email succeeds or is permission-blocked", async () => {
-    if (!targetId) return;
-    const result = await callRaw("star_email", {
-      emailId: targetId,
-      folder: "INBOX",
-      starred: false,
-    });
-    const isOkOrBlocked =
-      isPermissionBlocked(result) ||
-      ("ok" in result && result.ok && !result.isError);
-    expect(isOkOrBlocked).toBe(true);
-  });
+  // This legacy harness has no ownership-aware APPEND fixture. Flag mutations
+  // are covered by the UUID-scoped Bridge E2E suite; never use a pre-existing
+  // INBOX UID merely to prove that a write is permitted.
+  it.skip("mark_email_read requires a run-owned seeded message", () => {});
+  it.skip("star_email requires a run-owned seeded message", () => {});
 
   it("extract_action_items runs or surfaces schema issue", async () => {
-    if (!targetId) return;
+    if (!readOnlyTargetId) return;
     const outcome = await callRaw("extract_action_items", {
-      emailId: targetId,
+      emailId: readOnlyTargetId,
       folder: "INBOX",
     });
     // Accept success, domain error, permission block, or MCP schema error
@@ -480,17 +471,19 @@ describe("permission gate — destructive ops", () => {
   }
 
   it("delete_email without confirmation is gated, not a silent no-op", async () => {
+    const sourceFolder = ownedHarnessFolder("missing-delete-source");
     const outcome = await callRaw("delete_email", {
       emailId: "1",
-      folder: "INBOX",
+      sourceFolder,
     });
     expect(isExplicitlyGated(outcome), `delete_email should be explicitly gated; got: ${JSON.stringify(outcome)}`).toBe(true);
   });
 
   it("bulk_delete without confirmation is gated, not a silent no-op", async () => {
+    const sourceFolder = ownedHarnessFolder("missing-bulk-delete-source");
     const outcome = await callRaw("bulk_delete", {
       emailIds: ["1", "2"],
-      folder: "INBOX",
+      sourceFolder,
     });
     expect(isExplicitlyGated(outcome), `bulk_delete should be explicitly gated; got: ${JSON.stringify(outcome)}`).toBe(true);
   });
@@ -713,7 +706,11 @@ function isAllowed(r: RawOutcome): boolean {
   return !isBlocked(r);
 }
 
-describe("permission gate — preset security matrix", () => {
+// Enabled send/state tools cannot be safely dispatched here because this
+// legacy harness has no UUID-owned message fixture and no durable cleanup
+// manifest. The same matrix is covered by unit tests; live execution stays
+// skipped until it is migrated onto the ownership-scoped Bridge harness.
+describe.skip("permission gate — preset security matrix (requires owned fixtures)", () => {
 
   // ── Tool catalog with correct inputSchema-satisfying args ──────────────────
   //
@@ -950,17 +947,9 @@ describe("permission gate — preset security matrix", () => {
           isAllowed(r) || ("ok" in r && r.ok && r.isError === true);
         expect(passedGate, `full: ${name} should pass gate; got ${JSON.stringify(r)}`).toBe(true);
       }
-      // create_folder with unique name (side-effecting but safe with cleanup)
-      const testFolder = `Folders/MatrixFull-${Date.now()}`;
-      const cfResult = await raw("create_folder", { folderName: testFolder });
-      const cfPassedGate = isAllowed(cfResult) || ("ok" in cfResult && cfResult.ok && cfResult.isError === true);
-      expect(cfPassedGate, `full: create_folder should pass gate`).toBe(true);
-      if (isAllowed(cfResult)) {
-        await raw("delete_folder", { folderName: testFolder }).catch(() => {});
-      }
-      // shutdown_server / restart_server are NOT called in full mode — they would
-      // terminate the test server. Their gate pass is inferred from create_folder above
-      // (all full_only tools share the same gate check by preset).
+      // Folder lifecycle and process-control calls remain undispatched. The
+      // isolated Greenmail suite covers their enabled behavior; this legacy
+      // live harness has no ownership manifest or atomic mailbox-delete guard.
     } finally {
       await stop();
     }

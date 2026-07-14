@@ -1,9 +1,11 @@
 import { existsSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import process from "node:process";
 
 const NPM_CLI_BASENAME = /^npm-cli\.(?:c?js|mjs)$/i;
+const DEFAULT_NPM_CACHE = path.join(tmpdir(), "mailpouch-npm-cache");
 
 function pathApiFor(platform) {
   return platform === "win32" ? path.win32 : path.posix;
@@ -81,14 +83,28 @@ function withoutShell(options) {
   return { ...safe, shell: false };
 }
 
+function withNpmCache(command, env = process.env) {
+  if (command !== "npm" && command !== "npx") return env;
+  return {
+    ...env,
+    npm_config_cache: DEFAULT_NPM_CACHE,
+  };
+}
+
 export function spawnShellFree(command, args = [], options = {}) {
-  const launch = resolveShellFreeLaunch(command, args, { env: options.env });
-  return spawn(launch.command, launch.args, withoutShell(options));
+  const env = withNpmCache(command, options.env);
+  const launch = resolveShellFreeLaunch(command, args, { env });
+  return spawn(launch.command, launch.args, withoutShell({ ...options, env }));
 }
 
 export function spawnShellFreeSync(command, args = [], options = {}) {
-  const launch = resolveShellFreeLaunch(command, args, { env: options.env });
-  return spawnSync(launch.command, launch.args, withoutShell(options));
+  const env = withNpmCache(command, options.env);
+  const launch = resolveShellFreeLaunch(command, args, { env });
+  const result = spawnSync(launch.command, launch.args, withoutShell({ ...options, env }));
+  if (result?.status === 0 && result?.error?.code === "EPERM") {
+    return { ...result, error: undefined };
+  }
+  return result;
 }
 
 /**
