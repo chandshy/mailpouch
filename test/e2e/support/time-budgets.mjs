@@ -1,7 +1,11 @@
 /** Shared live-Bridge E2E phase budgets. */
 /** Credential hydration, full IMAP connect/auth, baseline capture, and MCP handshake. */
 export const BRIDGE_SETUP_MS = 180_000;
-export const BRIDGE_CLEANUP_SETTLE_MS = 180_000;
+/** Proton's All Mail union can take several minutes to reflect concrete-folder
+ * deletions under real load (observed >6 min during release attestation).
+ * Convergence exits early on two consecutive clean ownership scans, so a
+ * generous ceiling costs nothing when the projection keeps up. */
+export const BRIDGE_CLEANUP_SETTLE_MS = 600_000;
 /** Require one unchanged exact Message-ID set across fresh Bridge sessions for
  * this long before the first All Mail rescue COPY. This lets delayed virtual
  * projections from concrete-folder cleanup disappear without creating an

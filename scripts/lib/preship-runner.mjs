@@ -60,7 +60,18 @@ export async function runSteps(steps, { header = "PRESHIP", verbose = false } = 
     const summary = res.summary ? "  " + styleText("gray", res.summary) : "";
     console.log(`${mark} ${nameCol} ${durCol}${summary}`);
     if (status === "fail") {
-      if (res.output) console.log(styleText("gray", res.output));
+      if (res.output) {
+        // CI step logs can truncate one large flush from the end, losing the
+        // test-runner summary. Print the tail first so the failure detail
+        // survives truncation, then the full output for local readers.
+        const lines = res.output.split("\n");
+        if (lines.length > 200) {
+          console.log(styleText("gray", `--- last 200 lines of ${step.name} output ---`));
+          console.log(styleText("gray", lines.slice(-200).join("\n")));
+          console.log(styleText("gray", `--- full ${step.name} output follows ---`));
+        }
+        console.log(styleText("gray", res.output));
+      }
       halted = true;
     } else if (status === "advisory" && (res.output || verbose)) {
       if (res.output) console.log(styleText("gray", res.output));
