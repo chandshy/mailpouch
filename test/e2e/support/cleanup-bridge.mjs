@@ -39,6 +39,7 @@ import { buildOwnershipDiscoveryQuery } from "./ownership-search.mjs";
 import {
   isFatalCleanupError,
   MutationOutcomeUnknownError,
+  MutationRefusedError,
   requireMutationResult,
 } from "./mutation-result.mjs";
 import {
@@ -1002,8 +1003,15 @@ async function runMutationCommand(label, operation) {
       },
       onTransition: debugPhaseTransition,
     });
-    return requireMutationResult(result, label);
+    return requireMutationResult(result, label, {
+      connectionUsable: client?.usable === true,
+    });
   } catch (error) {
+    // A tagged NO with a usable connection is a definite single-UID no-op:
+    // nothing was applied, so the session stays healthy and the convergence
+    // loop retries after the server settles (Proton refuses moves of
+    // freshly-sent Sent messages until its backend catches up).
+    if (error instanceof MutationRefusedError) throw error;
     // Once the command callback has been entered, a rejection does not prove
     // whether Bridge applied the mutation before reporting failure. Poison the
     // session and retain the recovery manifest for exact re-discovery.

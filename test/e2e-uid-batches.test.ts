@@ -6,6 +6,7 @@ import {
 } from "./e2e/support/uid-batches.mjs";
 import {
   isFatalCleanupError,
+  MutationRefusedError,
   requireMutationResult,
 } from "./e2e/support/mutation-result.mjs";
 
@@ -36,5 +37,25 @@ describe("Bridge E2E UID batching", () => {
       expect(isFatalCleanupError(thrown)).toBe(true);
     }
     expect(requireMutationResult({ ok: true }, "exact-owned UID MOVE")).toEqual({ ok: true });
+  });
+
+  it("treats a tagged NO on a usable connection as a retryable definite refusal", () => {
+    let thrown: unknown;
+    try { requireMutationResult(false, "exact-owned UID MOVE", { connectionUsable: true }); }
+    catch (error) { thrown = error; }
+    expect(thrown).toBeInstanceOf(MutationRefusedError);
+    expect(isFatalCleanupError(thrown)).toBe(false);
+    // A dead socket stays ambiguous even when the result is false.
+    let ambiguous: unknown;
+    try { requireMutationResult(false, "exact-owned UID MOVE", { connectionUsable: false }); }
+    catch (error) { ambiguous = error; }
+    expect(isFatalCleanupError(ambiguous)).toBe(true);
+    // undefined/null are precondition failures, never a definite refusal.
+    for (const result of [undefined, null]) {
+      let precondition: unknown;
+      try { requireMutationResult(result, "exact-owned UID MOVE", { connectionUsable: true }); }
+      catch (error) { precondition = error; }
+      expect(isFatalCleanupError(precondition)).toBe(true);
+    }
   });
 });
