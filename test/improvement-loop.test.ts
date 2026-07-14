@@ -282,7 +282,9 @@ describe("improvement-loop runner", () => {
       ok: false,
       checks: [{ timedOut: true }],
     });
-  });
+    // Spawns a real process tree; Windows CI runners need well over the 5s
+    // default to create and reap it under load.
+  }, 30_000);
 
   it("fails closed if a recorded audit artifact changes after import", () => {
     const root = createRoot();
