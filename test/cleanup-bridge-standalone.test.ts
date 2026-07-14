@@ -14,6 +14,11 @@ import { createHash } from "node:crypto";
 import { tmpdir as osTmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { BRIDGE_CLEANUP_SETTLE_MS } from "./e2e/support/time-budgets.mjs";
+
+// Simulated-clock advance that guarantees the cleanup convergence deadline
+// (BRIDGE_CLEANUP_SETTLE_MS plus scheduling slack) has expired.
+const SETTLE_DEADLINE_ADVANCE_MS = BRIDGE_CLEANUP_SETTLE_MS + 2_001;
 
 // The standalone cleaner requires the recovery clone path to resolve to
 // itself. macOS tmpdir is a /var → /private/var symlink and Windows runners
@@ -1800,7 +1805,7 @@ describe("standalone Bridge cleanup safety", () => {
     const assertion = expect(import("./e2e/support/cleanup-bridge.mjs"))
       .rejects.toThrow(/process\.exit\(1\)/);
     await vi.waitFor(() => expect(imap.connectCalls).toBeGreaterThan(0));
-    await vi.advanceTimersByTimeAsync(182_001);
+    await vi.advanceTimersByTimeAsync(SETTLE_DEADLINE_ADVANCE_MS);
     await assertion;
 
     const retained = JSON.parse(readFileSync(manifestPath, "utf8"));
@@ -1843,7 +1848,7 @@ describe("standalone Bridge cleanup safety", () => {
     const assertion = expect(import("./e2e/support/cleanup-bridge.mjs"))
       .rejects.toThrow(/process\.exit\(1\)/);
     await vi.waitFor(() => expect(imap.connectCalls).toBeGreaterThan(0));
-    await vi.advanceTimersByTimeAsync(182_001);
+    await vi.advanceTimersByTimeAsync(SETTLE_DEADLINE_ADVANCE_MS);
     await assertion;
 
     const retained = JSON.parse(readFileSync(manifestPath, "utf8"));
@@ -2251,7 +2256,7 @@ describe("standalone Bridge cleanup safety", () => {
 
     const assertion = expect(import("./e2e/support/cleanup-bridge.mjs"))
       .rejects.toThrow(/process\.exit\(1\)/);
-    await vi.advanceTimersByTimeAsync(182_001);
+    await vi.advanceTimersByTimeAsync(SETTLE_DEADLINE_ADVANCE_MS);
     await assertion;
 
     expect(imap.mailboxCreates).toEqual([]);
@@ -2281,7 +2286,7 @@ describe("standalone Bridge cleanup safety", () => {
 
     const assertion = expect(import("./e2e/support/cleanup-bridge.mjs"))
       .rejects.toThrow(/process\.exit\(1\)/);
-    await vi.advanceTimersByTimeAsync(182_001);
+    await vi.advanceTimersByTimeAsync(SETTLE_DEADLINE_ADVANCE_MS);
     await assertion;
 
     expect(imap.mailboxCreates).toEqual([]);
@@ -2484,7 +2489,7 @@ describe("standalone Bridge cleanup safety", () => {
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
 
     const completed = import("./e2e/support/cleanup-bridge.mjs");
-    await vi.advanceTimersByTimeAsync(182_001);
+    await vi.advanceTimersByTimeAsync(SETTLE_DEADLINE_ADVANCE_MS);
     await completed;
 
     expect(exit).not.toHaveBeenCalled();
@@ -2539,7 +2544,7 @@ describe("standalone Bridge cleanup safety", () => {
 
     const assertion = expect(import("./e2e/support/cleanup-bridge.mjs"))
       .rejects.toThrow(/process\.exit\(1\)/);
-    await vi.advanceTimersByTimeAsync(182_001);
+    await vi.advanceTimersByTimeAsync(SETTLE_DEADLINE_ADVANCE_MS);
     await assertion;
 
     const retained = JSON.parse(readFileSync(manifestPath, "utf8"));
@@ -2633,7 +2638,7 @@ describe("standalone Bridge cleanup safety", () => {
 
     const assertion = expect(import("./e2e/support/cleanup-bridge.mjs"))
       .rejects.toThrow(/process\.exit\(1\)/);
-    await vi.advanceTimersByTimeAsync(180_001);
+    await vi.advanceTimersByTimeAsync(SETTLE_DEADLINE_ADVANCE_MS);
     await assertion;
 
     expect(imap.folderDeletes).toEqual([]);
