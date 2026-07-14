@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-07-01",
-  "rootPackage": "mailpouch@3.0.77",
+  "generatedAt": "2026-07-14",
+  "rootPackage": "mailpouch@3.2.0",
   "deps": [
     {
       "name": "@hono/node-server",
@@ -39,7 +39,7 @@
     },
     {
       "name": "@zone-eu/mailsplit",
-      "version": "5.4.13",
+      "version": "5.4.14",
       "license": "(MIT OR EUPL-1.1+)"
     },
     {
@@ -384,7 +384,7 @@
     },
     {
       "name": "iconv-lite",
-      "version": "0.7.2",
+      "version": "0.7.3",
       "license": "MIT"
     },
     {
@@ -394,7 +394,7 @@
     },
     {
       "name": "imapflow",
-      "version": "1.4.3",
+      "version": "1.4.7",
       "license": "MIT"
     },
     {
@@ -459,7 +459,7 @@
     },
     {
       "name": "libmime",
-      "version": "5.4.0",
+      "version": "5.4.1",
       "license": "MIT"
     },
     {
@@ -469,12 +469,12 @@
     },
     {
       "name": "linkify-it",
-      "version": "5.0.1",
+      "version": "5.0.2",
       "license": "MIT"
     },
     {
       "name": "mailparser",
-      "version": "3.9.12",
+      "version": "3.9.14",
       "license": "MIT"
     },
     {
@@ -536,11 +536,6 @@
       "name": "node-abi",
       "version": "3.89.0",
       "license": "MIT"
-    },
-    {
-      "name": "nodemailer",
-      "version": "9.0.1",
-      "license": "MIT-0"
     },
     {
       "name": "nodemailer",
