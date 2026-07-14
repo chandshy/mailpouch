@@ -1,9 +1,9 @@
 /**
  * Sending tools: send_email, reply_to_email, forward_email, send_test_email.
  *
- * Handlers preserve behavior 1:1 with the pre-refactor switch cases in
- * src/index.ts — identical validation, identical error shapes, identical
- * SMTP service calls. No behavior changes.
+ * Unrestricted callers retain the pre-refactor behavior. Folder-restricted
+ * callers must identify an allowlisted source mailbox before a reply/forward
+ * reads a UID or mutates its IMAP flags, because UIDs are mailbox-local.
  */
 
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
@@ -21,6 +21,54 @@ const ACTION_RESULT_SCHEMA = {
   },
   required: ["success"],
 };
+
+function requireReplyOrForwardSourceFolder(
+  ctx: Parameters<ToolHandler>[0],
+  folder: string | undefined,
+  operation: string,
+): void {
+  const allowedFolders = ctx.getCallerAllowedFolders?.();
+  if (allowedFolders === undefined) return;
+  if (!folder) {
+    // UIDs are mailbox-local. A folderless lookup scans mailboxes and could
+    // resolve an identically numbered message outside the grant's scope.
+    throw new McpError(
+      ErrorCode.InvalidRequest,
+      `Blocked: ${operation} requires an explicit source folder for a folder-restricted caller.`,
+    );
+  }
+  if (!allowedFolders.some(candidate => candidate.toLowerCase() === folder.toLowerCase())) {
+    throw new McpError(
+      ErrorCode.InvalidRequest,
+      `Blocked: source folder '${folder}' is outside this agent's folder allowlist.`,
+    );
+  }
+}
+
+function requireFetchedSourceFolder(
+  ctx: Parameters<ToolHandler>[0],
+  resolvedFolder: string | undefined,
+  requestedFolder: string | undefined,
+  operation: string,
+): void {
+  const allowedFolders = ctx.getCallerAllowedFolders?.();
+  if (allowedFolders === undefined) return;
+  if (!resolvedFolder || !allowedFolders.some(candidate => candidate.toLowerCase() === resolvedFolder.toLowerCase())) {
+    throw new McpError(
+      ErrorCode.InvalidRequest,
+      `Blocked: ${operation} resolved an email outside this agent's folder allowlist.`,
+    );
+  }
+  // The IMAP adapter is expected to honor the explicit source hint. Treat a
+  // disagreement as unsafe even when both folders happen to be allowed: the
+  // UID belongs to the resolved mailbox, not necessarily the one requested.
+  if (!requestedFolder || resolvedFolder.toLowerCase() !== requestedFolder.toLowerCase()) {
+    throw new McpError(
+      ErrorCode.InvalidRequest,
+      `Blocked: ${operation} resolved an email from '${resolvedFolder}' rather than the requested source folder '${requestedFolder ?? "(missing)"}'.`,
+    );
+  }
+}
 
 export const defs: ToolDef[] = [
   {
@@ -114,7 +162,7 @@ export const defs: ToolDef[] = [
 
 export const handlers: Record<string, ToolHandler> = {
   send_email: async (ctx) => {
-    const { args, smtpService, actionOk, MAX_SUBJECT_LENGTH, MAX_BODY_LENGTH } = ctx;
+    const { args, smtpService, actionOk, MAX_SUBJECT_LENGTH, MAX_BODY_LENGTH, invalidateAnalytics } = ctx;
     const seAttErr = validateAttachments(args.attachments);
     if (seAttErr) throw new McpError(ErrorCode.InvalidParams, seAttErr);
     if (!args.to || typeof args.to !== "string" || !(args.to as string).trim()) {
@@ -165,12 +213,15 @@ export const handlers: Record<string, ToolHandler> = {
     if (!result.success) {
       return { content: [{ type: "text" as const, text: "Email delivery failed" }], isError: true };
     }
+    invalidateAnalytics();
     return actionOk(result.messageId);
   },
 
   reply_to_email: async (ctx) => {
-    const { args, imapService, smtpService, config, actionOk, MAX_BODY_LENGTH, MAX_SUBJECT_LENGTH } = ctx;
+    const { args, imapService, smtpService, config, actionOk, MAX_BODY_LENGTH, MAX_SUBJECT_LENGTH, invalidateAnalytics } = ctx;
     const emailId = requireNumericEmailId(args.emailId);
+    const sourceFolder = optionalFolderHint(args.folder);
+    requireReplyOrForwardSourceFolder(ctx, sourceFolder, "reply_to_email");
     if (!args.body || typeof args.body !== "string" || !(args.body as string).trim()) {
       throw new McpError(ErrorCode.InvalidParams, "'body' must be a non-empty string.");
     }
@@ -183,10 +234,11 @@ export const handlers: Record<string, ToolHandler> = {
     if (args.replyAll !== undefined && typeof args.replyAll !== "boolean") {
       throw new McpError(ErrorCode.InvalidParams, "'replyAll' must be a boolean when provided.");
     }
-    const original = await imapService.getEmailById(emailId, optionalFolderHint(args.folder));
+    const original = await imapService.getEmailById(emailId, sourceFolder);
     if (!original) {
       return { content: [{ type: "text" as const, text: "Original email not found" }], isError: true };
     }
+    requireFetchedSourceFolder(ctx, original.folder, sourceFolder, "reply_to_email");
 
     const replyToAddress = original.from.match(/<([^>]+)>/)?.[1] ?? original.from.trim();
 
@@ -226,22 +278,29 @@ export const handlers: Record<string, ToolHandler> = {
       return { content: [{ type: "text" as const, text: "Email delivery failed" }], isError: true };
     }
     if (result.success) {
-      await imapService.setFlag(emailId, '\\Answered').catch((err) =>
+      // Keep the flag operation in the exact mailbox read above. IMAP UIDs
+      // are folder-scoped, so an unqualified setFlag can mark a colliding UID
+      // in another folder even after a correctly scoped source read.
+      await imapService.setFlag(emailId, '\\Answered', true, original.folder).catch((err) =>
         logger.warn(`reply_to_email: failed to set \\Answered on ${emailId}: ${err instanceof Error ? err.message : String(err)}`, 'Sending'));
     }
+    invalidateAnalytics();
     return actionOk(result.messageId);
   },
 
   forward_email: async (ctx) => {
-    const { args, imapService, smtpService, actionOk, MAX_SUBJECT_LENGTH, MAX_BODY_LENGTH } = ctx;
+    const { args, imapService, smtpService, actionOk, MAX_SUBJECT_LENGTH, MAX_BODY_LENGTH, invalidateAnalytics } = ctx;
     const fwdId = requireNumericEmailId(args.emailId);
+    const sourceFolder = optionalFolderHint(args.folder);
+    requireReplyOrForwardSourceFolder(ctx, sourceFolder, "forward_email");
     if (!args.to || typeof args.to !== "string" || !(args.to as string).trim()) {
       throw new McpError(ErrorCode.InvalidParams, "'to' must be a non-empty string with at least one recipient address.");
     }
-    const fwdOriginal = await imapService.getEmailById(fwdId, optionalFolderHint(args.folder));
+    const fwdOriginal = await imapService.getEmailById(fwdId, sourceFolder);
     if (!fwdOriginal) {
       return { content: [{ type: "text" as const, text: "Original email not found" }], isError: true };
     }
+    requireFetchedSourceFolder(ctx, fwdOriginal.folder, sourceFolder, "forward_email");
 
     const fwdCleanSubject = fwdOriginal.subject.replace(/[\r\n\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
     const fwdSubjectRaw = fwdCleanSubject.toLowerCase().startsWith("fwd:")
@@ -292,14 +351,15 @@ export const handlers: Record<string, ToolHandler> = {
     }
     if (fwdResult.success) {
       // Best-effort flag; log (don't fail the send) so a flag-set failure isn't invisible.
-      await imapService.setFlag(fwdId, '$Forwarded').catch((err) =>
+      await imapService.setFlag(fwdId, '$Forwarded', true, fwdOriginal.folder).catch((err) =>
         logger.warn(`forward_email: failed to set $Forwarded on ${fwdId}: ${err instanceof Error ? err.message : String(err)}`, 'Sending'));
     }
+    invalidateAnalytics();
     return actionOk(fwdResult.messageId);
   },
 
   send_test_email: async (ctx) => {
-    const { args, smtpService, actionOk } = ctx;
+    const { args, smtpService, actionOk, invalidateAnalytics } = ctx;
     if (!isValidEmail(args.to as string)) {
       throw new McpError(ErrorCode.InvalidParams, `Invalid recipient email address: ${args.to}`);
     }
@@ -313,6 +373,7 @@ export const handlers: Record<string, ToolHandler> = {
     if (!result.success) {
       return { content: [{ type: "text" as const, text: "Test email failed" }], isError: true };
     }
+    invalidateAnalytics();
     return actionOk(result.messageId);
   },
 };

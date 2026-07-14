@@ -6,7 +6,7 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { startE2E, type E2EHarness } from "../mcp-client.js";
+import { bridgeConfigAvailable, startE2E, type E2EHarness } from "../mcp-client.js";
 import * as docker from "../support/docker.js";
 
 type ActionResult = { success: boolean };
@@ -16,15 +16,13 @@ describe("folders.e2e", () => {
   let h: E2EHarness;
 
   beforeAll(async () => {
-    await docker.restart();
-    h = await startE2E();
-  }, 60_000);
+    if (!bridgeConfigAvailable()) await docker.restart();
+    h = await startE2E({ safe: true });
+    expect(h.scratch).toBeDefined();
+  });
 
   afterAll(async () => {
-    if (h) {
-      try { await h.imap.wipe(); } catch { /* ignore */ }
-      await h.close();
-    }
+    if (h) await h.close();
   });
 
   beforeEach(async () => {
@@ -37,54 +35,58 @@ describe("folders.e2e", () => {
       expect(result.folders.some((f) => f.path === "INBOX")).toBe(true);
     });
 
-    // mailpouch's folder cache lags ImapFixtures' mailboxCreate on Greenmail
-    // (even after sync_folders). Folder discovery works reliably in actions
-    // tests (which create via mailpouch's own create_folder); the assertion
-    // that side-channel creates propagate is bridge-only.
-    it.skip("includes folders created via ImapFixtures after a sync — bridge-only", async () => {
-      await h.imap.createMailbox("Folders/Project");
+    // Disabled for live Bridge: mailbox creation cannot be paired with an
+    // atomic, foreign-message-safe cleanup DELETE. Greenmail's side-channel
+    // cache behavior makes this unsuitable there as well.
+    it.skip("includes folders created via ImapFixtures after a sync", async () => {
+      const folder = await h.scratch!.create("folders");
       await h.call("sync_folders");
       const result = h.json<{ folders: Folder[] }>(await h.call("get_folders"));
-      expect(result.folders.some((f) => f.path === "Folders/Project")).toBe(true);
+      expect(result.folders.some((f) => f.path === folder)).toBe(true);
     });
   });
 
   describe("create_folder", () => {
-    it("creates a new Folders/ folder", async () => {
-      h.json<ActionResult>(await h.call("create_folder", { folderName: "Folders/NewlyCreated" }));
+    it.skipIf(bridgeConfigAvailable())("creates a new Folders/ folder", async () => {
+      const folder = h.scratch!.path("folders");
+      h.json<ActionResult>(await h.call("create_folder", { folderName: folder }));
       const paths = await h.imap.listMailboxes();
-      expect(paths.some((p) => p === "Folders/NewlyCreated")).toBe(true);
+      expect(paths).toContain(folder);
     });
   });
 
   describe("rename_folder", () => {
-    it("renames a folder created earlier", async () => {
-      h.json<ActionResult>(await h.call("create_folder", { folderName: "Folders/BeforeRename" }));
+    it.skipIf(bridgeConfigAvailable())("renames a folder created earlier", async () => {
+      const before = h.scratch!.path("folders");
+      const after = h.scratch!.path("folders");
+      h.json<ActionResult>(await h.call("create_folder", { folderName: before }));
       h.json<ActionResult>(
-        await h.call("rename_folder", { oldName: "Folders/BeforeRename", newName: "Folders/AfterRename" })
+        await h.call("rename_folder", { oldName: before, newName: after })
       );
       const paths = await h.imap.listMailboxes();
-      expect(paths.some((p) => p === "Folders/AfterRename")).toBe(true);
-      expect(paths.some((p) => p === "Folders/BeforeRename")).toBe(false);
+      expect(paths).toContain(after);
+      expect(paths).not.toContain(before);
     });
   });
 
   describe("delete_folder — destructive gate", () => {
-    it("rejects without confirmed:true", async () => {
-      h.json<ActionResult>(await h.call("create_folder", { folderName: "Folders/ToDelete" }));
-      const raw = await h.call("delete_folder", { folderName: "Folders/ToDelete" });
+    it.skipIf(bridgeConfigAvailable())("rejects without confirmed:true", async () => {
+      const folder = h.scratch!.path("folders");
+      h.json<ActionResult>(await h.call("create_folder", { folderName: folder }));
+      const raw = await h.call("delete_folder", { folderName: folder });
       expect(raw.isError).toBe(true);
       const paths = await h.imap.listMailboxes();
-      expect(paths.some((p) => p === "Folders/ToDelete")).toBe(true);
+      expect(paths).toContain(folder);
     });
 
-    it("deletes when confirmed:true is supplied", async () => {
-      h.json<ActionResult>(await h.call("create_folder", { folderName: "Folders/ConfirmDel" }));
+    it.skipIf(bridgeConfigAvailable())("deletes when confirmed:true is supplied", async () => {
+      const folder = h.scratch!.path("folders");
+      h.json<ActionResult>(await h.call("create_folder", { folderName: folder }));
       h.json<ActionResult>(
-        await h.call("delete_folder", { folderName: "Folders/ConfirmDel", confirmed: true })
+        await h.call("delete_folder", { folderName: folder, confirmed: true })
       );
       const paths = await h.imap.listMailboxes();
-      expect(paths.some((p) => p === "Folders/ConfirmDel")).toBe(false);
+      expect(paths).not.toContain(folder);
     });
   });
 

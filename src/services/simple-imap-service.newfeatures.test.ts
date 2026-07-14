@@ -106,6 +106,46 @@ describe("SimpleIMAPService.downloadAttachment", () => {
     expect(decoded).toBe("hello world");
   });
 
+  it("uses the supplied folder to avoid a same-UID attachment cache collision", async () => {
+    const svc = new SimpleIMAPService();
+    vi.spyOn(svc as any, "validateEmailId").mockImplementation(() => {});
+    const base = {
+      id: "321",
+      from: "a@b.com",
+      to: [],
+      subject: "Test",
+      body: "Hello",
+      isHtml: false,
+      date: new Date(),
+      isRead: false,
+      isStarred: false,
+      hasAttachment: true,
+    };
+    // Insert Archive first so a folder-agnostic cache lookup would return the
+    // wrong binary content for the same per-folder UID.
+    (svc as any).emailCache.set("Archive:321", {
+      email: {
+        ...base,
+        folder: "Archive",
+        attachments: [{ filename: "archive.txt", contentType: "text/plain", size: 7, content: Buffer.from("archive") }],
+      },
+      cachedAt: Date.now(),
+    });
+    (svc as any).emailCache.set("INBOX:321", {
+      email: {
+        ...base,
+        folder: "INBOX",
+        attachments: [{ filename: "inbox.txt", contentType: "text/plain", size: 5, content: Buffer.from("inbox") }],
+      },
+      cachedAt: Date.now(),
+    });
+
+    const result = await svc.downloadAttachment("321", 0, "INBOX");
+
+    expect(result?.filename).toBe("inbox.txt");
+    expect(Buffer.from(result!.content, "base64").toString("utf8")).toBe("inbox");
+  });
+
   it("returns string content as-is (already base64)", async () => {
     const svc = new SimpleIMAPService();
     vi.spyOn(svc as any, "validateEmailId").mockImplementation(() => {});
@@ -305,12 +345,12 @@ describe("SimpleIMAPService.saveDraft", () => {
     });
   };
 
-  it("returns error when not connected", async () => {
+  it("throws actionable guidance when not connected", async () => {
     const svc = new SimpleIMAPService();
     // client is null, isConnected is false by default
-    const result = await svc.saveDraft({ subject: "Test", body: "Hello" });
-    expect(result.success).toBe(false);
-    expect(result.error).toMatch(/not connected/i);
+    await expect(svc.saveDraft({ subject: "Test", body: "Hello" })).rejects.toThrow(
+      /IMAP connection is unavailable.*Proton Bridge/is,
+    );
   });
 
   it("returns success with uid when IMAP append succeeds", async () => {

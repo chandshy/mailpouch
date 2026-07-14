@@ -13,6 +13,10 @@ npm run preship:fast
 
 # Release-grade gate (before `npm publish`)
 npm run preship:release
+
+# After the release commit is clean and pushed, run Bridge and attach its
+# exact-SHA status (uses `gh auth` or GH_TOKEN for commit-status write access)
+MAILPOUCH_E2E_BRIDGE_CONFIG=/path/to/config.json node scripts/attest-bridge-e2e.mjs
 ```
 
 `npm publish` is wired to refuse to run unless `preship:release` is green (`prepublishOnly`).
@@ -137,7 +141,8 @@ Don't, in normal operation. For emergencies:
 | Pre-push hook | `git push --no-verify` |
 | Ship skill (`/ship`) | `PRESHIP_SKIP=1 /ship` |
 | Any `npm run preship*` invocation | `PRESHIP_SKIP=1 npm run preship` (short-circuits at the top of `scripts/preship.mjs` with a loud `BYPASS: PRESHIP_SKIP=1` line to stderr) |
-| `npm publish` | Not bypassable. `prepublishOnly` runs preship:release; remove the script line only as part of an explicit rescue plan and revert immediately. |
+| Local `npm publish` | Not bypassable. `prepublishOnly` runs preship:release; remove the script line only as part of an explicit rescue plan and revert immediately. |
+| GitHub release publication | Not bypassable in the workflow. The immutable tag commit must have successful exact-SHA CI, preship, and Proton Bridge E2E evidence. |
 
 Every bypass logs to stderr so a reader can see it happened (and `BYPASS:` lines are grep-able from CI logs).
 
@@ -161,15 +166,73 @@ npm run check:secrets   # should now say "gitleaks: 0 findings"
 
 Proton Bridge is a desktop application and cannot run on GitHub-hosted runners. The CI workflow (`.github/workflows/preship.yml`) sets `PRESHIP_NO_BRIDGE=1`, which makes the `e2e:bridge` step print `SKIPPED — PRESHIP_NO_BRIDGE=1` and exit 0.
 
-On a developer machine, Bridge is **hard-required** by `npm run preship`. Set `MAILPOUCH_E2E_BRIDGE_CONFIG=<path-to-bridge-config.json>` to enable Bridge tests; without it, the step fails with a clear message pointing here.
+On a developer machine, Bridge is **hard-required** by `npm run preship`. Set `MAILPOUCH_E2E_BRIDGE_CONFIG=<path-to-bridge-config.json>` to enable Bridge tests; without it, the step fails with a clear message pointing here. The Bridge suite is non-wiping: existing mail is read-only, and destructive message operations and cleanup are restricted to UUID-marked messages created by that E2E run. Live scenarios never create, rename, or delete folders, so folder lifecycle coverage runs only against disposable Greenmail. Crash cleanup may create one exact-token rescue folder to COPY otherwise stranded owned All Mail residue, but never deletes a mailbox and reports the verified-empty rescue for manual deletion.
+
+Live-run leases, setup journals, and ownership manifests are stored under the
+user-private `~/.mailpouch-e2e-authority/v2/<mailbox-hash>/` scope. The hash is
+derived from normalized IMAP endpoint and username, so distinct config files
+targeting one mailbox serialize together without disclosing the account name.
+Pre-journal encrypted clones from older harnesses block preflight until an
+operator verifies that no matching legacy manifest/process remains and retires
+only those exact files; uncertain artifacts are never age-reclaimed or deleted
+automatically.
+
+## Exact-SHA publication evidence
+
+Publishing from `.github/workflows/publish.yml` is gated on the immutable commit
+resolved from the release tag. Before either registry job can start, the gate
+requires all of the following evidence on that exact 40-character SHA:
+
+- the newest `CI` workflow run succeeded (the supported OS and Node matrix);
+- the newest `preship` workflow run succeeded (including Greenmail E2E and the
+  installed-bin tarball smoke test);
+- the newest `mailpouch/proton-bridge-e2e` commit status is successful.
+
+An older success does not mask a newer queued, running, cancelled, or failed
+run. Evidence attached to a branch name, tag name, or another commit is refused.
+The publish job then reruns `preship:fast`, performs a clean build, checks the
+non-empty changelog entry, and verifies that the tag points at that same commit.
+The post-tag ref check replaces `preship:release`'s pre-tag-only
+`git-tag-free` check.
+
+Because Proton Bridge cannot run on a hosted runner, create its status from a
+clean checkout of the pushed release commit:
+
+```bash
+git status --short                     # must print nothing
+export MAILPOUCH_E2E_BRIDGE_CONFIG=/path/to/bridge-config.json
+node scripts/attest-bridge-e2e.mjs
+```
+
+The attester posts `pending` before starting, replaces `node_modules` from the
+exact lockfile with `npm ci --ignore-scripts`, and then explicitly rebuilds only
+`better-sqlite3` and `@napi-rs/keyring`. Install, rebuild, typecheck, build, and
+the full Bridge E2E all run without inherited GitHub, npm, OIDC, SSH-agent, or
+askpass credentials; the live Bridge config remains available to the E2E. This
+prevents a stale dependency tree or an untrusted transitive lifecycle script
+from influencing release evidence. The attester then verifies that HEAD and the
+worktree did not change and posts `success` only after every command exits zero.
+A failed, interrupted, or drifting run therefore cannot leave fresh success
+evidence. It uses `GH_TOKEN`/`GITHUB_TOKEN` in the parent when supplied,
+otherwise the token from `gh auth token`; that credential needs permission to
+write commit statuses.
+
+The registry jobs retain `npm publish --ignore-scripts` so dependency lifecycle
+code never executes with registry credentials or OIDC authority. This is not a
+test bypass: publishing is downstream of the exact-SHA verification job, and
+each registry job installs with scripts disabled, rebuilds only the explicitly
+trusted native dependencies, and rebuilds the package before publishing.
 
 ## Files involved
 
 - `scripts/preship.mjs` — orchestrator
 - `scripts/lib/preship-runner.mjs` — sequential runner + summary formatter
 - `scripts/check-*.mjs` — five individual checks
+- `scripts/check-release-attestations.mjs` — exact-SHA hosted/Bridge evidence gate
+- `scripts/attest-bridge-e2e.mjs` — clean-checkout local Bridge status writer
 - `scripts/smoke-tarball.mjs`
 - `LICENSES.json` — committed license-inventory baseline (regenerated with `PRESHIP_LICENSE_WRITE=1`)
 - `.preship-audit-allow.json` — committed acknowledgement list (starts empty)
 - `.github/workflows/preship.yml` — CI gate
+- `.github/workflows/publish.yml` — immutable-tag publication gate
 - `package.json` — `simple-git-hooks` block pins the pre-push hook to `preship:fast`

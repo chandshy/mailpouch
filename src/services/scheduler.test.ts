@@ -5,9 +5,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { SchedulerService } from "./scheduler.js";
 import type { SMTPService } from "./smtp-service.js";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync, readdirSync, statSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
+import {
+  MailboxMutationDeadlineError,
+  runAccountMailMutation,
+  withMailboxMutationDeadline,
+} from "./mailbox-mutation-deadline.js";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -27,6 +32,15 @@ function makeOptions() {
 
 function futureDate(secondsFromNow: number): Date {
   return new Date(Date.now() + secondsFromNow * 1000);
+}
+
+function deferred<T = void>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+} {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(done => { resolve = done; });
+  return { promise, resolve };
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -112,6 +126,43 @@ describe("SchedulerService", () => {
     expect(items[1].id).toBe(id1);
   });
 
+  it("keeps list and cancel operations scoped to the owning account", () => {
+    const svc = new SchedulerService(makeSMTP(), storePath, { activeAccountId: "account-a" });
+    const idA = svc.schedule(makeOptions(), futureDate(120), "account-a");
+    const idB = svc.schedule(makeOptions(), futureDate(180), "account-b");
+
+    expect(svc.list("account-a").map(item => item.id)).toEqual([idA]);
+    expect(svc.list("account-b").map(item => item.id)).toEqual([idB]);
+    // Do not reveal or mutate another account's queue item.
+    expect(svc.cancel(idB, "account-a")).toEqual({ ok: false, error: "not_found" });
+    expect(svc.list("account-b")[0].status).toBe("pending");
+  });
+
+  it("persists mailbox identity and fails closed after an account is repointed", async () => {
+    const identities = new Map([["account-a", "mailbox-a-v1"]]);
+    const smtp = makeSMTP();
+    const svc = new SchedulerService(smtp, storePath, {
+      activeAccountId: "account-a",
+      resolveAccountIdentity: accountId => identities.get(accountId),
+    });
+    const id = svc.schedule(makeOptions(), futureDate(120), "account-a", "mailbox-a-v1");
+
+    expect(svc.list("account-a")).toMatchObject([{ id, accountIdentity: "mailbox-a-v1" }]);
+
+    // Reusing the stable account ID for another mailbox makes old work inert:
+    // it is neither exposed, cancellable, nor eligible to send.
+    identities.set("account-a", "mailbox-a-v2");
+    expect(svc.list("account-a")).toEqual([]);
+    expect(svc.pending("account-a")).toEqual([]);
+    expect(svc.cancel(id, "account-a")).toEqual({ ok: false, error: "not_found" });
+
+    vi.advanceTimersByTime(121_000);
+    await svc.processDue();
+    expect(smtp.sendEmail).not.toHaveBeenCalled();
+    expect((svc as unknown as { items: Array<{ id: string; status: string }> }).items.find(item => item.id === id)?.status)
+      .toBe("pending");
+  });
+
   // ── processDue ──────────────────────────────────────────────────────────────
 
   it("processDue() sends due emails and marks them sent", async () => {
@@ -124,6 +175,158 @@ describe("SchedulerService", () => {
     const item = svc.list().find(i => i.id === id)!;
     expect(item.status).toBe("sent");
     expect(smtp.sendEmail).toHaveBeenCalledTimes(1);
+  });
+
+  it("persists outcome_unknown and never retries when an interactive abort closes a shared scheduled-send transport", async () => {
+    const scheduledDispatched = deferred();
+    const interactiveDispatched = deferred();
+    const scheduledReply = deferred<{ success: boolean; messageId: string }>();
+    const interactiveReply = deferred();
+    const abortTransport = vi.fn();
+    const smtp = {
+      backoff: { isBlocked: () => false },
+      abortActiveMutationTransport: abortTransport,
+      sendEmail: vi.fn(),
+    } as unknown as SMTPService;
+    vi.mocked(smtp.sendEmail).mockImplementation(() => runAccountMailMutation(
+      smtp,
+      async () => {
+        scheduledDispatched.resolve();
+        return scheduledReply.promise;
+      },
+    ));
+
+    const svc = new SchedulerService(smtp, storePath);
+    const id = svc.schedule(makeOptions(), futureDate(120));
+    vi.advanceTimersByTime(121 * 1000);
+    const processing = svc.processDue();
+
+    const controller = new AbortController();
+    const interactive = withMailboxMutationDeadline({
+      tool: "send_email",
+      signal: controller.signal,
+      deadlineAt: Date.now() + 10_000,
+      transports: [{
+        scope: smtp,
+        abort: () => smtp.abortActiveMutationTransport("interactive cancellation"),
+      }],
+    }, () => runAccountMailMutation(smtp, async () => {
+      interactiveDispatched.resolve();
+      await interactiveReply.promise;
+    }));
+
+    await Promise.all([scheduledDispatched.promise, interactiveDispatched.promise]);
+    controller.abort();
+    await expect(interactive).rejects.toBeInstanceOf(MailboxMutationDeadlineError);
+    await processing;
+
+    const item = svc.list().find(candidate => candidate.id === id)!;
+    expect(item.status).toBe("outcome_unknown");
+    expect(item.error).toMatch(/outcome is unknown/i);
+    expect(item.retryCount).toBe(1);
+    expect(item.nextAttemptAt).toBeUndefined();
+    expect(abortTransport).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(readFileSync(storePath, "utf-8"))).toContainEqual(
+      expect.objectContaining({ id, status: "outcome_unknown" }),
+    );
+
+    await svc.processDue();
+    expect(smtp.sendEmail).toHaveBeenCalledTimes(1);
+    scheduledReply.resolve({ success: true, messageId: "possibly-delivered" });
+    interactiveReply.resolve();
+  });
+
+  it("does not send unless the in-flight transition is durably persisted", async () => {
+    const smtp = makeSMTP();
+    const svc = new SchedulerService(smtp, storePath);
+    const id = svc.schedule(makeOptions(), futureDate(120));
+
+    // Preserve the successfully-created queue record, then make the next
+    // adjacent-temp rename fail deterministically by replacing its destination
+    // with a directory. This models EACCES/ENOSPC/rename failures without
+    // platform-specific permission assumptions.
+    rmSync(storePath);
+    mkdirSync(storePath);
+    vi.advanceTimersByTime(121 * 1000);
+
+    await expect(svc.processDue()).rejects.toThrow();
+
+    expect(smtp.sendEmail).not.toHaveBeenCalled();
+    expect((svc as unknown as { items: Array<{ id: string; status: string }> }).items)
+      .toContainEqual(expect.objectContaining({ id, status: "pending" }));
+  });
+
+  it("retains an old overdue record while its durable send is in flight", async () => {
+    let resolveSend!: (value: { success: boolean; messageId: string }) => void;
+    const sendPromise = new Promise<{ success: boolean; messageId: string }>(resolve => { resolveSend = resolve; });
+    const smtp = { sendEmail: vi.fn().mockReturnValue(sendPromise) } as unknown as SMTPService;
+    const svc = new SchedulerService(smtp, storePath);
+    const id = svc.schedule(makeOptions(), futureDate(120));
+    const item = (svc as unknown as { items: Array<{ id: string; createdAt: string; scheduledAt: string }> })
+      .items.find(candidate => candidate.id === id)!;
+    item.createdAt = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString();
+    item.scheduledAt = new Date(Date.now() - 1_000).toISOString();
+    svc.stop();
+
+    const processing = svc.processDue();
+    await Promise.resolve();
+
+    expect(JSON.parse(readFileSync(storePath, "utf-8"))).toContainEqual(
+      expect.objectContaining({ id, status: "sending" }),
+    );
+    expect(svc.cancel(id)).toEqual({ ok: false, error: "in_flight" });
+
+    resolveSend({ success: true, messageId: "already-on-wire" });
+    await processing;
+  });
+
+  it("uses the rebound SMTP service for deliveries that start after an account switch", async () => {
+    const smtpA = makeSMTP({ success: true, messageId: "a" });
+    const smtpB = makeSMTP({ success: true, messageId: "b" });
+    const svc = new SchedulerService(smtpA, storePath);
+    svc.schedule(makeOptions(), futureDate(120));
+
+    svc.setSmtpService(smtpB);
+    vi.advanceTimersByTime(121 * 1000);
+    await svc.processDue();
+
+    expect(smtpA.sendEmail).not.toHaveBeenCalled();
+    expect(smtpB.sendEmail).toHaveBeenCalledTimes(1);
+  });
+
+  it("delivers each due record through its persisted owner's SMTP service", async () => {
+    const smtpA = makeSMTP({ success: true, messageId: "a" });
+    const smtpB = makeSMTP({ success: true, messageId: "b" });
+    const services = new Map<string, SMTPService>([
+      ["account-a", smtpA],
+      ["account-b", smtpB],
+    ]);
+    const svc = new SchedulerService(smtpA, storePath, {
+      activeAccountId: "account-a",
+      resolveSmtpService: accountId => services.get(accountId),
+    });
+    const idA = svc.schedule(makeOptions(), futureDate(120), "account-a");
+    const idB = svc.schedule(makeOptions(), futureDate(120), "account-b");
+
+    vi.advanceTimersByTime(121 * 1000);
+    await svc.processDue();
+
+    expect(smtpA.sendEmail).toHaveBeenCalledTimes(1);
+    expect(smtpB.sendEmail).toHaveBeenCalledTimes(1);
+    expect(svc.list("account-a").find(item => item.id === idA)?.status).toBe("sent");
+    expect(svc.list("account-b").find(item => item.id === idB)?.status).toBe("sent");
+  });
+
+  it("never falls back to the active SMTP service for another account's queued email", async () => {
+    const activeSmtp = makeSMTP({ success: true, messageId: "active" });
+    const svc = new SchedulerService(activeSmtp, storePath, { activeAccountId: "account-a" });
+    const id = svc.schedule(makeOptions(), futureDate(120), "account-b");
+
+    vi.advanceTimersByTime(121 * 1000);
+    await svc.processDue();
+
+    expect(activeSmtp.sendEmail).not.toHaveBeenCalled();
+    expect(svc.list("account-b").find(item => item.id === id)?.status).toBe("pending");
   });
 
   it("processDue() marks failed when sendEmail returns success:false (after 3 attempts)", async () => {
@@ -245,6 +448,31 @@ describe("SchedulerService", () => {
   });
 
   // ── persistence ─────────────────────────────────────────────────────────────
+
+  it("recovers a persisted in-flight send as outcome_unknown and never resends it", async () => {
+    const now = new Date().toISOString();
+    writeFileSync(storePath, JSON.stringify([{
+      id: "interrupted-send",
+      accountId: "primary",
+      scheduledAt: new Date(Date.now() - 60_000).toISOString(),
+      createdAt: now,
+      options: makeOptions(),
+      status: "sending",
+    }]), "utf-8");
+    const smtp = makeSMTP();
+    const svc = new SchedulerService(smtp, storePath);
+
+    (svc as unknown as { load: () => void }).load();
+    await svc.processDue();
+
+    const recovered = svc.list().find(item => item.id === "interrupted-send")!;
+    expect(recovered.status).toBe("outcome_unknown");
+    expect(recovered.error).toMatch(/outcome is unknown/i);
+    expect(smtp.sendEmail).not.toHaveBeenCalled();
+    expect(JSON.parse(readFileSync(storePath, "utf-8"))).toContainEqual(
+      expect.objectContaining({ id: "interrupted-send", status: "outcome_unknown" }),
+    );
+  });
 
   it("stop() persists scheduled items to disk; start() loads them", () => {
     const smtp = makeSMTP();
@@ -388,6 +616,153 @@ describe("SchedulerService", () => {
     // load() is called in start(); call it directly to test the error branch
     expect(() => (svc as any).load()).not.toThrow();
     expect(svc.list()).toHaveLength(0);
+  });
+
+  it("migrates unowned legacy records only after writing an immutable timestamped backup", () => {
+    const now = new Date().toISOString();
+    const raw = JSON.stringify([{
+      id: "legacy-schedule",
+      scheduledAt: new Date(Date.now() + 120_000).toISOString(),
+      createdAt: now,
+      status: "pending",
+      options: makeOptions(),
+    }], null, 2);
+    writeFileSync(storePath, raw, "utf-8");
+    const svc = new SchedulerService(makeSMTP(), storePath, {
+      resolveAccountIdentity: accountId => accountId === "account-b" ? "mailbox-b-v1" : undefined,
+    });
+    (svc as unknown as { load: () => void }).load();
+
+    const migrated = svc.migrateLegacyRecords("account-b");
+
+    expect(migrated).toMatchObject({ migrated: 1 });
+    expect(migrated.backupPath).toMatch(/\.legacy-unowned-.*\.bak$/);
+    expect(readFileSync(migrated.backupPath!, "utf-8")).toBe(raw);
+    expect(svc.list("account-b")).toMatchObject([{
+      id: "legacy-schedule",
+      accountId: "account-b",
+      accountIdentity: "mailbox-b-v1",
+    }]);
+    expect(JSON.parse(readFileSync(storePath, "utf-8"))[0].accountId).toBe("account-b");
+    expect(JSON.parse(readFileSync(storePath, "utf-8"))[0].accountIdentity).toBe("mailbox-b-v1");
+    // Repeating setup cannot create a second backup or change ownership again.
+    expect(svc.migrateLegacyRecords("account-b")).toEqual({ migrated: 0 });
+  });
+
+  it("migrates an owned legacy delivery with that owner's identity, not the active account", () => {
+    const now = new Date().toISOString();
+    writeFileSync(storePath, JSON.stringify([{
+      id: "owned-legacy-schedule",
+      accountId: "account-a",
+      scheduledAt: new Date(Date.now() + 120_000).toISOString(),
+      createdAt: now,
+      status: "pending",
+      options: makeOptions(),
+    }]), "utf-8");
+    const identities = new Map([
+      ["account-a", "mailbox-a-v1"],
+      ["account-b", "mailbox-b-v1"],
+    ]);
+    const svc = new SchedulerService(makeSMTP(), storePath, {
+      resolveAccountIdentity: accountId => identities.get(accountId),
+    });
+    (svc as unknown as { load: () => void }).load();
+
+    expect(svc.migrateLegacyRecords("account-b")).toMatchObject({ migrated: 1 });
+    expect(svc.list("account-a")).toMatchObject([{
+      id: "owned-legacy-schedule",
+      accountIdentity: "mailbox-a-v1",
+    }]);
+    expect(svc.list("account-b")).toEqual([]);
+  });
+
+  it("quarantines a repointed account's queue with a 0600 raw audit backup", () => {
+    const identities = new Map([
+      ["account-a", "mailbox-a-v1"],
+      ["account-b", "mailbox-b-v1"],
+    ]);
+    const svc = new SchedulerService(makeSMTP(), storePath, {
+      activeAccountId: "account-a",
+      resolveAccountIdentity: accountId => identities.get(accountId),
+    });
+    const idA = svc.schedule(makeOptions(), futureDate(120), "account-a", "mailbox-a-v1");
+    const idB = svc.schedule(makeOptions(), futureDate(180), "account-b", "mailbox-b-v1");
+    const rawBefore = readFileSync(storePath, "utf-8");
+
+    identities.set("account-a", "mailbox-a-v2");
+    const result = svc.quarantineAccount("account-a", "account mailbox identity changed");
+
+    expect(result).toMatchObject({
+      accountId: "account-a",
+      quarantined: 1,
+      removed: 1,
+      cancelled: 0,
+    });
+    expect(result.backupPath).toMatch(/\.quarantine-.*\.bak$/);
+    expect(readFileSync(result.backupPath!, "utf-8")).toBe(rawBefore);
+    // Windows does not expose POSIX permission bits through stat/chmod.
+    if (process.platform !== "win32") {
+      expect(statSync(result.backupPath!).mode & 0o777).toBe(0o600);
+    }
+    expect(svc.list("account-a")).toEqual([]);
+    expect(svc.list("account-b").map(item => item.id)).toEqual([idB]);
+    expect(JSON.parse(readFileSync(storePath, "utf-8")).map((item: { id: string }) => item.id)).not.toContain(idA);
+  });
+
+  it("quarantine cooperatively cancels an in-flight send on the same record object", async () => {
+    let resolveSend!: (value: { success: boolean; messageId: string }) => void;
+    const sendPromise = new Promise<{ success: boolean; messageId: string }>(resolve => { resolveSend = resolve; });
+    const smtp = { sendEmail: vi.fn().mockReturnValue(sendPromise) } as unknown as SMTPService;
+    const identities = new Map([["account-a", "mailbox-a-v1"]]);
+    const svc = new SchedulerService(smtp, storePath, {
+      activeAccountId: "account-a",
+      resolveAccountIdentity: accountId => identities.get(accountId),
+    });
+    const id = svc.schedule(makeOptions(), futureDate(120), "account-a", "mailbox-a-v1");
+    vi.advanceTimersByTime(121_000);
+
+    const processing = svc.processDue();
+    await Promise.resolve();
+    expect((svc as unknown as { items: Array<{ id: string; status: string }> }).items.find(item => item.id === id)?.status)
+      .toBe("sending");
+
+    expect(svc.quarantineAccount("account-a", "account mailbox identity changed"))
+      .toMatchObject({ quarantined: 1, removed: 0, cancelled: 1 });
+    expect((svc as unknown as { items: Array<{ id: string; status: string }> }).items.find(item => item.id === id)?.status)
+      .toBe("cancelled");
+
+    resolveSend({ success: true, messageId: "already-on-wire" });
+    await processing;
+    expect((svc as unknown as { items: Array<{ id: string; status: string }> }).items.find(item => item.id === id)?.status)
+      .toBe("cancelled");
+  });
+
+  it("automatically quarantines a persisted schedule whose fingerprint is stale after restart", () => {
+    const raw = JSON.stringify([{
+      id: "stale-schedule",
+      accountId: "account-a",
+      accountIdentity: "mailbox-a-v1",
+      scheduledAt: new Date(Date.now() + 120_000).toISOString(),
+      createdAt: new Date().toISOString(),
+      status: "pending",
+      options: makeOptions(),
+    }], null, 2);
+    writeFileSync(storePath, raw, "utf-8");
+    const svc = new SchedulerService(makeSMTP(), storePath, {
+      activeAccountId: "account-a",
+      resolveAccountIdentity: accountId => accountId === "account-a" ? "mailbox-a-v2" : undefined,
+    });
+
+    svc.start();
+    const backup = readdirSync(tmpDir).find(entry => entry.startsWith("scheduled.json.quarantine-") && entry.endsWith(".bak"));
+    expect(backup).toBeTruthy();
+    expect(readFileSync(join(tmpDir, backup!), "utf-8")).toBe(raw);
+    if (process.platform !== "win32") {
+      expect(statSync(join(tmpDir, backup!)).mode & 0o777).toBe(0o600);
+    }
+    expect(svc.list("account-a")).toEqual([]);
+    expect(JSON.parse(readFileSync(storePath, "utf-8"))).toEqual([]);
+    svc.stop();
   });
 
   it("pruneHistory() caps non-pending records at MAX_HISTORY_RECORDS", () => {

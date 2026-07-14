@@ -10,6 +10,8 @@
 //   output: long-form detail printed when the step fails OR when --verbose
 
 import { styleText } from "node:util";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
 const CHECK = styleText(["green", "bold"], "✓");
 const CROSS = styleText(["red", "bold"], "✗");
@@ -97,7 +99,7 @@ function formatFinal(results, totalMs) {
 
 // ─── Standardized step builder for spawning a subprocess ─────────────────────
 
-import { spawn } from "node:child_process";
+import { spawnShellFree } from "./cross-platform-spawn.mjs";
 
 /**
  * BUILD-017: secrets that no preship step needs but which would otherwise be
@@ -106,11 +108,15 @@ import { spawn } from "node:child_process";
  * scope). A step that genuinely needs one can opt back in via `keepEnv`.
  */
 const SCRUBBED_ENV_KEYS = ["NPM_TOKEN", "NODE_AUTH_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"];
+const DEFAULT_NPM_CACHE = path.join(tmpdir(), "mailpouch-npm-cache");
 
 function buildChildEnv(extra, keepEnv = []) {
   const base = { ...process.env };
   for (const k of SCRUBBED_ENV_KEYS) {
     if (!keepEnv.includes(k)) delete base[k];
+  }
+  if (!base.npm_config_cache) {
+    base.npm_config_cache = DEFAULT_NPM_CACHE;
   }
   return { ...base, ...(extra ?? {}) };
 }
@@ -124,11 +130,17 @@ function buildChildEnv(extra, keepEnv = []) {
 export function spawnStep(cmd, args, opts = {}) {
   const { successWhen, env, cwd, summary, keepEnv } = opts;
   return new Promise((resolve) => {
-    const child = spawn(cmd, args, {
-      env: buildChildEnv(env, keepEnv),
-      cwd,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    let child;
+    try {
+      child = spawnShellFree(cmd, args, {
+        env: buildChildEnv(env, keepEnv),
+        cwd,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (err) {
+      resolve({ ok: false, summary: `failed to spawn: ${err.message}`, output: err.stack });
+      return;
+    }
     const chunks = [];
     child.stdout.on("data", (c) => chunks.push(c));
     child.stderr.on("data", (c) => chunks.push(c));

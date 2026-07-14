@@ -5,6 +5,65 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.0] — 2026-07-12
+
+### Added
+
+- Durable, profile-scoped rolling hourly quotas now enforce each agent grant's `maxCallsPerHourByTool` limits atomically across processes and restarts.
+- Account-owned runtime state binds FTS indexes, scheduled messages, reminders, analytics, and SMTP status to both an account ID and mailbox identity; legacy queues are migrated with recovery backups and stale identities are quarantined.
+- Capability-aware discovery omits unconfigured SimpleLogin and Proton Pass tools from `tools/list`.
+- LAN settings bootstrap tokens are exchanged for bounded, in-memory HttpOnly browser sessions and removed from the browser URL.
+- A persistent audit → implement → validate → re-audit improvement runner records backlog state, validation fingerprints, and history.
+
+### Changed
+
+- Active-account changes now rebind IMAP/SMTP, scheduler, caches, auxiliary clients, and the Bridge watchdog as one lifecycle transition; settings explicitly report when a restart is required.
+- Custom `MAILPOUCH_CONFIG` profiles now receive isolated runtime and authentication stores derived from the canonical physical config path.
+- Scheduled deliveries and reply reminders are routed through their owning account instead of whichever account is active when background work runs.
+- `bulk_delete` remains a direct-call compatibility alias but is no longer advertised as a second canonical tool; optional companion tools are advertised only while configured.
+- Configuration and singleton locking now fail closed on unknown or stale ownership instead of reclaiming a live lock by age.
+
+### Fixed
+
+- Settings and account read-modify-write operations now reload and apply validated patches inside one cross-process lock, preventing stale saves or same-timestamp cache entries from restoring reset credentials, accounts, presets, or concurrent changes. Browser forms loaded before reset are rejected with a refresh-required conflict.
+- Account create, edit, activate, and delete operations now refresh the complete in-process service graph and stop old IDLE, SMTP, cache, auxiliary-client, and watchdog state from surviving a mailbox switch.
+- Generic IMAP FTS rows and attachment lookups are folder-qualified so equal UIDs in different folders cannot overwrite or return one another.
+- Ordinary settings saves retain undisclosed keychain-backed SimpleLogin and Pass secrets; explicit or partially failed clears disable affected live clients immediately.
+- Configuration reset clears mailbox, auxiliary, and remote secrets, refreshes live services independently, and reports any manual keychain cleanup required.
+- Canonical config-path resolution prevents symlink aliases from bypassing profile singleton and state isolation.
+- Cross-platform subprocess launch, installed-tarball inspection, and POSIX permission tests now behave correctly on Windows; timed-out validations terminate their full process tree.
+- Scheduler delivery aborts before SMTP when its in-flight state cannot be persisted, and retired IMAP clients can no longer change the state of a replacement connection.
+
+### Security
+
+- Live Proton Bridge E2E now snapshots pre-existing mailbox identities and flags as a read-only baseline, rejects every message mutation operand that lacks an exact UUID-scoped ownership proof, and cleans up only exact messages created by that run. Live tests never create, rename, or delete mailboxes; folder lifecycle coverage runs against disposable Greenmail. Crash recovery persists constrained ownership proofs before SMTP or draft dispatch, while temporary Bridge credentials are encrypted and runtime state is isolated and removed after a verified run. A durable credential-free setup journal closes the pre-manifest clone crash window, and mailbox-identity authority scopes serialize distinct configs targeting the same account while detecting older unjournaled clones. Ambiguous cleanup gets one authority-stripped fresh-process retry, later harnesses refuse unresolved recovery state, and a full-lifetime owner lease serializes separate live test processes. Every E2E backend now uses an exact-token config-only credential profile and private runtime paths, preventing Greenmail from reading or overwriting the operator's keychain or profile state.
+- Folder-restricted grants now validate every source, destination, default, derived, and multi-folder operand and verify returned-message provenance across tools, resources, prompts, attachments, replies, forwards, schedules, and reminders.
+- External grant or service-account revocation takes effect on the next bearer, tool, resource, or prompt authorization check; malformed authorization stores fail closed.
+- Webhook delivery resolves and pins public addresses per attempt, rejects private or special-use DNS results and redirects, and bounds DNS and network time to prevent SSRF, rebinding, and stalled deliveries.
+- Failed mailbox-keychain resets persist a restart-safe quarantine marker so stale credentials cannot be rehydrated after restart.
+- Mailbox and auxiliary credentials are persisted, hydrated, and quarantined per field, preventing partial keychain writes or clears from reviving stale secrets after restart.
+- Settings rejects DNS-rebinding Host headers, reverse-proxy IP pins use the trusted end of the forwarded chain, and API failures no longer expose stack-derived details or attacker-controlled logging formats.
+- Agent presets intersect per tool; malformed restrictions are rejected rather than widened; account-bound grants carry a mailbox fingerprint; whole-mailbox analytics and metadata fail closed for folder-restricted callers.
+- Grant, service-account, and escalation locks use owner records plus canonical physical paths, preventing both live-lock age reclamation and symlink-alias bypasses.
+- Destructive confirmation now also covers SimpleLogin contact/mailbox deletion and Proton Pass TOTP retrieval.
+- Account and permission settings payloads are strictly allowlisted and type-checked before persistence.
+
+### Quality
+
+- CI enforces a versioned coverage ratchet, strict unused-code checks, cross-platform installed-tarball execution of both bin shims, and a Windows Server 2022 native-build lane.
+- The tarball smoke test now proves the published improvement commands initialize and report status from the installed package.
+- Security-sensitive JSON stores use shared atomic owner-only writes, with expanded regression coverage for races, account identity changes, resets, revocation, folder scope, FTS ownership, and packaging.
+- Release publishing verifies the exact package-version tag, tests that commit once, and publishes the immutable verified SHA to both registries.
+
+### Compatibility notes
+
+- Folder-restricted callers may need to supply explicit folder arguments where scope cannot otherwise be proven.
+- SimpleLogin contact/mailbox deletion and `pass_totp` now require destructive confirmation.
+- Unconfigured Pass and SimpleLogin tools disappear from `tools/list`; direct calls remain subject to normal validation.
+- Custom config profiles move derived runtime state under their isolated profile directory unless explicit state-path environment variables are set.
+- Legacy unowned FTS indexes are archived and must be rebuilt; stale locks now require deliberate operator recovery.
+- `ScheduledEmail.accountId` is required for TypeScript consumers; persisted legacy queues are migrated with backups.
+
 ## [3.1.0] — 2026-07-01
 
 ### Added

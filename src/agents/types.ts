@@ -30,10 +30,21 @@ export interface GrantConditions {
    * means any IP. Matched literally against the socket remoteAddress.
    */
   ipPins?: string[];
-  /** Per-tool rate cap, calls per hour. Overrides the preset default. */
+  /**
+   * Per-tool rolling rate cap, calls per hour. Undefined means uncapped;
+   * zero explicitly denies every call to that tool for this grant. Accepted
+   * values are bounded to 10,000 to keep the durable quota ledger finite.
+   */
   maxCallsPerHourByTool?: Partial<Record<ToolName, number>>;
   /** Which account the grant is bound to. Undefined = default active account. */
   accountId?: string;
+  /**
+   * Opaque mailbox identity captured when an account-bound grant is approved.
+   * Account IDs are mutable registry labels; authorization also compares this
+   * fingerprint so repointing the same ID at another mailbox cannot transfer
+   * the old grant's authority.
+   */
+  accountIdentity?: string;
 }
 
 export interface AgentGrant {
@@ -62,6 +73,13 @@ export interface AgentGrant {
   totalCalls: number;
   /** Optional note the user attached on approval. */
   note?: string;
+  /**
+   * Durable provenance for grants backed by a client_credentials service
+   * account. Unlike a display note or transport value, this survives normal
+   * grant edits and lets authorization require the matching credential record
+   * to remain present.
+   */
+  credentialKind?: "service_account";
   /**
    * IP the agent registered (DCR'd) from, captured at registration time and
    * shown on the approval card so the user has context to approve/deny the

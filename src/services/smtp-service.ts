@@ -3,6 +3,7 @@
  * direct submission).
  */
 
+import { Socket } from "node:net";
 import nodemailer from "nodemailer";
 import { ProtonMailConfig, SendEmailOptions } from "../types/index.js";
 import { logger } from "../utils/logger.js";
@@ -11,6 +12,57 @@ import { parseEmails, parseEmailsDetailed, isValidEmail, sanitizeForLog, validat
 import { tracer } from "../utils/tracer.js";
 import { classifyError } from "../utils/error-classify.js";
 import { BackoffTracker, isTransientAbuseError } from "../utils/backoff.js";
+import {
+  MailboxMutationDeadlineError,
+  runAccountMailMutation,
+} from "./mailbox-mutation-deadline.js";
+
+/**
+ * Nodemailer's default SMTP pool concurrency. Keeping the same bounded
+ * parallelism avoids serializing independent sends while maxMessages=1
+ * preserves the previous one-message-per-connection lifecycle.
+ */
+const SMTP_POOL_MAX_CONNECTIONS = 5;
+const SMTP_CONNECTION_TIMEOUT_MS = 30_000;
+const SMTP_GREETING_TIMEOUT_MS = 30_000;
+const SMTP_SOCKET_TIMEOUT_MS = 45_000;
+
+interface DestroyableSocket {
+  destroyed?: boolean;
+  destroy(): void;
+}
+
+interface SmtpConnectionInternals {
+  _socket?: DestroyableSocket | { socket?: DestroyableSocket } | false;
+  close?: () => void;
+}
+
+interface SmtpPoolResourceInternals {
+  connection?: SmtpConnectionInternals | false;
+  close?: () => void;
+}
+
+interface SmtpPoolInternals {
+  _connections?: unknown;
+}
+
+interface PooledTransporterInternals {
+  transporter?: SmtpPoolInternals;
+}
+
+interface PendingSmtpSocketAttempt {
+  generation: number;
+  invalidate: (error: Error) => void;
+}
+
+function getDestroyableSocket(value: unknown): DestroyableSocket | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = (value as { socket?: unknown }).socket ?? value;
+  if (!candidate || typeof candidate !== "object") return null;
+  return typeof (candidate as { destroy?: unknown }).destroy === "function"
+    ? candidate as DestroyableSocket
+    : null;
+}
 
 /**
  * Strip CRLF and null bytes from a header-like string value to prevent
@@ -38,6 +90,12 @@ const BLOCKED_HEADER_KEYS = /^(to|cc|bcc|from|return-path|reply-to|sender)$/i;
 
 export class SMTPService {
   private transporter: nodemailer.Transporter | null = null;
+  /** Raw sockets are tracked before Nodemailer creates a PoolResource connection. */
+  private readonly smtpSockets = new Set<Socket>();
+  /** Connecting callbacks that must be failed synchronously on retirement. */
+  private readonly pendingSmtpSocketAttempts = new Map<Socket, PendingSmtpSocketAttempt>();
+  /** Invalidates getSocket closures and completions belonging to an old pool. */
+  private transportGeneration = 0;
   private config: ProtonMailConfig;
   /** True when TLS certificate validation is disabled (no Bridge cert configured). */
   insecureTls = false;
@@ -65,17 +123,180 @@ export class SMTPService {
     this.initializeTransporter();
   }
 
-  private initializeTransporter(): void {
-    logger.debug("Initializing SMTP transporter", "SMTPService");
-    // Close any existing transporter before replacing it — reinitialize()
-    // runs on every config update (AccountManager.rebuildFromRegistry, the
-    // settings UI save path, etc.) and nodemailer holds a connection pool
-    // internally. Skipping close() here would leak sockets + file
-    // descriptors on every save. Best-effort: swallow close errors so a
-    // dead transporter can't block re-init.
-    if (this.transporter) {
-      try { this.transporter.close(); } catch { /* already dead — ignore */ }
+  /**
+   * Open and retain authority over the raw socket during DNS/connect. Once
+   * connected, Nodemailer receives it as an already-open connection and owns
+   * SMTP/STARTTLS setup; the close listener keeps our tracking set accurate.
+   */
+  private openTrackedSocket(
+    options: { host?: string; port?: number; localAddress?: string },
+    callback: (error: Error | null, socketOptions?: { connection: Socket }) => void,
+    generation: number,
+  ): void {
+    if (generation !== this.transportGeneration) {
+      callback(new Error("SMTP transport was retired before socket creation"));
+      return;
     }
+    const host = options.host;
+    const port = options.port;
+    if (!host || !Number.isInteger(port) || (port ?? 0) < 1 || (port ?? 0) > 65_535) {
+      callback(new Error("SMTP socket requires a valid host and port"));
+      return;
+    }
+
+    const socket = new Socket();
+    this.smtpSockets.add(socket);
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const removePreconnectListeners = () => {
+      socket.removeListener("connect", onConnect);
+      socket.removeListener("error", onError);
+      if (timer) clearTimeout(timer);
+    };
+    const fail = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      removePreconnectListeners();
+      this.pendingSmtpSocketAttempts.delete(socket);
+      callback(error);
+    };
+    const onConnect = () => {
+      if (settled) return;
+      if (generation !== this.transportGeneration) {
+        try { fail(new Error("SMTP transport was retired while connecting")); }
+        finally { socket.destroy(); }
+        return;
+      }
+      settled = true;
+      removePreconnectListeners();
+      this.pendingSmtpSocketAttempts.delete(socket);
+      callback(null, { connection: socket });
+    };
+    const onError = (error: Error) => { fail(error); };
+    socket.once("connect", onConnect);
+    socket.once("error", onError);
+    socket.once("close", () => {
+      this.smtpSockets.delete(socket);
+      fail(new Error("SMTP socket closed before connection completed"));
+    });
+    this.pendingSmtpSocketAttempts.set(socket, { generation, invalidate: fail });
+
+    timer = setTimeout(() => {
+      try { fail(new Error("SMTP connection timeout")); }
+      finally { socket.destroy(); }
+    }, SMTP_CONNECTION_TIMEOUT_MS);
+    timer.unref?.();
+
+    try {
+      socket.connect({
+        host,
+        port: port!,
+        ...(options.localAddress ? { localAddress: options.localAddress } : {}),
+      });
+    } catch (error) {
+      try { fail(error instanceof Error ? error : new Error(String(error))); }
+      finally { socket.destroy(); }
+    }
+  }
+
+  /**
+   * Detach one transporter generation and synchronously revoke every socket it
+   * could still use. The generation bump also rejects delayed getSocket calls
+   * from the retired Nodemailer pool before they allocate a new socket.
+   */
+  private hardRetireTransport(reason: string): { hadTransporter: boolean; errors: unknown[] } {
+    const transporter = this.transporter;
+    const hadTransporter = transporter !== null;
+    this.transporter = null;
+    this.transportGeneration += 1;
+
+    const errors: unknown[] = [];
+    const pool = transporter
+      ? (transporter as unknown as PooledTransporterInternals).transporter
+      : undefined;
+    const liveResources = pool?._connections;
+    const resources = transporter && Array.isArray(liveResources)
+      ? [...liveResources]
+      : null;
+    if (transporter && !resources) {
+      errors.push(new Error(
+        "Nodemailer SMTP pool internals are unavailable; active socket closure could not be verified",
+      ));
+    }
+
+    if (hadTransporter || this.smtpSockets.size > 0 || this.pendingSmtpSocketAttempts.size > 0) {
+      logger.warn(`Hard-retiring SMTP transport: ${reason}`, "SMTPService");
+    }
+
+    const retirementError = new Error(`SMTP transport retired: ${reason}`);
+    for (const attempt of [...this.pendingSmtpSocketAttempts.values()]) {
+      try { attempt.invalidate(retirementError); }
+      catch (error) { errors.push(error); }
+    }
+
+    // Collect both raw pre-connect sockets and the active TLS/socket wrappers
+    // exposed through Nodemailer's pinned pool internals. Destroy each physical
+    // object once before asking PoolResource/Transporter to close gracefully.
+    const sockets = new Set<DestroyableSocket>(this.smtpSockets);
+    if (resources) {
+      for (const [index, entry] of resources.entries()) {
+        const resource = entry as SmtpPoolResourceInternals | null;
+        if (!resource || typeof resource !== "object") {
+          errors.push(new Error(`Nodemailer SMTP pool resource ${index} is unavailable`));
+          continue;
+        }
+        const connection = resource.connection;
+        if (!connection || typeof connection !== "object") {
+          errors.push(new Error(
+            `Nodemailer SMTP pool resource ${index} has no active SMTPConnection to hard-close`,
+          ));
+        } else {
+          const socket = getDestroyableSocket(connection._socket);
+          if (socket) sockets.add(socket);
+          else {
+            errors.push(new Error(
+              `Nodemailer SMTP pool resource ${index} has no destroyable active socket`,
+            ));
+          }
+          if (typeof connection.close !== "function") {
+            errors.push(new Error(
+              `Nodemailer SMTP pool resource ${index} has no SMTPConnection.close()`,
+            ));
+          }
+        }
+      }
+    }
+
+    for (const socket of sockets) {
+      try { socket.destroy(); }
+      catch (error) { errors.push(error); }
+    }
+
+    if (resources) {
+      for (const [index, entry] of resources.entries()) {
+        const resource = entry as SmtpPoolResourceInternals | null;
+        if (!resource || typeof resource !== "object") continue;
+        if (typeof resource.close !== "function") {
+          errors.push(new Error(
+            `Nodemailer SMTP pool resource ${index} has no PoolResource.close()`,
+          ));
+        } else {
+          try { resource.close(); }
+          catch (error) { errors.push(error); }
+        }
+      }
+    }
+
+    if (transporter) {
+      try { transporter.close(); }
+      catch (error) { errors.push(error); }
+    }
+    return { hadTransporter, errors };
+  }
+
+  private createTransporter(): void {
+    logger.debug("Initializing SMTP transporter", "SMTPService");
     // Reset degraded state so reinitialize() after the user fixes config
     // clears any prior deferred failure.
     this.initError = null;
@@ -143,7 +364,21 @@ export class SMTPService {
     // keeps its encrypted-transport guarantee; only the explicit
     // E2E-plaintext env (which no real deployment sets) relaxes STARTTLS.
     const allowPlaintextSmtp = process.env.MAILPOUCH_SMTP_ALLOW_PLAINTEXT === "1";
+    const generation = this.transportGeneration;
     this.transporter = nodemailer.createTransport({
+      pool: true,
+      maxConnections: SMTP_POOL_MAX_CONNECTIONS,
+      maxMessages: 1,
+      // Match the former non-pooled transport: an ambiguous connection close
+      // must never cause Nodemailer to resend the same message automatically.
+      // Nodemailer 9 supports this option although @types/nodemailer omits it.
+      ...({ maxRequeues: 0 } as const),
+      // SMTP-local defense in depth. The request coordinator still owns the
+      // shorter absolute mutation deadline and hard cancellation semantics.
+      connectionTimeout: SMTP_CONNECTION_TIMEOUT_MS,
+      greetingTimeout: SMTP_GREETING_TIMEOUT_MS,
+      socketTimeout: SMTP_SOCKET_TIMEOUT_MS,
+      getSocket: (options, callback) => { this.openTrackedSocket(options, callback, generation); },
       host: this.config.smtp.host,
       port: this.config.smtp.port,
       secure: this.config.smtp.secure,
@@ -156,6 +391,19 @@ export class SMTPService {
     });
 
     logger.info("SMTP transporter initialized", "SMTPService");
+  }
+
+  /** Replace the current pool only after its complete authority is revoked. */
+  private initializeTransporter(): void {
+    const retired = this.hardRetireTransport("transporter initialization/replacement");
+    try {
+      this.createTransporter();
+    } catch (error) {
+      retired.errors.push(error);
+    }
+    if (retired.errors.length > 0) {
+      throw new AggregateError(retired.errors, "SMTP transport replacement did not hard-close cleanly");
+    }
   }
 
   /**
@@ -289,6 +537,7 @@ export class SMTPService {
       }
     }
 
+    let dispatchedTransportGeneration: number | undefined;
     try {
       // Real Proton Bridge always uses a full email as the SMTP username
       // (e.g. "chuck@protonmail.com"), so `from: username` is a valid address.
@@ -396,7 +645,23 @@ export class SMTPService {
         });
       }
 
-      const info = await this.transporter.sendMail(mailOptions);
+      // Capture the exact pooled transport being dispatched. A concurrent
+      // cancellation replaces this.transporter, while the coordinator fences
+      // this closure and hard-closes the captured transport's active socket.
+      const transporter = this.transporter;
+      if (!transporter) throw new Error("SMTP transporter not initialized");
+      dispatchedTransportGeneration = this.transportGeneration;
+      const info = await runAccountMailMutation(
+        this,
+        () => transporter.sendMail(mailOptions),
+      );
+      if (dispatchedTransportGeneration !== this.transportGeneration) {
+        throw new MailboxMutationDeadlineError(
+          "send_email",
+          "shared transport cancellation",
+          true,
+        );
+      }
 
       logger.info("Email sent successfully", "SMTPService", {
         messageId: info.messageId,
@@ -408,6 +673,22 @@ export class SMTPService {
         messageId: info.messageId,
       };
     } catch (error: unknown) {
+      // The request coordinator owns cancellation/outcome reporting. Do not
+      // downgrade its typed error into an ordinary SMTP delivery failure.
+      if (error instanceof MailboxMutationDeadlineError) throw error;
+      // Lifecycle replacement/wipe can hard-retire the captured pool without
+      // being initiated by an MCP request. Once sendMail was dispatched, any
+      // rejection from that retired generation is still ambiguous and must not
+      // be converted into an ordinary retryable SMTP failure.
+      if (dispatchedTransportGeneration !== undefined
+          && dispatchedTransportGeneration !== this.transportGeneration) {
+        throw new MailboxMutationDeadlineError(
+          "send_email",
+          "shared transport cancellation",
+          true,
+          error,
+        );
+      }
       if (isTransientAbuseError(error)) {
         this.backoff.record("abuse");
         logger.warn(
@@ -469,26 +750,49 @@ export class SMTPService {
   /** Close and release the SMTP transporter connection pool. */
   async close(): Promise<void> {
     return tracer.span('smtp.close', {}, async () => {
-    if (this.transporter) {
-      logger.debug("Closing SMTP transporter", "SMTPService");
-      this.transporter.close();
-      this.transporter = null;
+    const hadAuthority = this.transporter !== null
+      || this.smtpSockets.size > 0
+      || this.pendingSmtpSocketAttempts.size > 0;
+    const retired = this.hardRetireTransport("service close");
+    if (hadAuthority) {
       logger.info("SMTP transporter closed", "SMTPService");
+    }
+    if (retired.errors.length > 0) {
+      throw new AggregateError(retired.errors, "SMTP transport did not hard-close cleanly");
     }
     }); // end tracer.span('smtp.close')
   }
 
+  /**
+   * Hard-stop a cancelled/timed-out SMTP send and replace the transporter so a
+   * later request does not inherit the poisoned socket. This is synchronous:
+   * the request deadline must not await a graceful close on a wedged command.
+   */
+  abortActiveMutationTransport(reason: string): void {
+    logger.warn(`Aborting SMTP transport: ${reason}`, "SMTPService");
+    const retired = this.hardRetireTransport(reason);
+    // A fresh transporter is safe for a later request; the abandoned send
+    // holds its own reference to the closed predecessor.
+    if (retired.hadTransporter) {
+      try { this.createTransporter(); }
+      catch (error) { retired.errors.push(error); }
+    }
+    if (retired.errors.length > 0) {
+      throw new AggregateError(retired.errors, "SMTP transport did not hard-close cleanly");
+    }
+  }
+
   /** Securely wipe credential strings from memory. */
   wipeCredentials(): void {
+    const retired = this.hardRetireTransport("credential wipe");
     if (this.config?.smtp) {
       if (this.config.smtp.password) this.config.smtp.password = "";
       if (this.config.smtp.smtpToken) this.config.smtp.smtpToken = "";
       if (this.config.smtp.username) this.config.smtp.username = "";
     }
-    if (this.transporter) {
-      this.transporter.close();
-      this.transporter = null;
-    }
     logger.info("SMTP credentials wiped from memory", "SMTPService");
+    if (retired.errors.length > 0) {
+      throw new AggregateError(retired.errors, "SMTP transport did not hard-close cleanly during credential wipe");
+    }
   }
 }

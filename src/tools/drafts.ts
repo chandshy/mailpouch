@@ -6,7 +6,7 @@
  */
 
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
-import { isValidEmail, requireNumericEmailId, validateAttachments, sanitizeAttachments } from "../utils/helpers.js";
+import { isValidEmail, optionalFolderHint, requireNumericEmailId, validateAttachments, sanitizeAttachments } from "../utils/helpers.js";
 import type { EmailMessage } from "../types/index.js";
 import type { ToolDef, ToolHandler, ToolModule } from "./types.js";
 
@@ -36,6 +36,72 @@ const EMAIL_SUMMARY_SCHEMA = {
   },
   required: ["id", "from", "subject", "date", "isRead", "folder"],
 };
+
+/**
+ * Folder restrictions apply to both IMAP reads and mailbox-derived records
+ * persisted by local services. `undefined` is the explicit unscoped/trusted
+ * case; an empty list is intentionally deny-all if a malformed context ever
+ * produces one.
+ */
+function callerAllowedFolders(ctx: Parameters<ToolHandler>[0]): readonly string[] | undefined {
+  // A few focused handler fixtures predate the contextual accessor. Treating
+  // its absence as the historical trusted/unrestricted case preserves those
+  // direct-call semantics; production dispatch always supplies it.
+  return ctx.getCallerAllowedFolders?.();
+}
+
+function requireAllowedMailFolder(ctx: Parameters<ToolHandler>[0], folder: string, operation: string): void {
+  const allowed = callerAllowedFolders(ctx);
+  if (allowed === undefined) return;
+  if (!allowed.some(candidate => candidate.toLowerCase() === folder.toLowerCase())) {
+    throw new McpError(
+      ErrorCode.InvalidRequest,
+      `Blocked: ${operation} would access folder '${folder}', which is outside this agent's folder allowlist.`,
+    );
+  }
+}
+
+/**
+ * A folder hint is a claim, not proof. Once IMAP returns a message, verify
+ * its resolved folder before inspecting headers or persisting a reminder.
+ * This closes the same folder-local UID collision class as reply/forward.
+ */
+function requireResolvedMailFolder(
+  ctx: Parameters<ToolHandler>[0],
+  requestedFolder: string,
+  resolvedFolder: string | undefined,
+  operation: string,
+): void {
+  const allowed = callerAllowedFolders(ctx);
+  if (allowed === undefined) return;
+  if (!resolvedFolder || !allowed.some(candidate => candidate.toLowerCase() === resolvedFolder.toLowerCase())) {
+    throw new McpError(
+      ErrorCode.InvalidRequest,
+      `Blocked: ${operation} resolved a message outside this agent's folder allowlist.`,
+    );
+  }
+  if (resolvedFolder.toLowerCase() !== requestedFolder.toLowerCase()) {
+    throw new McpError(
+      ErrorCode.InvalidRequest,
+      `Blocked: ${operation} resolved a message from '${resolvedFolder}' rather than the requested folder '${requestedFolder}'.`,
+    );
+  }
+}
+
+/**
+ * Scheduled and reminder records are account-scoped but carry no originating
+ * mailbox folder (or agent identity). Returning or mutating one therefore
+ * cannot be proven within a restricted caller's mail scope. Do not mistake
+ * an account ID match for folder provenance.
+ */
+function requireUnrestrictedPersistentRecordAccess(ctx: Parameters<ToolHandler>[0], operation: string): void {
+  if (callerAllowedFolders(ctx) !== undefined) {
+    throw new McpError(
+      ErrorCode.InvalidRequest,
+      `Blocked: ${operation} is unavailable to folder-restricted callers because persisted records have no source-folder provenance.`,
+    );
+  }
+}
 
 export const defs: ToolDef[] = [
   {
@@ -72,7 +138,7 @@ export const defs: ToolDef[] = [
     name: "schedule_email",
     title: "Schedule Email",
     description:
-      "Schedule an email for future delivery (minimum 60 seconds from now, maximum 30 days). Scheduled emails are retried up to 3 times on failure. Use list_scheduled_emails to view pending sends and cancel_scheduled_email to cancel before delivery.",
+      "Schedule an email for future delivery (minimum 60 seconds from now, maximum 30 days). Definite failures are retried up to 3 times; ambiguous deliveries are never retried automatically. Use list_scheduled_emails to view pending sends and cancel_scheduled_email to cancel before delivery.",
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     inputSchema: {
       type: "object",
@@ -103,7 +169,7 @@ export const defs: ToolDef[] = [
   {
     name: "list_scheduled_emails",
     title: "List Scheduled Emails",
-    description: "List all scheduled emails (pending, sent, failed, and cancelled). Sorted by scheduledAt ascending.",
+    description: "List all scheduled emails, including in-flight and outcome-unknown deliveries. Sorted by scheduledAt ascending.",
     annotations: { readOnlyHint: true },
     inputSchema: { type: "object", properties: {} },
     outputSchema: {
@@ -116,7 +182,11 @@ export const defs: ToolDef[] = [
             properties: {
               id: { type: "string" },
               scheduledAt: { type: "string", format: "date-time" },
-              status: { type: "string", enum: ["pending", "sent", "failed", "cancelled"] },
+              status: {
+                type: "string",
+                enum: ["pending", "sending", "sent", "failed", "cancelled", "outcome_unknown"],
+                description: "outcome_unknown means SMTP was interrupted after dispatch; inspect Sent mail before retrying manually",
+              },
               subject: { type: "string" },
               to: { type: "string" },
               createdAt: { type: "string", format: "date-time" },
@@ -320,7 +390,7 @@ export const handlers: Record<string, ToolHandler> = {
   },
 
   schedule_email: async (ctx) => {
-    const { args, schedulerService, ok, MAX_SUBJECT_LENGTH, MAX_BODY_LENGTH, safeErrorMessage } = ctx;
+    const { args, schedulerService, accountId, accountIdentity, ok, MAX_SUBJECT_LENGTH, MAX_BODY_LENGTH, safeErrorMessage } = ctx;
     const schAttErr = validateAttachments(args.attachments);
     if (schAttErr) throw new McpError(ErrorCode.InvalidParams, schAttErr);
     if (!args.to || typeof args.to !== "string" || !(args.to as string).trim()) {
@@ -371,7 +441,7 @@ export const handlers: Record<string, ToolHandler> = {
         priority: args.priority as "high" | "normal" | "low" | undefined,
         replyTo: args.replyTo as string | undefined,
         attachments: sanitizeAttachments(args.attachments),
-      }, sendAt);
+      }, sendAt, accountId, accountIdentity);
       return ok({ success: true, id: schedId, scheduledAt: sendAt.toISOString() },
         `Scheduled for ${sendAt.toISOString()} (ID: ${schedId})`);
     } catch (err: unknown) {
@@ -381,8 +451,9 @@ export const handlers: Record<string, ToolHandler> = {
   },
 
   list_scheduled_emails: async (ctx) => {
-    const { schedulerService, ok } = ctx;
-    const allScheduled = schedulerService.list();
+    const { schedulerService, accountId, ok } = ctx;
+    requireUnrestrictedPersistentRecordAccess(ctx, "list_scheduled_emails");
+    const allScheduled = schedulerService.list(accountId);
     const summary = allScheduled.map(s => {
       const opts = s.options as unknown as Record<string, unknown>;
       const toField = opts?.to;
@@ -404,14 +475,33 @@ export const handlers: Record<string, ToolHandler> = {
   list_proton_scheduled: async (ctx) => {
     const { imapService, ok } = ctx;
     const scheduledFolderCandidates = ['All Scheduled', 'Scheduled'];
+    const allowed = callerAllowedFolders(ctx);
+    // These are fixed IMAP sources, unlike the account-scoped local scheduler
+    // records above. Intersect before probing: a failed probe itself can reveal
+    // whether an excluded folder exists or is reachable.
+    const scopedCandidates = allowed === undefined
+      ? scheduledFolderCandidates
+      : scheduledFolderCandidates.filter(candidate =>
+          allowed.some(folder => folder.toLowerCase() === candidate.toLowerCase()));
+    if (scopedCandidates.length === 0) {
+      throw new McpError(
+        ErrorCode.InvalidRequest,
+        "Blocked: no Proton scheduled-mail folder is in this agent's folder allowlist.",
+      );
+    }
     let scheduledEmails: EmailMessage[] = [];
     let foundFolder = '';
 
-    for (const candidate of scheduledFolderCandidates) {
+    for (const candidate of scopedCandidates) {
       try {
         const emails = await imapService.getEmails(candidate, 50);
         if (emails.length >= 0) {
-          scheduledEmails = emails;
+          // The service normally stamps each result with the mailbox it read,
+          // but retain the boundary check so a stale/misbehaving adapter never
+          // leaks a record from a different folder through this aggregate.
+          scheduledEmails = allowed === undefined
+            ? emails
+            : emails.filter(email => allowed.some(folder => folder.toLowerCase() === email.folder.toLowerCase()));
           foundFolder = candidate;
           break;
         }
@@ -431,7 +521,8 @@ export const handlers: Record<string, ToolHandler> = {
   },
 
   cancel_scheduled_email: async (ctx) => {
-    const { args, schedulerService, actionOk } = ctx;
+    const { args, schedulerService, accountId, actionOk } = ctx;
+    requireUnrestrictedPersistentRecordAccess(ctx, "cancel_scheduled_email");
     const rawCancelId = args.id;
     if (
       !rawCancelId ||
@@ -440,7 +531,7 @@ export const handlers: Record<string, ToolHandler> = {
     ) {
       throw new McpError(ErrorCode.InvalidParams, "id must be a valid UUID (e.g. xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx).");
     }
-    const result = schedulerService.cancel(rawCancelId);
+    const result = schedulerService.cancel(rawCancelId, accountId);
     if (result.ok) {
       return actionOk();
     }
@@ -456,9 +547,10 @@ export const handlers: Record<string, ToolHandler> = {
   },
 
   remind_if_no_reply: async (ctx) => {
-    const { args, imapService, reminderService, ok } = ctx;
+    const { args, imapService, reminderService, accountId, accountIdentity, ok } = ctx;
     const remEmailId = requireNumericEmailId(args.email_id, "email_id");
-    const folderHint = (args.folder as string | undefined) ?? "Sent";
+    const folderHint = optionalFolderHint(args.folder) ?? "Sent";
+    requireAllowedMailFolder(ctx, folderHint, "remind_if_no_reply");
     const afterDays = typeof args.after_days === "number" ? args.after_days : NaN;
     if (!Number.isFinite(afterDays) || afterDays < 1 || afterDays > 365) {
       throw new McpError(ErrorCode.InvalidParams, "after_days must be a number between 1 and 365.");
@@ -472,6 +564,7 @@ export const handlers: Record<string, ToolHandler> = {
     if (!msg) {
       return { content: [{ type: "text" as const, text: `Source message ${remEmailId} not found in ${folderHint}` }], isError: true };
     }
+    requireResolvedMailFolder(ctx, folderHint, msg.folder, "remind_if_no_reply");
     const headers = msg.headers ?? {};
     const rawMsgId = Array.isArray(headers["message-id"]) ? headers["message-id"][0] : (headers["message-id"] as string | undefined);
     if (!rawMsgId) {
@@ -486,6 +579,8 @@ export const handlers: Record<string, ToolHandler> = {
     let reminder;
     try {
       reminder = reminderService.add({
+        accountId,
+        accountIdentity,
         messageId: rawMsgId,
         imapUid: remEmailId,
         recipient,
@@ -506,8 +601,9 @@ export const handlers: Record<string, ToolHandler> = {
   },
 
   list_pending_reminders: async (ctx) => {
-    const { reminderService, ok } = ctx;
-    const reminders = reminderService.listPending().map(r => ({
+    const { reminderService, accountId, ok } = ctx;
+    requireUnrestrictedPersistentRecordAccess(ctx, "list_pending_reminders");
+    const reminders = reminderService.listPending(accountId).map(r => ({
       id: r.id,
       recipient: r.recipient,
       subject: r.subject,
@@ -519,10 +615,11 @@ export const handlers: Record<string, ToolHandler> = {
   },
 
   cancel_reminder: async (ctx) => {
-    const { args, reminderService, actionOk } = ctx;
+    const { args, reminderService, accountId, actionOk } = ctx;
+    requireUnrestrictedPersistentRecordAccess(ctx, "cancel_reminder");
     const rid = typeof args.reminder_id === "string" ? args.reminder_id : "";
     if (!rid) throw new McpError(ErrorCode.InvalidParams, "reminder_id must be a non-empty string.");
-    const cancelled = reminderService.cancel(rid);
+    const cancelled = reminderService.cancel(rid, accountId);
     if (!cancelled) {
       return { content: [{ type: "text" as const, text: "Reminder not found or already fired" }], isError: true };
     }
@@ -530,8 +627,9 @@ export const handlers: Record<string, ToolHandler> = {
   },
 
   check_reminders: async (ctx) => {
-    const { reminderService, ok } = ctx;
-    const fired = reminderService.scanDue().map(r => ({
+    const { reminderService, accountId, ok } = ctx;
+    requireUnrestrictedPersistentRecordAccess(ctx, "check_reminders");
+    const fired = reminderService.scanDue(new Date(), accountId).map(r => ({
       id: r.id,
       messageId: r.messageId,
       recipient: r.recipient,
@@ -540,7 +638,7 @@ export const handlers: Record<string, ToolHandler> = {
       fireAt: r.fireAt,
       note: r.note ?? "",
     }));
-    reminderService.prune();
+    reminderService.prune(30, accountId);
     return ok({ fired });
   },
 };

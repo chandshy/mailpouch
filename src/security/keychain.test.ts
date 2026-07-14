@@ -20,7 +20,7 @@ describe('Keychain (without keytar installed)', () => {
   it('saveCredentials should return false', async () => {
     const { saveCredentials } = await import('./keychain.js');
     const result = await saveCredentials('password', 'token');
-    expect(result).toBe(false);
+    expect(result).toEqual({ passwordStored: false, smtpTokenStored: false });
   });
 
   it('deleteCredentials should return false', async () => {
@@ -93,6 +93,16 @@ describe('Keychain (without keytar installed)', () => {
   it('saveAuxiliaryCredentials should return false without keytar', async () => {
     const { saveAuxiliaryCredentials } = await import('./keychain.js');
     expect(await saveAuxiliaryCredentials('pat-secret', 'sl-key')).toBe(false);
+  });
+
+  it('deleteAuxiliaryCredentials should return false without keytar', async () => {
+    const { deleteAuxiliaryCredentials } = await import('./keychain.js');
+    expect(await deleteAuxiliaryCredentials({ passAccessToken: true })).toBe(false);
+  });
+
+  it('deleteRemoteSecrets should return false without keytar', async () => {
+    const { deleteRemoteSecrets } = await import('./keychain.js');
+    expect(await deleteRemoteSecrets()).toBe(false);
   });
 
   it('migrateFromConfig with only Pass PAT set leaves the secret on disk when keychain is unavailable (CRED-001)', async () => {
@@ -245,7 +255,10 @@ describe('Keychain (positive-path with stub @napi-rs/keyring) — TEST-005', () 
 
   it('saveCredentials → loadCredentials round-trip records set/get calls', async () => {
     const { saveCredentials, loadCredentials } = await import('./keychain.js');
-    expect(await saveCredentials('bridge-pwd-1', 'smtp-tok-1')).toBe(true);
+    expect(await saveCredentials('bridge-pwd-1', 'smtp-tok-1')).toEqual({
+      passwordStored: true,
+      smtpTokenStored: true,
+    });
     const loaded = await loadCredentials();
     expect(loaded).toEqual({ password: 'bridge-pwd-1', smtpToken: 'smtp-tok-1' });
     // Verify the stub backend saw the right service/account combos.
@@ -264,6 +277,143 @@ describe('Keychain (positive-path with stub @napi-rs/keyring) — TEST-005', () 
     expect(loaded).toEqual({ passAccessToken: 'pat-secret', simpleloginApiKey: 'sl-key' });
     expect(backend.store.get('mailpouch|pass-pat')).toBe('pat-secret');
     expect(backend.store.get('mailpouch|simplelogin-api-key')).toBe('sl-key');
+    await clear();
+  });
+
+  it('saves account credentials independently when one keychain field throws', async () => {
+    backend.store.set('mailpouch|smtp-token:acct-partial', 'stale-token');
+    const BaseEntry = backend.EntryCtor;
+    class PartiallyFailingEntry implements StubEntryInstance {
+      private readonly inner: StubEntryInstance;
+      constructor(private readonly service: string, private readonly account: string) {
+        this.inner = new BaseEntry(service, account);
+      }
+      getPassword(): string | null { return this.inner.getPassword(); }
+      setPassword(password: string): void {
+        if (this.account === 'smtp-token:acct-partial') throw new Error('token write failed');
+        this.inner.setPassword(password);
+      }
+      deletePassword(): boolean { return this.inner.deletePassword(); }
+    }
+    const { __setKeyringForTests, saveAccountCredentials, loadAccountCredentials } = await import('./keychain.js');
+    __setKeyringForTests({ Entry: PartiallyFailingEntry });
+
+    expect(await saveAccountCredentials('acct-partial', 'new-password', 'new-token')).toEqual({
+      passwordStored: true,
+      smtpTokenStored: false,
+    });
+    expect(await loadAccountCredentials('acct-partial')).toEqual({
+      password: 'new-password',
+      smtpToken: 'stale-token',
+    });
+    await clear();
+  });
+
+  it('preserves the failed legacy credential field for config fallback after a partial keychain write', async () => {
+    backend.store.set('mailpouch|smtp-token', 'stale-token');
+    const BaseEntry = backend.EntryCtor;
+    class PartiallyFailingEntry implements StubEntryInstance {
+      private readonly inner: StubEntryInstance;
+      constructor(private readonly service: string, private readonly account: string) {
+        this.inner = new BaseEntry(service, account);
+      }
+      getPassword(): string | null { return this.inner.getPassword(); }
+      setPassword(password: string): void {
+        if (this.account === 'smtp-token') throw new Error('token write failed');
+        this.inner.setPassword(password);
+      }
+      deletePassword(): boolean { return this.inner.deletePassword(); }
+    }
+    const { __setKeyringForTests, saveCredentials, migrateFromConfig } = await import('./keychain.js');
+    __setKeyringForTests({ Entry: PartiallyFailingEntry });
+
+    expect(await saveCredentials('new-password', 'new-token')).toEqual({
+      passwordStored: true,
+      smtpTokenStored: false,
+    });
+
+    const cfg = {
+      configVersion: 1,
+      connection: {
+        smtpHost: 'localhost', smtpPort: 1025, imapHost: 'localhost', imapPort: 1143,
+        username: 'user', password: 'newer-password', smtpToken: 'newer-token',
+        bridgeCertPath: '', debug: false,
+      },
+      permissions: { preset: 'read_only' as const, tools: {} as any },
+    } satisfies ServerConfig;
+    const saveFn = vi.fn();
+    expect(await migrateFromConfig(cfg, saveFn)).toBe(true);
+    expect(cfg.connection.password).toBe('');
+    expect(cfg.connection.smtpToken).toBe('newer-token');
+    expect(cfg.credentialStorage).toBe('config');
+    expect(saveFn).toHaveBeenCalledTimes(1);
+    await clear();
+  });
+
+  it('loads a healthy legacy credential field when its sibling read throws', async () => {
+    backend.store.set('mailpouch|smtp-token', 'healthy-token');
+    const BaseEntry = backend.EntryCtor;
+    class PartiallyFailingReadEntry implements StubEntryInstance {
+      private readonly inner: StubEntryInstance;
+      constructor(private readonly service: string, private readonly account: string) {
+        this.inner = new BaseEntry(service, account);
+      }
+      getPassword(): string | null {
+        if (this.account === 'bridge-password') throw new Error('password read failed');
+        return this.inner.getPassword();
+      }
+      setPassword(password: string): void { this.inner.setPassword(password); }
+      deletePassword(): boolean { return this.inner.deletePassword(); }
+    }
+    const { __setKeyringForTests, loadCredentials } = await import('./keychain.js');
+    __setKeyringForTests({ Entry: PartiallyFailingReadEntry });
+
+    expect(await loadCredentials()).toEqual({ password: '', smtpToken: 'healthy-token' });
+    await clear();
+  });
+
+  it('loads a healthy account credential field when its sibling read throws', async () => {
+    backend.store.set('mailpouch|smtp-token:acct-read', 'healthy-token');
+    const BaseEntry = backend.EntryCtor;
+    class PartiallyFailingReadEntry implements StubEntryInstance {
+      private readonly inner: StubEntryInstance;
+      constructor(private readonly service: string, private readonly account: string) {
+        this.inner = new BaseEntry(service, account);
+      }
+      getPassword(): string | null {
+        if (this.account === 'bridge-password:acct-read') throw new Error('password read failed');
+        return this.inner.getPassword();
+      }
+      setPassword(password: string): void { this.inner.setPassword(password); }
+      deletePassword(): boolean { return this.inner.deletePassword(); }
+    }
+    const { __setKeyringForTests, loadAccountCredentials } = await import('./keychain.js');
+    __setKeyringForTests({ Entry: PartiallyFailingReadEntry });
+
+    expect(await loadAccountCredentials('acct-read')).toEqual({
+      password: '',
+      smtpToken: 'healthy-token',
+    });
+    await clear();
+  });
+
+  it('deleteAuxiliaryCredentials removes only explicitly-cleared secrets', async () => {
+    const { saveAuxiliaryCredentials, loadAuxiliaryCredentials, deleteAuxiliaryCredentials } = await import('./keychain.js');
+    await saveAuxiliaryCredentials('pat-secret', 'sl-key');
+    expect(await deleteAuxiliaryCredentials({ passAccessToken: true })).toBe(true);
+    expect(await loadAuxiliaryCredentials()).toEqual({ passAccessToken: '', simpleloginApiKey: 'sl-key' });
+    expect(backend.store.has('mailpouch|pass-pat')).toBe(false);
+    expect(backend.store.get('mailpouch|simplelogin-api-key')).toBe('sl-key');
+    await clear();
+  });
+
+  it('deleteRemoteSecrets removes both remote-server entries', async () => {
+    const { saveRemoteSecrets, loadRemoteSecrets, deleteRemoteSecrets } = await import('./keychain.js');
+    await saveRemoteSecrets('bearer-secret', 'oauth-admin-secret');
+    expect(await deleteRemoteSecrets()).toBe(true);
+    expect(await loadRemoteSecrets()).toBeNull();
+    expect(backend.store.has('mailpouch|remote-bearer-token')).toBe(false);
+    expect(backend.store.has('mailpouch|remote-oauth-admin-password')).toBe(false);
     await clear();
   });
 
@@ -313,7 +463,10 @@ describe('Keychain (positive-path with stub @napi-rs/keyring) — TEST-005', () 
     const { saveCredentials, loadCredentials } = await import('./keychain.js');
     await saveCredentials('first-pwd', 'first-tok');
     // Second save with new values must overwrite, not throw.
-    await expect(saveCredentials('second-pwd', 'second-tok')).resolves.toBe(true);
+    await expect(saveCredentials('second-pwd', 'second-tok')).resolves.toEqual({
+      passwordStored: true,
+      smtpTokenStored: true,
+    });
     const loaded = await loadCredentials();
     expect(loaded).toEqual({ password: 'second-pwd', smtpToken: 'second-tok' });
     // Two save invocations × two fields each = 4 setPassword calls recorded.

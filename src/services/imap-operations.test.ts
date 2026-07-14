@@ -8,14 +8,22 @@
  *   - clearCache
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { SimpleIMAPService, chunkUidsForWire, IMAPNotConnectedError, normalizeAddressList, expandImapSequence } from "./simple-imap-service.js";
 import type { EmailFolder, EmailMessage } from "../types/index.js";
+import {
+  E2E_MAILBOX_IDENTITY_ARG,
+  withE2EMailboxIdentity,
+} from "../config/e2e-mailbox-identity.js";
 
 // TEST-006: this suite previously imported `beforeEach` but never used it, so
 // spies/module state leaked across tests. Restore all mocks between tests.
 beforeEach(() => {
   vi.restoreAllMocks();
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
 });
 
 /**
@@ -339,6 +347,7 @@ function makeClient(overrides: Record<string, unknown> = {}): Record<string, unk
 
   const client: Record<string, unknown> = {
     [STATE_KEY]: state,
+    capabilities: new Map([["UIDPLUS", true]]),
     getMailboxLock,
     messageFlagsAdd,
     messageFlagsRemove,
@@ -387,11 +396,10 @@ describe("SimpleIMAPService cache-key format (TEST-022)", () => {
 // ─── markEmailRead ────────────────────────────────────────────────────────────
 
 describe("SimpleIMAPService.markEmailRead", () => {
-  it("returns false when not connected", async () => {
+  it("throws actionable guidance when not connected", async () => {
     const svc = new SimpleIMAPService();
     vi.spyOn(svc as any, "validateEmailId").mockImplementation(() => {});
-    const result = await svc.markEmailRead("1", true);
-    expect(result).toBe(false);
+    await expect(svc.markEmailRead("1", true)).rejects.toThrow(/IMAP connection is unavailable.*Proton Bridge/is);
   });
 
   it("marks email as read (adds \\Seen flag)", async () => {
@@ -448,10 +456,10 @@ describe("SimpleIMAPService.markEmailRead", () => {
 // ─── starEmail ────────────────────────────────────────────────────────────────
 
 describe("SimpleIMAPService.starEmail", () => {
-  it("returns false when not connected", async () => {
+  it("throws actionable guidance when not connected", async () => {
     const svc = new SimpleIMAPService();
     vi.spyOn(svc as any, "validateEmailId").mockImplementation(() => {});
-    expect(await svc.starEmail("1", true)).toBe(false);
+    await expect(svc.starEmail("1", true)).rejects.toThrow(/IMAP connection is unavailable.*Proton Bridge/is);
   });
 
   it("stars email (adds \\Flagged flag)", async () => {
@@ -502,11 +510,11 @@ describe("SimpleIMAPService.starEmail", () => {
 // ─── moveEmail ────────────────────────────────────────────────────────────────
 
 describe("SimpleIMAPService.moveEmail", () => {
-  it("returns false when not connected", async () => {
+  it("throws actionable guidance when not connected", async () => {
     const svc = new SimpleIMAPService();
     vi.spyOn(svc as any, "validateEmailId").mockImplementation(() => {});
     vi.spyOn(svc as any, "validateFolderName").mockImplementation(() => {});
-    expect(await svc.moveEmail("1", "Trash")).toBe(false);
+    await expect(svc.moveEmail("1", "Trash")).rejects.toThrow(/IMAP connection is unavailable.*Proton Bridge/is);
   });
 
   it("moves email and returns true", async () => {
@@ -565,11 +573,11 @@ describe("SimpleIMAPService.moveEmail", () => {
 // ─── copyEmailToFolder ────────────────────────────────────────────────────────
 
 describe("SimpleIMAPService.copyEmailToFolder", () => {
-  it("returns false when not connected", async () => {
+  it("throws actionable guidance when not connected", async () => {
     const svc = new SimpleIMAPService();
     vi.spyOn(svc as any, "validateEmailId").mockImplementation(() => {});
     vi.spyOn(svc as any, "validateFolderName").mockImplementation(() => {});
-    expect(await svc.copyEmailToFolder("1", "Labels/Work")).toBe(false);
+    await expect(svc.copyEmailToFolder("1", "Labels/Work")).rejects.toThrow(/IMAP connection is unavailable.*Proton Bridge/is);
   });
 
   it("copies email and returns true", async () => {
@@ -596,11 +604,11 @@ describe("SimpleIMAPService.copyEmailToFolder", () => {
 // ─── deleteFromFolder ─────────────────────────────────────────────────────────
 
 describe("SimpleIMAPService.deleteFromFolder", () => {
-  it("returns false when not connected", async () => {
+  it("throws actionable guidance when not connected", async () => {
     const svc = new SimpleIMAPService();
     vi.spyOn(svc as any, "validateEmailId").mockImplementation(() => {});
     vi.spyOn(svc as any, "validateFolderName").mockImplementation(() => {});
-    expect(await svc.deleteFromFolder("1", "INBOX")).toBe(false);
+    await expect(svc.deleteFromFolder("1", "INBOX")).rejects.toThrow(/IMAP connection is unavailable.*Proton Bridge/is);
   });
 
   it("deletes email from folder and returns true", async () => {
@@ -638,10 +646,10 @@ describe("SimpleIMAPService.deleteFromFolder", () => {
 // ─── deleteEmail ──────────────────────────────────────────────────────────────
 
 describe("SimpleIMAPService.deleteEmail", () => {
-  it("returns false when not connected", async () => {
+  it("throws actionable guidance when not connected", async () => {
     const svc = new SimpleIMAPService();
     vi.spyOn(svc as any, "validateEmailId").mockImplementation(() => {});
-    expect(await svc.deleteEmail("1")).toBe(false);
+    await expect(svc.deleteEmail("1")).rejects.toThrow(/IMAP connection is unavailable.*Proton Bridge/is);
   });
 
   it("deletes email by MOVING it to Trash (never EXPUNGE) and returns true", async () => {
@@ -693,10 +701,10 @@ describe("SimpleIMAPService.deleteEmail", () => {
 // ─── setFlag ──────────────────────────────────────────────────────────────────
 
 describe("SimpleIMAPService.setFlag", () => {
-  it("returns false when not connected", async () => {
+  it("throws actionable guidance when not connected", async () => {
     const svc = new SimpleIMAPService();
     vi.spyOn(svc as any, "validateEmailId").mockImplementation(() => {});
-    expect(await svc.setFlag("1", "\\Answered")).toBe(false);
+    await expect(svc.setFlag("1", "\\Answered")).rejects.toThrow(/IMAP connection is unavailable.*Proton Bridge/is);
   });
 
   it("adds flag using cached folder (avoids scanning all folders)", async () => {
@@ -1903,6 +1911,21 @@ describe("SimpleIMAPService.disconnect", () => {
     await expect(svc.disconnect()).resolves.toBeUndefined();
     expect((svc as any).client).toBeNull();
   });
+
+  it("detaches and closes a half-open client even when isConnected is false", async () => {
+    const svc = new SimpleIMAPService();
+    const close = vi.fn();
+    const logout = vi.fn();
+    (svc as any).isConnected = false;
+    (svc as any).client = { close, logout };
+
+    await svc.disconnect();
+
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(logout).not.toHaveBeenCalled();
+    expect((svc as any).client).toBeNull();
+    expect((svc as any).isConnected).toBe(false);
+  });
 });
 
 // ─── isActive ─────────────────────────────────────────────────────────────────
@@ -3011,5 +3034,215 @@ describe("SimpleIMAPService.emptyTrash (Phase 3 — gated permanent delete)", ()
     (svc as any).isConnected = false;
     (svc as any).client = null;
     await expect(svc.emptyTrash()).rejects.toThrow(/not connected/i);
+  });
+});
+
+// ─── Live Bridge E2E child-side UIDVALIDITY fence ───────────────────────────
+
+describe("SimpleIMAPService live Bridge E2E mailbox identity fence", () => {
+  const token = "mpE2E-00000000-0000-4000-8000-000000000002";
+  const source = `Folders/${token}-source`;
+  const target = `Folders/${token}-target`;
+
+  function enableLiveFence(): void {
+    vi.stubEnv("MAILPOUCH_E2E_CONFIG_ONLY_CREDENTIALS", "1");
+    vi.stubEnv("MAILPOUCH_E2E_RUN_TOKEN", token);
+  }
+
+  function proof(uidValidity: string, uids: string[]): Record<string, unknown> {
+    return {
+      [E2E_MAILBOX_IDENTITY_ARG]: { token, folder: source, uidValidity, uids },
+    };
+  }
+
+  function bindSelectedIdentity(
+    client: Record<string, unknown>,
+    initialUidValidity: bigint,
+  ): (next: bigint) => void {
+    let uidValidity = initialUidValidity;
+    const originalLock = client.getMailboxLock as (folder: string) => Promise<{ release(): void }>;
+    client.getMailboxLock = vi.fn(async (folder: string) => {
+      const lock = await originalLock(folder);
+      client.mailbox = { path: folder, uidValidity };
+      return {
+        release: () => {
+          lock.release();
+          client.mailbox = false;
+        },
+      };
+    });
+    return (next: bigint) => {
+      uidValidity = next;
+      if (client.mailbox && typeof client.mailbox === "object") {
+        (client.mailbox as { uidValidity: bigint }).uidValidity = next;
+      }
+    };
+  }
+
+  async function runLive<T>(
+    args: Record<string, unknown>,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    enableLiveFence();
+    return await withE2EMailboxIdentity(args, operation);
+  }
+
+  it("permits a wire mutation only when the child selects the proven mailbox identity", async () => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc);
+    bindSelectedIdentity(client, 17n);
+    seedUids(client, source, [42]);
+
+    await expect(runLive(proof("17", ["42"]), () => svc.moveEmail("42", target, source)))
+      .resolves.toBe(true);
+    expect(client.messageMove).toHaveBeenCalledWith("42", target, { uid: true });
+  });
+
+  it.each([
+    ["move", "messageMove", (svc: SimpleIMAPService) => svc.moveEmail("42", target, source)],
+    ["delete", "messageDelete", (svc: SimpleIMAPService) => svc.deleteFromFolder("42", source)],
+  ])("refuses %s before any destructive wire command when UIDPLUS is absent", async (_name, wire, operation) => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc, { capabilities: new Map() });
+    bindSelectedIdentity(client, 17n);
+    seedUids(client, source, [42]);
+
+    await expect(runLive(proof("17", ["42"]), () => operation(svc)))
+      .rejects.toThrow(/UIDPLUS/i);
+    expect(client[wire] as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["bulk move", "messageMove", (svc: SimpleIMAPService) => svc.bulkMoveEmails(["42"], target, source)],
+    ["bulk delete", "messageDelete", (svc: SimpleIMAPService) => svc.bulkDeleteFromFolder(["42"], source)],
+  ])("refuses %s without UIDPLUS and never enters a fallback wire path", async (_name, wire, operation) => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc, { capabilities: new Map() });
+    bindSelectedIdentity(client, 17n);
+    seedUids(client, source, [42]);
+
+    await expect(runLive(proof("17", ["42"]), () => operation(svc)))
+      .rejects.toThrow(/UIDPLUS/i);
+    expect(client[wire] as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["flags", "messageFlagsAdd", (svc: SimpleIMAPService) => svc.markEmailRead("42", true, source)],
+    ["move", "messageMove", (svc: SimpleIMAPService) => svc.moveEmail("42", target, source)],
+    ["copy", "messageCopy", (svc: SimpleIMAPService) => svc.copyEmailToFolder("42", target, source)],
+    ["delete", "messageDelete", (svc: SimpleIMAPService) => svc.deleteFromFolder("42", source)],
+  ])("refuses %s before its wire command when UIDVALIDITY changed", async (_name, wire, operation) => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc);
+    bindSelectedIdentity(client, 18n);
+    seedUids(client, source, [42]);
+
+    await expect(runLive(proof("17", ["42"]), () => operation(svc)))
+      .rejects.toThrow(/mailbox identity changed/i);
+    expect(client[wire] as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
+  });
+
+  it("rechecks after UID preflight and refuses a last-moment identity change", async () => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc);
+    const setIdentity = bindSelectedIdentity(client, 17n);
+    seedUids(client, source, [42]);
+    const originalFetch = client.fetch as (...args: unknown[]) => AsyncIterable<Record<string, unknown>>;
+    let fetchCall = 0;
+    client.fetch = vi.fn((...args: unknown[]) => {
+      const call = ++fetchCall;
+      const iterable = originalFetch(...args);
+      return (async function* () {
+        for await (const item of iterable) yield item;
+        if (call === 2) setIdentity(18n);
+      })();
+    });
+
+    await expect(runLive(proof("17", ["42"]), () => svc.moveEmail("42", target, source)))
+      .rejects.toThrow(/mailbox identity changed/i);
+    expect(client.messageMove).not.toHaveBeenCalled();
+  });
+
+  it("rechecks before every bulk fallback and never retries after identity drift", async () => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc);
+    const setIdentity = bindSelectedIdentity(client, 17n);
+    seedUids(client, source, [42, 43]);
+    client.messageMove = vi.fn(async () => {
+      setIdentity(18n);
+      throw new Error("simulated batch failure after mailbox recreation");
+    });
+
+    const result = await runLive(
+      proof("17", ["42", "43"]),
+      () => svc.bulkMoveEmails(["42", "43"], target, source),
+    );
+
+    expect(result).toMatchObject({ success: 0, failed: 2 });
+    expect(client.messageMove).toHaveBeenCalledTimes(1);
+    expect(result.errors.every((message) => /mailbox identity changed/i.test(message))).toBe(true);
+  });
+
+  it("stops bulk flag fallback retries when the mailbox identity drifts after the failed batch", async () => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc);
+    const setIdentity = bindSelectedIdentity(client, 17n);
+    seedUids(client, source, [42, 43]);
+    client.messageFlagsAdd = vi.fn(async () => {
+      setIdentity(18n);
+      throw new Error("simulated batch failure after mailbox recreation");
+    });
+
+    const result = await runLive(
+      proof("17", ["42", "43"]),
+      () => svc.bulkMarkRead(["42", "43"], true, source),
+    );
+
+    expect(result).toMatchObject({ success: 0, failed: 2 });
+    expect(client.messageFlagsAdd).toHaveBeenCalledTimes(1);
+    expect(result.errors.every((message) => /mailbox identity changed/i.test(message))).toBe(true);
+  });
+
+  it("stops bulk copy fallback retries when the mailbox identity drifts after the failed batch", async () => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc);
+    const setIdentity = bindSelectedIdentity(client, 17n);
+    seedUids(client, source, [42, 43]);
+    client.messageCopy = vi.fn(async () => {
+      setIdentity(18n);
+      throw new Error("simulated batch failure after mailbox recreation");
+    });
+
+    const result = await runLive(
+      proof("17", ["42", "43"]),
+      () => svc.bulkCopyToFolder(["42", "43"], target, source),
+    );
+
+    expect(result).toMatchObject({ success: 0, failed: 2 });
+    expect(client.messageCopy).toHaveBeenCalledTimes(1);
+    expect(result.errors.every((message) => /mailbox identity changed/i.test(message))).toBe(true);
+  });
+
+  it("suppresses the trailing bulk-delete EXPUNGE when UIDVALIDITY drifts between fallback retries", async () => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc);
+    const setIdentity = bindSelectedIdentity(client, 17n);
+    seedUids(client, source, [42, 43]);
+    const originalFlagsAdd = client.messageFlagsAdd as (...args: unknown[]) => Promise<unknown>;
+    client.messageDelete = vi.fn().mockRejectedValue(new Error("simulated batch delete failure"));
+    client.messageFlagsAdd = vi.fn(async (...args: unknown[]) => {
+      await originalFlagsAdd(...args);
+      setIdentity(18n);
+    });
+
+    await expect(runLive(
+      proof("17", ["42", "43"]),
+      () => svc.bulkDeleteFromFolder(["42", "43"], source),
+    )).rejects.toThrow(/mailbox identity changed/i);
+
+    // One failed fast-path DELETE only. The final UID EXPUNGE is never sent
+    // after the first fallback STORE observes a different mailbox identity.
+    expect(client.messageDelete).toHaveBeenCalledTimes(1);
+    expect(client.messageFlagsAdd).toHaveBeenCalledTimes(1);
   });
 });

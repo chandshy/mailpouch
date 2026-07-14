@@ -20,7 +20,7 @@
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { ImapFlow } from "imapflow";
-import { startE2E, type E2EHarness } from "../mcp-client.js";
+import { bridgeConfigAvailable, startE2E, type E2EHarness } from "../mcp-client.js";
 import * as docker from "../support/docker.js";
 import { TEST_USER, TEST_USER_BOB } from "../support/docker.js";
 
@@ -115,49 +115,90 @@ async function wipeBobInbox(): Promise<void> {
   }
 }
 
+/** Bridge delivery verification is self-addressed and identity-scoped. Poll
+ * only for the unique run-token subject; pre-existing Inbox mail is never
+ * enumerated, changed, or used as an assertion target. */
+async function waitForOwnedSubject(h: E2EHarness, subject: string, timeoutMs = 30_000): Promise<number[]> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const uids = await h.imap.searchSubject("INBOX", subject);
+    if (uids.length > 0) return uids;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  return [];
+}
+
+async function waitForBridgeDelivery(
+  h: E2EHarness,
+  messageId: string,
+  bodyToken: string,
+  timeoutMs = 30_000,
+): Promise<number[]> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const uids = await h.imap.findMessageByProof(
+      "INBOX",
+      messageId,
+      "Test Email from mailpouch",
+      bodyToken,
+    );
+    if (uids.length > 0) return uids;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  return [];
+}
+
 describe("sending.e2e — send_email actually delivers via Greenmail SMTP", () => {
   let h: E2EHarness;
 
   beforeAll(async () => {
-    await docker.restart();
+    if (!bridgeConfigAvailable()) await docker.restart();
     h = await startE2E({ user: TEST_USER });
-  }, 60_000);
+  });
 
   afterAll(async () => {
     if (h) {
-      try { await h.imap.wipe(); } catch { /* ignore */ }
-      try { await wipeBobInbox(); } catch { /* ignore */ }
+      if (!bridgeConfigAvailable()) {
+        try { await wipeBobInbox(); } catch { /* ignore */ }
+      }
       await h.close();
     }
   });
 
   beforeEach(async () => {
     await h.resetState();
-    await wipeBobInbox();
+    if (!bridgeConfigAvailable()) await wipeBobInbox();
   });
 
   it("delivers a simple text-body send_email to the recipient's INBOX", async () => {
+    const subject = `${h.runToken ?? "greenmail"} sending.e2e simple body`;
+    const recipient = bridgeConfigAvailable() ? h.accountEmail! : TEST_USER_BOB.email;
     const result = h.json<{ success: boolean; messageId?: string }>(
       await h.call("send_email", {
-        to: TEST_USER_BOB.email,
-        subject: "sending.e2e simple body",
+        to: recipient,
+        subject,
         body: "Hello Bob — this is alice via mailpouch.",
       })
     );
     expect(result.success).toBe(true);
 
+    if (bridgeConfigAvailable()) {
+      expect(await waitForOwnedSubject(h, subject)).not.toHaveLength(0);
+      return;
+    }
+
     const inbox = await waitForBobMessages(1);
     expect(inbox.length).toBeGreaterThanOrEqual(1);
     const msg = inbox[0];
-    expect(msg.subject).toBe("sending.e2e simple body");
+    expect(msg.subject).toBe(subject);
     expect(msg.to).toContain(TEST_USER_BOB.email);
     // imapflow's `bodyParts: new Set(["1"])` doesn't always populate for
     // single-part plain-text messages (the section number varies); the
     // raw source is the reliable fallback.
     expect(msg.body || msg.rawSource).toContain("Hello Bob");
-  });
+  }, 90_000);
 
-  it("propagates To, Cc, and Bcc headers correctly", async () => {
+  it.skipIf(bridgeConfigAvailable())("propagates To, Cc, and Bcc headers correctly", async () => {
     // Add a third Greenmail user for the carbon-copy assertion is overkill;
     // Greenmail provisions exactly alice+bob via the compose file. To assert
     // CC delivery without adding a third user, send To: bob, Cc: bob_alias
@@ -188,30 +229,48 @@ describe("sending.e2e — send_email actually delivers via Greenmail SMTP", () =
   });
 
   it("sends an HTML body when isHtml=true", async () => {
+    const subject = `${h.runToken ?? "greenmail"} sending.e2e html`;
+    const recipient = bridgeConfigAvailable() ? h.accountEmail! : TEST_USER_BOB.email;
     const result = h.json<{ success: boolean }>(
       await h.call("send_email", {
-        to: TEST_USER_BOB.email,
-        subject: "sending.e2e html",
+        to: recipient,
+        subject,
         body: "<p>Hello <b>Bob</b> in HTML.</p>",
         isHtml: true,
       })
     );
     expect(result.success).toBe(true);
 
+    if (bridgeConfigAvailable()) {
+      expect(await waitForOwnedSubject(h, subject)).not.toHaveLength(0);
+      return;
+    }
+
     const inbox = await waitForBobMessages(1);
-    const msg = inbox.find((m) => m.subject === "sending.e2e html");
+    const msg = inbox.find((m) => m.subject === subject);
     expect(msg).toBeDefined();
     // Body part 1 of an HTML-only mail is the HTML string; the raw source
     // declares text/html. Assert both — the body part and the Content-Type.
     expect(msg!.rawSource.toLowerCase()).toContain("content-type: text/html");
     expect(msg!.body || msg!.rawSource).toMatch(/<b>Bob<\/b>/);
-  });
+  }, 90_000);
 
   it("send_test_email delivers a probe message to the configured recipient", async () => {
+    const recipient = bridgeConfigAvailable() ? h.accountEmail! : TEST_USER_BOB.email;
+    const bridgeBody = `${h.runToken} delivery probe`;
     const result = h.json<{ success: boolean; messageId?: string }>(
-      await h.call("send_test_email", { to: TEST_USER_BOB.email })
+      await h.call("send_test_email", {
+        to: recipient,
+        ...(bridgeConfigAvailable() ? { customMessage: bridgeBody } : {}),
+      })
     );
     expect(result.success).toBe(true);
+
+    if (bridgeConfigAvailable()) {
+      expect(result.messageId).toBeTruthy();
+      expect(await waitForBridgeDelivery(h, result.messageId!, bridgeBody)).not.toHaveLength(0);
+      return;
+    }
 
     const inbox = await waitForBobMessages(1);
     expect(inbox.length).toBeGreaterThanOrEqual(1);
@@ -219,7 +278,7 @@ describe("sending.e2e — send_email actually delivers via Greenmail SMTP", () =
     // (or similar) — we don't pin the exact wording to keep the test robust
     // against copywriting tweaks; we just assert the message arrived.
     expect(inbox[0].to).toContain(TEST_USER_BOB.email);
-  });
+  }, 90_000);
 });
 
 // ─── alias_* — SimpleLogin gate ───────────────────────────────────────────────

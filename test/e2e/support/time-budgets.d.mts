@@ -1,0 +1,17 @@
+export const BRIDGE_SETUP_MS: number;
+export const BRIDGE_CLEANUP_SETTLE_MS: number;
+export const BRIDGE_ALL_MAIL_RESCUE_STABILITY_MS: number;
+export const BRIDGE_MUTATION_COMMAND_MS: number;
+export const BRIDGE_MCP_REQUEST_MS: number;
+export const BRIDGE_PENDING_CLEANUP_MAX_MS: number;
+export const BRIDGE_BASELINE_VERIFY_MS: number;
+export const BRIDGE_MCP_CLIENT_CLOSE_MS: number;
+export const BRIDGE_MCP_TRANSPORT_CLOSE_MS: number;
+export const BRIDGE_MCP_SHUTDOWN_MS: number;
+export const BRIDGE_TEARDOWN_CLOSE_MARGIN_MS: number;
+export const BRIDGE_STANDALONE_OVERHEAD_MS: number;
+export const BRIDGE_STANDALONE_MAX_MS: number;
+export function bridgeStandaloneProcessBudgetMs(hasPendingOwnership: boolean): number;
+export const BRIDGE_STANDALONE_PARENT_MARGIN_MS: number;
+export const BRIDGE_AUTO_RECOVERY_MAX_MS: number;
+export const BRIDGE_HOOK_TIMEOUT_MS: number;

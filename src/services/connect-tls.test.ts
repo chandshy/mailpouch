@@ -10,11 +10,16 @@ import { SimpleIMAPService } from "./simple-imap-service.js";
 
 vi.mock("imapflow", () => {
   const ImapFlow = vi.fn(function () {
+    const listeners = new Map<string, (...args: unknown[]) => void>();
     return {
       connect: vi.fn().mockResolvedValue(undefined),
       logout: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn(),
       list: vi.fn().mockResolvedValue([]),
-      on: vi.fn(),
+      on: vi.fn((event: string, listener: (...args: unknown[]) => void) => {
+        listeners.set(event, listener);
+      }),
+      emitForTest: (event: string, ...args: unknown[]) => listeners.get(event)?.(...args),
     };
   });
   return { ImapFlow };
@@ -78,6 +83,109 @@ describe("SimpleIMAPService.connect() bridgeCertPath handling", () => {
     await svc.connect("localhost", 1143, "user", "pass", "/path/to/cert.pem");
     expect(first.logout).toHaveBeenCalledTimes(1);
     expect(ctor.mock.results.length).toBe(2); // a fresh client was created after reaping
+  });
+
+  it("does not let an older connect resume after awaited retirement and overwrite a newer client", async () => {
+    statSync.mockReturnValue({ isDirectory: () => false });
+    readFileSync.mockReturnValue(Buffer.from("CERT_DATA"));
+    const { ImapFlow } = await import("imapflow");
+    const ctor = ImapFlow as unknown as ReturnType<typeof vi.fn>;
+    ctor.mockClear();
+    let finishRetirement!: () => void;
+    const retirement = new Promise<void>(resolve => { finishRetirement = resolve; });
+    const oldClient = {
+      logout: vi.fn(() => retirement),
+      close: vi.fn(),
+    };
+    const svc = new SimpleIMAPService();
+    (svc as unknown as { client: unknown }).client = oldClient;
+    (svc as unknown as { isConnected: boolean }).isConnected = true;
+
+    const older = svc.connect("localhost", 1143, "older", "pass", "/path/to/cert.pem");
+    const olderResult = older.catch((error: unknown) => error);
+    await vi.waitFor(() => expect(oldClient.logout).toHaveBeenCalledTimes(1));
+    const newer = svc.connect("localhost", 1143, "newer", "pass", "/path/to/cert.pem");
+    await newer;
+    const winningClient = ctor.mock.results[0].value;
+    finishRetirement();
+
+    expect(await olderResult).toMatchObject({ message: expect.stringMatching(/superseded/i) });
+    expect(ctor).toHaveBeenCalledTimes(1);
+    expect((svc as unknown as { client: unknown }).client).toBe(winningClient);
+    expect(svc.isActive()).toBe(true);
+  });
+
+  it("does not let an older connect failure clear a newer authenticated client", async () => {
+    statSync.mockReturnValue({ isDirectory: () => false });
+    readFileSync.mockReturnValue(Buffer.from("CERT_DATA"));
+    const { ImapFlow } = await import("imapflow");
+    const ctor = ImapFlow as unknown as ReturnType<typeof vi.fn>;
+    ctor.mockClear();
+    let rejectOlder!: (error: Error) => void;
+    const olderClient = {
+      connect: vi.fn(() => new Promise<void>((_resolve, reject) => { rejectOlder = reject; })),
+      logout: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn(),
+      on: vi.fn(),
+    };
+    const newerClient = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      logout: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn(),
+      on: vi.fn(),
+    };
+    ctor
+      .mockImplementationOnce(function () { return olderClient; })
+      .mockImplementationOnce(function () { return newerClient; });
+    const svc = new SimpleIMAPService();
+
+    const older = svc.connect("localhost", 1143, "older", "pass", "/path/to/cert.pem");
+    const olderResult = older.catch((error: unknown) => error);
+    await vi.waitFor(() => expect(olderClient.connect).toHaveBeenCalledTimes(1));
+    await svc.connect("localhost", 1143, "newer", "pass", "/path/to/cert.pem");
+    rejectOlder(new Error("older connect failed late"));
+
+    expect(await olderResult).toMatchObject({ message: expect.stringMatching(/older connect failed late/i) });
+    expect((svc as unknown as { client: unknown }).client).toBe(newerClient);
+    expect(svc.isActive()).toBe(true);
+  });
+
+  it("does not impose a mutation deadline through global IMAP socket inactivity", async () => {
+    statSync.mockReturnValue({ isDirectory: () => false });
+    readFileSync.mockReturnValue(Buffer.from("CERT_DATA"));
+    const { ImapFlow } = await import("imapflow");
+    const ctor = ImapFlow as unknown as ReturnType<typeof vi.fn>;
+    ctor.mockClear();
+
+    const svc = new SimpleIMAPService();
+    await svc.connect("localhost", 1143, "user", "pass", "/path/to/cert.pem");
+
+    const options = ctor.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(options.connectionTimeout).toBe(30_000);
+    expect(options).not.toHaveProperty("greetingTimeout");
+    expect(options).not.toHaveProperty("socketTimeout");
+  });
+
+  it("ignores delayed close/error events from a retired client after replacement connects", async () => {
+    statSync.mockReturnValue({ isDirectory: () => false });
+    readFileSync.mockReturnValue(Buffer.from("CERT_DATA"));
+    const { ImapFlow } = await import("imapflow");
+    const ctor = ImapFlow as unknown as ReturnType<typeof vi.fn>;
+    ctor.mockClear();
+
+    const svc = new SimpleIMAPService();
+    await svc.connect("localhost", 1143, "user", "pass", "/path/to/cert.pem");
+    const first = ctor.mock.results[0].value as { emitForTest: (event: string, ...args: unknown[]) => void };
+    await svc.connect("localhost", 1143, "user", "pass", "/path/to/cert.pem");
+    const second = ctor.mock.results[1].value;
+    expect((svc as any).client).toBe(second);
+    expect(svc.isActive()).toBe(true);
+
+    first.emitForTest("close");
+    first.emitForTest("error", new Error("retired socket"));
+
+    expect((svc as any).client).toBe(second);
+    expect(svc.isActive()).toBe(true);
   });
 
   it("resolves cert.pem inside a directory when statSync says it is a directory (lines 317-319)", async () => {

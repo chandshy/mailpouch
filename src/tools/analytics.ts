@@ -13,7 +13,7 @@ export const defs: ToolDef[] = [
     name: "get_email_stats",
     title: "Get Email Statistics",
     description:
-      "Aggregate statistics across inbox and sent: totals, unread count, most active contact, storage estimate. Results cached for 5 minutes.",
+      "Return a compact inbox-and-sent dashboard: totals, unread count, most active contact, and storage estimate. Use get_email_analytics for deeper breakdowns or get_volume_trends for a custom date window. Results are cached for 5 minutes.",
     annotations: { readOnlyHint: true, openWorldHint: true },
     inputSchema: { type: "object", properties: {} },
     outputSchema: {
@@ -36,7 +36,7 @@ export const defs: ToolDef[] = [
     name: "get_email_analytics",
     title: "Get Email Analytics",
     description:
-      "Advanced analytics across inbox and sent: top senders/recipients, peak activity hours, attachment stats, and measured response times (null when insufficient data). Results cached for 5 minutes.",
+      "Return a detailed inbox-and-sent dashboard: top senders/recipients, peak hours, attachment stats, and measured response times (null when insufficient data). Use get_email_stats for a compact overview or get_volume_trends for a custom date window. Results are cached for 5 minutes.",
     annotations: { readOnlyHint: true, openWorldHint: true },
     inputSchema: { type: "object", properties: {} },
     outputSchema: {
@@ -133,7 +133,7 @@ export const defs: ToolDef[] = [
     name: "get_contacts",
     title: "Get Contacts",
     description:
-      "Extract contact list from email history with send/receive counts, last-interaction dates, inferred organization, and recency-weighted ranking. Includes contacts from both inbox and sent folders.",
+      "Extract a ranked contact list from inbox and sent history, including send/receive counts, last interaction, inferred organization, and recency. Use this to choose recipients; use get_correspondence_profile for one relationship in depth.",
     annotations: { readOnlyHint: true, openWorldHint: true },
     inputSchema: {
       type: "object",
@@ -174,7 +174,7 @@ export const defs: ToolDef[] = [
   {
     name: "get_volume_trends",
     title: "Get Volume Trends",
-    description: "Get email send/receive volume per day over a time window. Returns daily counts of received and sent messages. Does not include unread counts — use get_unread_count for that.",
+    description: "Return daily sent/received volume for a caller-selected time window. Use get_email_analytics for the broader default dashboard, or get_unread_count for current unread counts.",
     annotations: { readOnlyHint: true, openWorldHint: true },
     inputSchema: {
       type: "object",

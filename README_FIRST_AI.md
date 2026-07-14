@@ -450,10 +450,12 @@ isStarred  boolean  Default true.
 ```
 
 #### `move_email`
-Move a single email to a folder.
+Move a single email to a folder. Moving to `Trash` or `Spam` requires
+explicit confirmation.
 ```
 emailId       string
 targetFolder  string  Full IMAP path, e.g. "Archive", "Folders/Work"
+confirmed     boolean Required when targetFolder is Trash or Spam.
 ```
 
 #### `archive_email`
@@ -483,7 +485,7 @@ folder   string  Folder name without prefix (e.g. Work). Moves to Folders/Work.
 
 #### `move_to_label`
 Apply a Proton Mail label to an email. The label path is constructed as
-`Labels/<label>`. The label folder must exist (use `create_folder` first).
+`Labels/<label>` and is created when needed.
 
 ```
 emailId  string
@@ -492,11 +494,11 @@ label    string  Label name only (not the full path). E.g. "urgent", not "Labels
 ```
 
 #### `remove_label`
-Remove a label from an email by moving it back to INBOX (or a specified folder).
+Remove a label from an email. The message remains in its original folder; the
+UID must be the one from `Labels/<label>`, not the INBOX UID.
 ```
-emailId       string
-label         string  Label name to remove (e.g. Work)
-targetFolder  string  Where to move the email (default: INBOX)
+emailId  string  UID inside Labels/<label>.
+label    string  Label name to remove (e.g. Work).
 ```
 
 #### `bulk_mark_read`
@@ -519,6 +521,7 @@ Returns `{ success, failed, errors }`.
 ```
 emailIds      string[]
 targetFolder  string
+confirmed     boolean  Required when targetFolder is Trash or Spam.
 ```
 Processes up to 200 emails. Returns `{ success, failed, errors }`.
 
@@ -530,11 +533,10 @@ label     string
 ```
 
 #### `bulk_remove_label`
-Remove a label from multiple emails by moving them to INBOX (or specified folder).
+Remove a label from multiple emails while preserving their original folders.
 ```
-emailIds      string[]  Max 200.
-label         string    Label name to remove.
-targetFolder  string    Where to move emails (default: INBOX).
+emailIds  string[]  Max 200; UIDs inside Labels/<label>.
+label     string    Label name to remove.
 ```
 Returns `{ success, failed, errors }`.
 
@@ -559,7 +561,8 @@ System folders (`INBOX`, `Sent`, `Drafts`, `Trash`, `Spam`, `Archive`)
 cannot be renamed.
 
 #### `delete_folder`
-Delete a folder. The folder must be empty before it can be deleted.
+Delete a folder. The folder must be empty before it can be deleted and the
+call requires destructive confirmation.
 ```
 folderName  string
 ```
@@ -586,8 +589,9 @@ sourceFolder  string    Recommended for non-INBOX UIDs.
 ```
 Returns `{ success, failed, errors }`.
 
-#### `bulk_delete`
-Alias for `bulk_delete_emails`. Same input/output.
+#### Legacy `bulk_delete`
+Direct-call alias for `bulk_delete_emails`, retained for compatibility but not
+advertised to new agents. Use `bulk_delete_emails`.
 
 ---
 
@@ -599,53 +603,61 @@ settings UI. They are absent from `ListTools` if the key is not set.
 #### `alias_list`
 List all SimpleLogin aliases for the account.
 ```
-limit   number  Default 20, max 100.
-page    number  Zero-based page for pagination.
+pageSize  number  Default 200, max 1000.
 ```
-Returns `{ aliases: [...], count }`.
+Returns `{ aliases: [...] }`.
 
 #### `alias_create_random`
 Create a new random alias.
 ```
-note  string  Optional internal note.
+mode      string  `uuid` (default) or `word`.
+note      string  Optional internal note.
+hostname  string  Optional source hostname for SimpleLogin analytics.
 ```
-Returns `{ alias, email }`.
+Returns `{ id, email, enabled, note }`.
 
 #### `alias_create_custom`
-Create a custom alias with a chosen prefix.
+Create a custom alias with a chosen prefix and a signed suffix from
+SimpleLogin's alias-options endpoint.
 ```
-prefix  string  Local part before the @. Must be unique.
-note    string  Optional internal note.
+aliasPrefix   string    Required local part before the suffix.
+signedSuffix  string    Required signed suffix from SimpleLogin.
+mailboxIds    number[]  Optional destination mailbox IDs.
+note          string    Optional internal note.
+name          string    Optional reply display name.
+hostname      string    Optional source hostname.
 ```
-Returns `{ alias, email }`.
+Returns `{ id, email, enabled }`.
 
 #### `alias_toggle`
-Enable or disable an alias (paused aliases silently drop incoming mail).
+Toggle an alias between enabled and disabled (disabled aliases silently drop
+incoming mail).
 ```
 aliasId  number  Numeric alias ID from alias_list.
-enabled  boolean
 ```
+Returns `{ enabled }`.
 
 #### `alias_delete`
 Permanently delete an alias. **Irreversible.** Requires destructive confirmation.
 ```
-aliasId  number
+aliasId    number
+confirmed  boolean  Must be true to execute.
 ```
 
 #### `alias_get_activity`
 Fetch recent activity (forwards, replies, blocks) for an alias.
 ```
-aliasId  number
-limit    number  Default 20.
+aliasId   number
+pageSize  number  Default 50, max 1000.
 ```
 
 ---
 
 ### Proton Pass — optional, requires pass-cli and a PAT
 
-These tools only appear when `pass-cli` is installed and a Proton Pass
-Personal Access Token is configured. `pass_get` requires destructive
-confirmation before returning a credential.
+These tools appear when a Proton Pass Personal Access Token is configured;
+calls require `pass-cli` to be installed. `pass_get` and `pass_totp` require
+destructive confirmation before returning a secret or live second factor.
 
 #### `pass_list`
 List all vaults and item names. Does **not** return passwords.
@@ -662,9 +674,16 @@ Returns `{ items: [...], count }`.
 Retrieve a specific credential (username + password). Requires explicit
 user confirmation via MCP elicitation or `{ confirmed: true }`.
 ```
-itemId  string  ID from pass_list or pass_search.
+item_id  string  ID from pass_list or pass_search.
 ```
 Returns `{ username, password, url?, notes? }`.
+
+#### `pass_totp`
+Retrieve the current TOTP/2FA code for a Pass item. Requires explicit user
+confirmation via MCP elicitation or `{ confirmed: true }`.
+```
+item_id  string  ID from pass_list or pass_search.
+```
 
 ---
 
@@ -681,7 +700,7 @@ did not become reachable within the window (may still be starting).
 attempt to bring Bridge up without asking the human to do it manually.
 
 #### `shutdown_server`
-Gracefully shut down the MCP server. Requires `supervised` or `full` (capped at 5/hr in supervised).
+Gracefully shut down the MCP server. Requires `supervised` or `full` (capped at 5/hr in supervised) and destructive confirmation.
 
 Sequence: terminates Proton Bridge → disconnects IMAP/SMTP → scrubs credentials from memory → exits.
 The MCP server will not be available after this call completes.
@@ -690,7 +709,7 @@ Returns `{ success: true }` immediately; shutdown begins asynchronously so the r
 before the process exits.
 
 #### `restart_server`
-Restart the MCP server. Requires `supervised` or `full` (capped at 5/hr in supervised).
+Restart the MCP server. Requires `supervised` or `full` (capped at 5/hr in supervised) and destructive confirmation.
 
 Sequence: terminates Proton Bridge → spawns a fresh copy of the server process → graceful shutdown
 of the current process. If `autoStartBridge` is enabled in settings, the new process will

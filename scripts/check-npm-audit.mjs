@@ -12,9 +12,9 @@
 
 import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { spawnShellFreeSync } from "./lib/cross-platform-spawn.mjs";
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const ALLOW_FILE = join(ROOT, ".preship-audit-allow.json");
@@ -32,10 +32,14 @@ if (existsSync(ALLOW_FILE)) {
   }
 }
 
-const res = spawnSync("npm", ["audit", "--omit=dev", "--json"], {
+const res = spawnShellFreeSync("npm", ["audit", "--omit=dev", "--json"], {
   encoding: "utf-8",
   cwd: ROOT,
 });
+if (res.error) {
+  console.error(`npm-audit ERROR: npm could not be started: ${res.error.message}`);
+  process.exit(1);
+}
 // `npm audit --json` returns non-zero on any vulns, 0 on clean.
 // We don't trust the exit code — we parse the JSON.
 let report;

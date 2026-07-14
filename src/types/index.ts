@@ -228,9 +228,24 @@ export interface SaveDraftOptions {
 /** A scheduled email queued for future delivery. */
 export interface ScheduledEmail {
   id: string;
+  /**
+   * Stable ID of the mailbox that owns this delivery.  This is persisted so a
+   * later active-account switch cannot send a queued message through another
+   * account's SMTP credentials.
+   */
+  accountId: string;
+  /**
+   * Opaque fingerprint of the mailbox/transport identity that owned this
+   * delivery when it was created.  It prevents an account ID that is later
+   * repointed at a different mailbox from reusing queued work.
+   *
+   * Optional only for on-disk migration of records written before identity
+   * fingerprints existed; newly routed records should always set it.
+   */
+  accountIdentity?: string;
   scheduledAt: string; // ISO 8601
   options: SendEmailOptions;
-  status: "pending" | "sending" | "sent" | "failed" | "cancelled";
+  status: "pending" | "sending" | "sent" | "failed" | "cancelled" | "outcome_unknown";
   createdAt: string; // ISO 8601
   error?: string;
   retryCount?: number;

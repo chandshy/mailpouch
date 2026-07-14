@@ -27,6 +27,7 @@ import * as drafts     from "./drafts.js";
 import * as diagnostics from "./diagnostics.js";
 import * as escalation from "./escalation.js";
 
+import { DESTRUCTIVE_TOOLS } from "../config/schema.js";
 import type { ToolDef, ToolHandler } from "./types.js";
 import type { EscalationHandler } from "./escalation.js";
 
@@ -54,6 +55,11 @@ const ACCOUNT_ID_SCHEMA_FIELD = {
     "the settings UI (Accounts tab).",
 } as const;
 
+const CONFIRMED_SCHEMA_FIELD = {
+  type: "boolean",
+  description: "Must be true to execute when confirmation is required.",
+} as const;
+
 /**
  * Inject the optional `account_id` field into a tool's inputSchema.
  *
@@ -62,7 +68,7 @@ const ACCOUNT_ID_SCHEMA_FIELD = {
  * widened. Tools that omit `inputSchema` altogether get the minimal
  * `{ type: "object", properties: { account_id } }` shape.
  */
-function withAccountIdField(def: ToolDef): ToolDef {
+function withSharedSchemaFields(def: ToolDef): ToolDef {
   const schema = (def.inputSchema ?? { type: "object", properties: {} }) as {
     type?: string;
     properties?: Record<string, unknown>;
@@ -73,6 +79,7 @@ function withAccountIdField(def: ToolDef): ToolDef {
     inputSchema: {
       ...schema,
       properties: {
+        ...(DESTRUCTIVE_TOOLS.has(def.name) ? { confirmed: CONFIRMED_SCHEMA_FIELD } : {}),
         account_id: ACCOUNT_ID_SCHEMA_FIELD,
         ...(schema.properties ?? {}),
       },
@@ -97,7 +104,24 @@ export function allToolDefs(): ToolDef[] {
     ...reading.defsLate,
     ...diagnostics.defs,
     ...escalation.defs,
-  ].map(withAccountIdField);
+  ].map(withSharedSchemaFields);
+}
+
+export interface ToolCapabilities {
+  simpleLogin: boolean;
+  pass: boolean;
+}
+
+/**
+ * Tool definitions suitable for ListTools. Companion integrations stay
+ * callable for backwards compatibility, but are not advertised until they
+ * are configured so agents do not spend context on unusable capabilities.
+ */
+export function advertisedToolDefs(capabilities: ToolCapabilities): ToolDef[] {
+  return allToolDefs().filter(({ name }) =>
+    (capabilities.simpleLogin || !name.startsWith("alias_")) &&
+    (capabilities.pass || !name.startsWith("pass_")),
+  );
 }
 
 /** Tool-name-keyed dispatch table for the (post-gate) CallTool handlers. */

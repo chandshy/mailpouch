@@ -123,7 +123,7 @@ Every tool call is blocked unless the active preset allows it. Change the preset
 
 ### Require destructive confirmation
 
-On by default. Every `delete_email`, `bulk_delete*`, `delete_folder`, `move_to_trash`, `move_to_spam`, `alias_delete`, `pass_get`, `shutdown_server`, and `restart_server` call must carry `{ confirmed: true }`. MCP-elicitation-capable clients prompt you inline before the call executes; others require the agent to explicitly confirm.
+On by default. Every destructive delete/trash/spam operation, all SimpleLogin deletes, `pass_get`, `pass_totp`, `shutdown_server`, and `restart_server` call must carry `{ confirmed: true }`. MCP-elicitation-capable clients prompt you inline before the call executes; others require the agent to explicitly confirm.
 
 ---
 
@@ -143,7 +143,7 @@ Rate limits under Supervised: create ≤50/hr, toggle ≤100/hr, delete ≤20/hr
 
 ### Proton Pass (credential retrieval)
 
-Enables the `pass_list`, `pass_search`, `pass_get` tools. Returns credential summaries and (on confirmed calls) secret values from your Pass vaults.
+Enables the `pass_list`, `pass_search`, `pass_get`, and `pass_totp` tools. Returns credential summaries and, on confirmed calls, secret values or live second-factor codes from your Pass vaults.
 
 **Requirements:**
 - `pass-cli` must be installed: [github.com/protonpass/pass-cli](https://github.com/protonpass/pass-cli)
@@ -155,7 +155,8 @@ Steps:
 3. Paste it into **Personal Access Token** in Settings and click Save
 4. If `pass-cli` is not on your PATH, fill in the full path in **pass-cli path**
 
-`pass_get` returns decrypted secrets and requires `{ confirmed: true }` on every call.
+`pass_get` returns decrypted secrets and `pass_totp` returns live second-factor
+codes; both require `{ confirmed: true }` on every call.
 
 ---
 
@@ -314,7 +315,9 @@ Add multiple Proton accounts (or plain IMAP providers). Each account has its own
 - Agents can **pin** to a specific account via per-agent grants
 - Tools accept an optional `account_id` argument to route to a non-active account
 
-Hot-swapping the active account requires a server restart.
+In a running daemon, hot-swapping the active account takes effect for new tool
+calls immediately. Standalone Settings (or a failed live rebind) reports that
+the MCP server must be restarted before the new account applies.
 
 ---
 

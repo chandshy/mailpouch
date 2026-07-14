@@ -49,7 +49,7 @@
  */
 
 import { readFileSync, writeFileSync, existsSync, appendFileSync, renameSync } from "fs";
-import { homedir, tmpdir } from "os";
+import { homedir } from "os";
 import { join } from "path";
 import { randomBytes } from "crypto";
 import { buildPermissions } from "../config/loader.js";

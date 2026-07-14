@@ -14,7 +14,7 @@ export default defineConfig({
     exclude: ['test/e2e/**', 'node_modules/**', 'dist/**', '.claude/**'],
     coverage: {
       provider: 'v8',
-      reporter: ['text', 'json', 'html'],
+      reporter: ['text', 'json', 'json-summary', 'html'],
       exclude: [
         'node_modules/**',
         'dist/**',
@@ -22,19 +22,10 @@ export default defineConfig({
         '**/*.config.*',
         '**/test/**',
       ],
-      // Minimum coverage thresholds — CI will fail if these are not met.
-      // Set conservatively below current measured levels; raise as coverage improves.
-      // Measured after notification-channels additions: 94.67 / 90.98 / 93.99 / 96.07.
-      // Branches + functions dip with each new service whose uncovered
-      // portion is pure subprocess plumbing (default runners for osascript /
-      // notify-send / powershell). Worth covering in a later pass with
-      // end-to-end subprocess tests; low-priority for correctness now.
-      thresholds: {
-        statements: 94,
-        branches: 90,
-        functions: 93,
-        lines: 96,
-      },
+      // The versioned repository baseline is checked after Vitest finishes by
+      // scripts/check-coverage.mjs. Keeping the ratchet outside Vitest avoids
+      // stale hard-coded thresholds becoming impossible after the source set
+      // changes, while still rejecting regressions in CI.
     },
   },
 });

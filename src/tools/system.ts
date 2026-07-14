@@ -26,7 +26,7 @@ export const defs: ToolDef[] = [
   {
     name: "get_connection_status",
     title: "Get Connection Status",
-    description: "Check whether SMTP and IMAP connections to Proton Bridge are healthy. Returns connection status, TLS security mode (secure/insecure), and host/port details. Use this to diagnose connection issues before performing other operations.",
+    description: "Check live SMTP and IMAP health after setup. Returns connection status, TLS security mode (secure/insecure), and host/port details. Use setup_status first for credentials, Bridge reachability, or agent-approval diagnosis.",
     annotations: { readOnlyHint: true },
     inputSchema: { type: "object", properties: {} },
     outputSchema: {
@@ -154,7 +154,7 @@ export const defs: ToolDef[] = [
 
 export const handlers: Record<string, ToolHandler> = {
   get_connection_status: async (ctx) => {
-    const { imapService, smtpService, ok, config, state } = ctx;
+    const { imapService, smtpService, ok, config, smtpStatus, setSmtpStatus } = ctx;
     const { configExists, getConfigPath } = await import("../config/loader.js");
     const smtpBackoffMs = smtpService.backoff.delayUntilMs();
 
@@ -162,8 +162,8 @@ export const handlers: Record<string, ToolHandler> = {
     // can't report "connected" while sends fail. Skip while in backoff — a probe
     // would add to the abuse signal, and backoff already means "not usable now".
     let smtpConnected: boolean;
-    let smtpError: string | undefined = state.smtpStatus.error;
-    let smtpLastCheck = state.smtpStatus.lastCheck;
+    let smtpError: string | undefined = smtpStatus.error;
+    let smtpLastCheck = smtpStatus.lastCheck;
     if (smtpService.backoff.isBlocked() || smtpService.initError) {
       smtpConnected = false;
     } else {
@@ -179,8 +179,7 @@ export const handlers: Record<string, ToolHandler> = {
       smtpConnected = await Promise.race([verify, timeout]);
       smtpError = smtpConnected ? undefined : (probeErr ?? smtpError);
       smtpLastCheck = new Date();
-      // Keep the shared snapshot honest for other readers.
-      state.smtpStatus = { connected: smtpConnected, lastCheck: smtpLastCheck, ...(smtpError ? { error: smtpError } : {}) };
+      setSmtpStatus({ connected: smtpConnected, lastCheck: smtpLastCheck, ...(smtpError ? { error: smtpError } : {}) });
     }
 
     const status = {
@@ -226,7 +225,7 @@ export const handlers: Record<string, ToolHandler> = {
   },
 
   sync_emails: async (ctx) => {
-    const { args, imapService, ok, state } = ctx;
+    const { args, imapService, ok, invalidateAnalytics } = ctx;
     const folder = (args.folder as string) || "INBOX";
     const seValidErr = validateTargetFolder(folder);
     if (seValidErr) throw new McpError(ErrorCode.InvalidParams, seValidErr);
@@ -244,17 +243,15 @@ export const handlers: Record<string, ToolHandler> = {
       }
       throw err;
     }
-    state.analyticsCache = null;
-    state.analyticsCacheInflight = null;
+    invalidateAnalytics();
     return ok({ success: true, folder, count: emails.length });
   },
 
   clear_cache: async (ctx) => {
-    const { imapService, analyticsService, actionOk, state } = ctx;
+    const { imapService, analyticsService, actionOk, invalidateAnalytics } = ctx;
     imapService.clearCache();
     analyticsService.clearCache();
-    state.analyticsCache = null;
-    state.analyticsCacheInflight = null;
+    invalidateAnalytics();
     return actionOk();
   },
 

@@ -7,6 +7,7 @@
 | [README_FIRST_AI.md](../README_FIRST_AI.md) | AI agents | Complete MCP tool API reference, permission presets, operating guidelines |
 | [SECURITY.md](../SECURITY.md) | Security reviewers | Threat model, rate limiting, escalation design, remote agent authentication (OAuth / service accounts), audit trail, credential storage |
 | [CONTRIBUTING.md](../CONTRIBUTING.md) | Contributors | Build setup, test suite, PR guidelines |
+| [improvement-loop.md](improvement-loop.md) | Maintainers & coding agents | Persistent audit → implement → validate → re-audit workflow |
 | [CHANGELOG.md](../CHANGELOG.md) | All | Version history |
 
 ## Technical Reference (Proton Bridge)
@@ -30,10 +31,10 @@
 | Full-text search | `fts_search`, `fts_rebuild`, `fts_status` | none (auto index) | HELP §6, README_FIRST_AI |
 | Labels & folders | `list_labels`, `get_emails_by_label`, `move_to_label`, `bulk_move_to_label`, `remove_label`, `bulk_remove_label`, `get_folders`, `sync_folders`, `create_folder`, `rename_folder`, `delete_folder` | none | HELP §8, README_FIRST_AI |
 | Email actions | `mark_email_read`, `star_email`, `move_email`, `archive_email`, `move_to_trash`, `move_to_spam`, `move_to_folder`, `bulk_mark_read`, `bulk_star`, `bulk_move_emails` | Permissions tab | README_FIRST_AI |
-| Deletion | `delete_email`, `bulk_delete_emails`, `bulk_delete` | Permissions tab | HELP §3, README_FIRST_AI |
+| Deletion | `delete_email`, `bulk_delete_emails`, `empty_trash` | Permissions tab | HELP §3, README_FIRST_AI |
 | Analytics | `get_email_stats`, `get_email_analytics`, `get_volume_trends`, `get_contacts` | none | HELP §9, README_FIRST_AI |
-| SimpleLogin aliases | `alias_list`, `alias_create_random`, `alias_create_custom`, `alias_toggle`, `alias_delete`, `alias_get_activity` | Setup → Optional Integrations | HELP §4, README_FIRST_AI |
-| Proton Pass | `pass_list`, `pass_search`, `pass_get` | Setup → Optional Integrations | HELP §4, README_FIRST_AI |
+| SimpleLogin aliases | `alias_*` (16 tools, listed only when configured) | Setup → Optional Integrations | HELP §4, README_FIRST_AI |
+| Proton Pass | `pass_list`, `pass_search`, `pass_get`, `pass_totp` (listed only when configured) | Setup → Optional Integrations | HELP §4, README_FIRST_AI |
 | System / Bridge | `get_connection_status`, `sync_emails`, `clear_cache`, `get_logs`, `get_server_version`, `start_bridge`, `shutdown_server`, `restart_server` | Setup tab | README_FIRST_AI |
 | Permissions | presets, per-tool rate limits, custom | Permissions tab | HELP §3, README |
 | Per-agent grants | — | Agents tab | HELP §10, README |

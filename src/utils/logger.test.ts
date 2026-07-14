@@ -22,6 +22,7 @@ describe('Logger', () => {
     logger.info('Test message', 'TestContext');
 
     expect(consoleErrorSpy).toHaveBeenCalledWith(
+      '%s',
       expect.stringContaining('[INFO]'),
       ''
     );
@@ -32,6 +33,7 @@ describe('Logger', () => {
     logger.warn('Test warning', 'TestContext');
 
     expect(consoleErrorSpy).toHaveBeenCalledWith(
+      '%s',
       expect.stringContaining('[WARN]'),
       ''
     );
@@ -43,6 +45,7 @@ describe('Logger', () => {
     logger.error('Test error', 'TestContext', error);
 
     expect(consoleErrorSpy).toHaveBeenCalledWith(
+      '%s',
       expect.stringContaining('[ERROR]'),
       error
     );
@@ -54,6 +57,7 @@ describe('Logger', () => {
     logger.debug('Test debug', 'TestContext');
 
     expect(consoleErrorSpy).toHaveBeenCalledWith(
+      '%s',
       expect.stringContaining('[DEBUG]'),
       ''
     );
@@ -71,6 +75,7 @@ describe('Logger', () => {
     logger.info('Test message', 'CustomContext');
 
     expect(consoleErrorSpy).toHaveBeenCalledWith(
+      '%s',
       expect.stringContaining('[CustomContext]'),
       ''
     );
@@ -82,6 +87,7 @@ describe('Logger', () => {
     logger.info('Test message', 'TestContext', data);
 
     expect(consoleErrorSpy).toHaveBeenCalledWith(
+      '%s',
       expect.stringContaining('[INFO]'),
       data
     );
@@ -92,6 +98,7 @@ describe('Logger', () => {
     logger.info('Test message');
 
     expect(consoleErrorSpy).toHaveBeenCalledWith(
+      '%s',
       expect.stringContaining('[System]'),
       ''
     );

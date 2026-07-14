@@ -15,6 +15,17 @@ const MAX_SEARCH_TEXT = 500;
 export function validateSearchInput(
   args: Record<string, unknown>,
   maxEmailListResults: number,
+  /**
+   * Effective folder allowlist for this caller. `undefined` means the caller
+   * is not folder-restricted; an empty array is deliberately treated as a
+   * deny-all restriction rather than as an unrestricted caller.
+   *
+   * This is a handler-side defence in depth. The grant gate also evaluates
+   * raw arguments, but it historically selected only one folder-like field.
+   * Search has two (`folder` and `folders`), so the effective set must be
+   * derived and checked together here before it reaches IMAP.
+   */
+  allowedFolders?: readonly string[],
 ): SearchEmailOptions {
   const folder = (args.folder as string) || "INBOX";
   // Runtime-guard the array cast: a client passing folders:"INBOX" (string)
@@ -32,6 +43,65 @@ export function validateSearchInput(
     for (let i = 0; i < folders.length; i++) {
       const fErr = validateTargetFolder(folders[i]);
       if (fErr) throw new McpError(ErrorCode.InvalidParams, `folders[${i}]: ${fErr}`);
+    }
+  }
+
+  if (allowedFolders !== undefined) {
+    const isAllowed = (candidate: string) => allowedFolders
+      .some(allowed => allowed.toLowerCase() === candidate.toLowerCase());
+    const denyFolder = (candidate: string) => {
+      throw new McpError(
+        ErrorCode.InvalidRequest,
+        `Blocked: folder '${candidate}' is outside this agent's folder allowlist.`,
+      );
+    };
+
+    // When `folders` is present it is the effective search set. An empty set
+    // used to fall through to the service's INBOX default; that turns an
+    // apparently scoped request into an implicit mailbox read. Wildcards (and
+    // the service's legacy `all` synonym) cannot be intersected safely before
+    // folder enumeration, so restricted callers must state every folder.
+    if (folders !== undefined) {
+      if (folders.length === 0) {
+        throw new McpError(
+          ErrorCode.InvalidRequest,
+          "Blocked: a folder-restricted caller must provide at least one explicit search folder.",
+        );
+      }
+      if (folders.some(candidate => candidate.toLowerCase() === "*" || candidate.toLowerCase() === "all")) {
+        throw new McpError(
+          ErrorCode.InvalidRequest,
+          "Blocked: wildcard folder searches are unavailable to folder-restricted callers.",
+        );
+      }
+      for (const candidate of folders) {
+        if (!isAllowed(candidate)) denyFolder(candidate);
+      }
+
+      // `folder` is ignored by the IMAP search path when `folders` is set,
+      // but the authorization gate sees raw arguments. Validate it as well so
+      // an allowed scalar cannot disguise a disallowed effective set (or vice
+      // versa). A redundant scalar that names one of the effective folders is
+      // harmless and remains supported for compatibility.
+      if (args.folder !== undefined && args.folder !== null && args.folder !== "") {
+        const scalarFolder = args.folder;
+        if (typeof scalarFolder !== "string") {
+          throw new McpError(ErrorCode.InvalidParams, "'folder' must be a folder path string when provided.");
+        }
+        const scalarErr = validateTargetFolder(scalarFolder);
+        if (scalarErr) throw new McpError(ErrorCode.InvalidParams, `folder: ${scalarErr}`);
+        if (!isAllowed(scalarFolder)) denyFolder(scalarFolder);
+        if (!folders.some(candidate => candidate.toLowerCase() === scalarFolder.toLowerCase())) {
+          throw new McpError(
+            ErrorCode.InvalidRequest,
+            "Blocked: 'folder' conflicts with the effective 'folders' search set for a folder-restricted caller.",
+          );
+        }
+      }
+    } else {
+      const scalarErr = validateTargetFolder(folder);
+      if (scalarErr) throw new McpError(ErrorCode.InvalidParams, `folder: ${scalarErr}`);
+      if (!isAllowed(folder)) denyFolder(folder);
     }
   }
   if (args.from !== undefined && typeof args.from !== "string") {

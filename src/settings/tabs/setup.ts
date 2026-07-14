@@ -210,13 +210,16 @@ export function buildSetupHtml(p: SetupParams): string {
 
     <div class="card" style="margin-top:16px">
       <div class="card-title">Optional Integrations</div>
-      <div class="card-desc">Configure SimpleLogin alias management and Proton Pass credential access. Leave blank to disable.</div>
+      <div class="card-desc">Configure SimpleLogin alias management and Proton Pass credential access. Leave a secret blank to keep its saved value; use Clear and save to disable it.</div>
       <fieldset style="border:none;padding:0;margin:0">
         <legend style="font-size:13px;font-weight:600;color:var(--muted);margin-bottom:8px">SimpleLogin</legend>
         <div class="field">
           <label for="sl-api-key">API Key</label>
-          <input type="password" id="sl-api-key" placeholder="sl.*****" autocomplete="off">
-          <div class="hint">Generate in SimpleLogin → Settings → API Keys. Required for alias_* tools.</div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <input type="password" id="sl-api-key" placeholder="sl.*****" autocomplete="off" style="flex:1">
+            <button type="button" class="btn btn-ghost" data-action="clearAuxiliarySecret" data-secret="simpleloginApiKey">Clear</button>
+          </div>
+          <div class="hint">Generate in SimpleLogin → Settings → API Keys. Required for alias_* tools. Enter a replacement to rotate it, or use Clear and save to disable it.</div>
         </div>
         <div class="field" style="margin-top:8px">
           <label for="sl-base-url">Base URL <span style="color:var(--muted);font-weight:400">(optional — leave blank for app.simplelogin.io)</span></label>
@@ -227,8 +230,11 @@ export function buildSetupHtml(p: SetupParams): string {
         <legend style="font-size:13px;font-weight:600;color:var(--muted);margin-bottom:8px">Proton Pass</legend>
         <div class="field">
           <label for="pass-access-token">Personal Access Token</label>
-          <input type="password" id="pass-access-token" placeholder="••••••••" autocomplete="off">
-          <div class="hint">Generate in Proton Pass web app → Settings → Developer → Personal Access Tokens. Required for pass_* tools.</div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <input type="password" id="pass-access-token" placeholder="••••••••" autocomplete="off" style="flex:1">
+            <button type="button" class="btn btn-ghost" data-action="clearAuxiliarySecret" data-secret="passAccessToken">Clear</button>
+          </div>
+          <div class="hint">Generate in Proton Pass web app → Settings → Developer → Personal Access Tokens. Required for pass_* tools. Enter a replacement to rotate it, or use Clear and save to disable it.</div>
         </div>
         <div class="field" style="margin-top:8px">
           <label for="pass-cli-path">pass-cli path <span style="color:var(--muted);font-weight:400">(optional — leave blank to use PATH)</span></label>

@@ -40,6 +40,7 @@ function makeCtx(overrides: Partial<ToolCallContext>): ToolCallContext {
     limits: DEFAULT_LIMITS,
     ok,
     getAnalyticsEmails: async () => ({ inbox: [], sent: [] }),
+    invalidateAnalytics: () => {},
     ...overrides,
   } as unknown as ToolCallContext;
 }
@@ -493,9 +494,11 @@ describe("tool input hygiene (v3.0.53)", () => {
       expect((res.structuredContent as { success: boolean }).success).toBe(false);
     });
     it("does not set isError when both ports are reachable", async () => {
-      const res = await bridgeHandlers.start_bridge(bridgeCtx(true, true));
+      const ctx = bridgeCtx(true, true);
+      const res = await bridgeHandlers.start_bridge(ctx);
       expect(res.isError).toBeFalsy();
       expect((res.structuredContent as { success: boolean }).success).toBe(true);
+      expect(ctx.launchProtonBridge).toHaveBeenCalledWith(ctx.config);
     });
   });
 });

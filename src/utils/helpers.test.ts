@@ -16,6 +16,7 @@ import {
   validateFolderName,
   validateTargetFolder,
   requireNumericEmailId,
+  requireNumericEmailIds,
   validateAttachments,
   validateAttachmentLimits,
   validateImapPath,
@@ -1155,6 +1156,21 @@ describe('helpers', () => {
 
     it('throws for null-byte string "5\\x006"', () => {
       expect(() => requireNumericEmailId('5\x006')).toThrow(McpError);
+    });
+  });
+
+  describe('requireNumericEmailIds', () => {
+    it('keeps valid UIDs, skips malformed entries, and honors the batch cap', () => {
+      expect(requireNumericEmailIds(['1', 'bad', '2', '3'], 2)).toEqual(['1', '2']);
+    });
+
+    it('rejects an empty or wholly-invalid bulk request', () => {
+      expect(() => requireNumericEmailIds([], 10)).toThrow(McpError);
+      expect(() => requireNumericEmailIds(['bad', '-1'], 10)).toThrow(McpError);
+    });
+
+    it('applies the single-UID range guard to bulk requests', () => {
+      expect(() => requireNumericEmailIds(['9999999999'], 10)).toThrow(McpError);
     });
   });
 

@@ -12,22 +12,19 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { startE2E, type E2EHarness } from "../mcp-client.js";
+import { bridgeConfigAvailable, startE2E, type E2EHarness } from "../mcp-client.js";
 import * as docker from "../support/docker.js";
 
 describe("drafts.e2e", () => {
   let h: E2EHarness;
 
   beforeAll(async () => {
-    await docker.restart();
+    if (!bridgeConfigAvailable()) await docker.restart();
     h = await startE2E();
-  }, 60_000);
+  });
 
   afterAll(async () => {
-    if (h) {
-      try { await h.imap.wipe(); } catch { /* ignore */ }
-      await h.close();
-    }
+    if (h) await h.close();
   });
 
   beforeEach(async () => {
@@ -37,16 +34,18 @@ describe("drafts.e2e", () => {
   describe("save_draft", () => {
     it("appends a draft to the Drafts folder", async () => {
       // Drafts may not exist by default on Greenmail; create it first.
-      await h.imap.createMailbox("Drafts");
+      if (!bridgeConfigAvailable()) await h.imap.createMailbox("Drafts");
+      const subject = `${h.runToken ?? "greenmail"} Draft from harness`;
       const result = h.json<{ success: boolean; uid?: number }>(
         await h.call("save_draft", {
-          to: "alice@test.local",
-          subject: "Draft from harness",
+          to: h.accountEmail ?? "alice@test.local",
+          subject,
           body: "Test body content.",
         })
       );
       expect(result.success).toBe(true);
-      expect(await h.imap.messageCount("Drafts")).toBeGreaterThanOrEqual(1);
+      expect(result.uid).toBeTypeOf("number");
+      expect(await h.imap.uidExists("Drafts", result.uid!)).toBe(true);
     });
   });
 

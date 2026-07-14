@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { AgentGrantStore } from "./grant-store.js";
+import { AgentGrantStore, hourlyQuotaPathForGrantPath } from "./grant-store.js";
 import { notifications } from "./notifications.js";
-import { rmSync, existsSync, readFileSync, writeFileSync } from "fs";
+import { rmSync, existsSync, readFileSync, writeFileSync, statSync, mkdtempSync, symlinkSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import { randomBytes } from "crypto";
@@ -10,15 +10,88 @@ function tmpPath(): string {
   return join(tmpdir(), `mailpouch-agents-${randomBytes(6).toString("hex")}.json`);
 }
 
+function removeStoreFiles(storePath: string): void {
+  for (const suffix of ["", ".quota.sqlite", ".quota.sqlite-wal", ".quota.sqlite-shm", ".quota.sqlite-journal"]) {
+    if (existsSync(storePath + suffix)) rmSync(storePath + suffix, { force: true });
+  }
+}
+
 describe("AgentGrantStore", () => {
   let path: string;
 
   beforeEach(() => { path = tmpPath(); });
-  afterEach(() => { if (existsSync(path)) rmSync(path, { force: true }); });
+  afterEach(() => removeStoreFiles(path));
 
   it("starts empty when no file exists", () => {
     const s = new AgentGrantStore(path);
     expect(s.list()).toEqual([]);
+    expect(s.getAuthorizationSnapshot("pmc_missing")).toEqual({ kind: "missing" });
+  });
+
+  it("reads a fresh authorization snapshot after another store revokes a grant", () => {
+    const writer = new AgentGrantStore(path);
+    writer.createPending({ clientId: "pmc_1", clientName: "A" });
+    writer.approve({ clientId: "pmc_1", preset: "full" });
+    const staleReader = new AgentGrantStore(path);
+    try {
+      expect(staleReader.get("pmc_1")?.status).toBe("active");
+      writer.revoke("pmc_1");
+      // The UI/cache accessor is intentionally stale; authorization must not
+      // use it when another process changes the durable grant file.
+      expect(staleReader.get("pmc_1")?.status).toBe("active");
+      expect(staleReader.getAuthorizationSnapshot("pmc_1")).toMatchObject({
+        kind: "present",
+        grant: { status: "revoked" },
+      });
+    } finally {
+      writer.close();
+      staleReader.close();
+    }
+  });
+
+  it("reports malformed durable grants as unavailable instead of missing", () => {
+    writeFileSync(path, "{ definitely not JSON", "utf-8");
+    const s = new AgentGrantStore(path);
+    try {
+      expect(s.getAuthorizationSnapshot("pmc_1")).toEqual({ kind: "unavailable" });
+    } finally {
+      s.close();
+    }
+  });
+
+  it("treats non-ENOENT grant-file read failures as unavailable, not missing", () => {
+    // readFileSync on a directory fails with EISDIR. This is portable enough
+    // to exercise the security-relevant distinction without relying on
+    // chmod, which privileged test runners can bypass.
+    const directoryPath = mkdtempSync(join(tmpdir(), "mailpouch-agents-directory-"));
+    const s = new AgentGrantStore(directoryPath);
+    try {
+      expect(s.getAuthorizationSnapshot("pmc_1")).toEqual({ kind: "unavailable" });
+    } finally {
+      s.close();
+      rmSync(directoryPath, { recursive: true, force: true });
+      for (const suffix of [".quota.sqlite", ".quota.sqlite-wal", ".quota.sqlite-shm", ".quota.sqlite-journal"]) {
+        rmSync(directoryPath + suffix, { force: true });
+      }
+    }
+  });
+
+  it("treats duplicate durable client IDs as an unavailable authorization snapshot", () => {
+    const grant = {
+      clientId: "pmc_1",
+      clientName: "A",
+      status: "active",
+      preset: "full",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      totalCalls: 0,
+    };
+    writeFileSync(path, JSON.stringify({ version: 1, grants: [grant, { ...grant, status: "revoked" }] }), "utf-8");
+    const s = new AgentGrantStore(path);
+    try {
+      expect(s.getAuthorizationSnapshot("pmc_1")).toEqual({ kind: "unavailable" });
+    } finally {
+      s.close();
+    }
   });
 
   it("ensureActiveServiceGrant notifies once on create, NOT on every re-verify (no toast spam)", () => {
@@ -190,6 +263,113 @@ describe("AgentGrantStore", () => {
     expect(diskRaw).toContain('"totalCalls": 0');
     s.flushCounters();
     expect(readFileSync(path, "utf-8")).toContain('"totalCalls": 2');
+  });
+
+  it("uses a strict rolling one-hour window for tool-call reservations", () => {
+    const s = new AgentGrantStore(path);
+    const startedAt = Date.parse("2026-07-11T12:00:00.000Z");
+
+    try {
+      expect(s.reserveHourlyToolCall("pmc_1", "get_emails", 1, startedAt)).toMatchObject({
+        allowed: true,
+        used: 1,
+      });
+      expect(s.reserveHourlyToolCall("pmc_1", "get_emails", 1, startedAt + 3_599_999).allowed).toBe(false);
+      // At the exact one-hour boundary, the first call is no longer inside the
+      // trailing window and the next call may reserve the slot.
+      expect(s.reserveHourlyToolCall("pmc_1", "get_emails", 1, startedAt + 3_600_000)).toMatchObject({
+        allowed: true,
+        used: 1,
+      });
+    } finally {
+      s.close();
+    }
+  });
+
+  it("persists a reservation across a fresh AgentGrantStore after restart", () => {
+    const startedAt = Date.parse("2026-07-11T12:00:00.000Z");
+    const first = new AgentGrantStore(path);
+    try {
+      expect(first.reserveHourlyToolCall("pmc_1", "get_emails", 1, startedAt).allowed).toBe(true);
+    } finally {
+      first.close();
+    }
+
+    const restarted = new AgentGrantStore(path);
+    try {
+      expect(restarted.reserveHourlyToolCall("pmc_1", "get_emails", 1, startedAt + 1).allowed).toBe(false);
+    } finally {
+      restarted.close();
+    }
+  });
+
+  it("shares one durable quota ledger between separate store instances", () => {
+    const now = Date.parse("2026-07-11T12:00:00.000Z");
+    const firstDaemon = new AgentGrantStore(path);
+    const secondDaemon = new AgentGrantStore(path);
+    try {
+      expect(firstDaemon.reserveHourlyToolCall("pmc_1", "get_emails", 1, now).allowed).toBe(true);
+      // Models two daemons over the same profile when the singleton is
+      // intentionally disabled. Their distinct SQLite connections still see
+      // one transactionally shared per-client/tool budget.
+      expect(secondDaemon.reserveHourlyToolCall("pmc_1", "get_emails", 1, now + 1).allowed).toBe(false);
+    } finally {
+      firstDaemon.close();
+      secondDaemon.close();
+    }
+  });
+
+  it.runIf(process.platform !== "win32")("shares a quota ledger through grants-file symlink aliases", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mailpouch-quota-alias-"));
+    const realGrantPath = join(dir, "real-grants.json");
+    const aliasGrantPath = join(dir, "alias-grants.json");
+    const firstDaemon = new AgentGrantStore(realGrantPath);
+    let aliasDaemon: AgentGrantStore | undefined;
+    try {
+      // Materialize the target before making its file alias, mirroring an
+      // existing MAILPOUCH_AGENTS override reached through a symlink.
+      firstDaemon.createPending({ clientId: "pmc_1", clientName: "A" });
+      symlinkSync(realGrantPath, aliasGrantPath);
+      aliasDaemon = new AgentGrantStore(aliasGrantPath);
+      expect(hourlyQuotaPathForGrantPath(aliasGrantPath)).toBe(hourlyQuotaPathForGrantPath(realGrantPath));
+
+      const now = Date.parse("2026-07-11T12:00:00.000Z");
+      expect(firstDaemon.reserveHourlyToolCall("pmc_1", "get_emails", 1, now).allowed).toBe(true);
+      expect(aliasDaemon.reserveHourlyToolCall("pmc_1", "get_emails", 1, now + 1).allowed).toBe(false);
+    } finally {
+      aliasDaemon?.close();
+      firstDaemon.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when the durable quota ledger is malformed", () => {
+    const quotaPath = hourlyQuotaPathForGrantPath(path);
+    writeFileSync(quotaPath, "not a sqlite database", "utf-8");
+    const s = new AgentGrantStore(path);
+    try {
+      expect(s.reserveHourlyToolCall("pmc_1", "get_emails", 1, Date.now())).toMatchObject({
+        allowed: false,
+        failure: "quota_store_unavailable",
+      });
+    } finally {
+      s.close();
+    }
+  });
+
+  it.runIf(process.platform !== "win32")("writes the quota database and SQLite sidecars owner-only", () => {
+    const s = new AgentGrantStore(path);
+    const quotaPath = hourlyQuotaPathForGrantPath(path);
+    try {
+      expect(s.reserveHourlyToolCall("pmc_1", "get_emails", 1, Date.now()).allowed).toBe(true);
+      for (const suffix of ["", "-wal", "-shm"]) {
+        const file = `${quotaPath}${suffix}`;
+        expect(existsSync(file), `expected SQLite file ${file}`).toBe(true);
+        expect(statSync(file).mode & 0o777).toBe(0o600);
+      }
+    } finally {
+      s.close();
+    }
   });
 
   it("prune drops revoked/expired grants older than the retention window", () => {

@@ -7,33 +7,30 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { startE2E, type E2EHarness } from "../mcp-client.js";
+import { bridgeConfigAvailable, startE2E, type E2EHarness } from "../mcp-client.js";
 import * as docker from "../support/docker.js";
-import {
-  NEWSLETTER_TOKEN_DISPATCH,
-  PROMO_BATCH,
-  PROMO_CREDIT_KARMA,
-  RELEASE_NVIDIA,
-} from "../fixtures/seed-data.js";
+import { PROMO_BATCH } from "../fixtures/seed-data.js";
 
 describe("analytics.e2e", () => {
   let h: E2EHarness;
 
   beforeAll(async () => {
-    await docker.restart();
+    if (!bridgeConfigAvailable()) await docker.restart();
     h = await startE2E();
-  }, 60_000);
+  });
 
   afterAll(async () => {
-    if (h) {
-      try { await h.imap.wipe(); } catch { /* ignore */ }
-      await h.close();
-    }
+    if (h) await h.close();
   });
 
   beforeEach(async () => {
     await h.resetState();
-    for (const seed of PROMO_BATCH) await h.imap.appendSeed("INBOX", seed);
+    // Live Bridge analytics may inspect the existing mailbox, but never needs
+    // to alter it. Greenmail still gets deterministic seed data so this lane
+    // retains non-trivial aggregate coverage.
+    if (!bridgeConfigAvailable()) {
+      for (const seed of PROMO_BATCH) await h.imap.appendSeed("INBOX", seed);
+    }
     await h.call("clear_cache");
     await h.call("sync_emails", { folder: "INBOX", limit: 20 });
   });

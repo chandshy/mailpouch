@@ -8,59 +8,91 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { startE2E, type E2EHarness } from "../mcp-client.js";
+import { bridgeConfigAvailable, startE2E, type E2EHarness } from "../mcp-client.js";
 import * as docker from "../support/docker.js";
 import {
-  NEWSLETTER_TOKEN_DISPATCH,
-  PROMO_BATCH,
   PROMO_CREDIT_KARMA,
   RELEASE_NVIDIA,
 } from "../fixtures/seed-data.js";
+
+type SearchEmail = { subject: string };
+
+/** Bridge accepts APPEND before its live IMAP search index necessarily sees
+ * the message. Poll only the exact positive assertion predicate and retain the
+ * last authoritative tool result for a useful failure. Negative searches are
+ * intentionally not retried. */
+async function waitForSearchMatch(
+  h: E2EHarness,
+  args: Record<string, unknown>,
+  matches: (email: SearchEmail) => boolean,
+  timeoutMs = bridgeConfigAvailable() ? 30_000 : 5_000,
+): Promise<SearchEmail[]> {
+  const deadline = Date.now() + timeoutMs;
+  let emails: SearchEmail[] = [];
+  do {
+    const result = h.json<{ emails: SearchEmail[] }>(await h.call("search_emails", args));
+    emails = result.emails;
+    if (emails.some(matches)) return emails;
+    const remainingMs = deadline - Date.now();
+    if (remainingMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, Math.min(500, remainingMs)));
+    }
+  } while (Date.now() < deadline);
+  return emails;
+}
 
 describe("search.e2e", () => {
   let h: E2EHarness;
 
   beforeAll(async () => {
-    await docker.restart();
+    if (!bridgeConfigAvailable()) await docker.restart();
     h = await startE2E();
-  }, 60_000);
+  });
 
   afterAll(async () => {
-    if (h) {
-      try { await h.imap.wipe(); } catch { /* ignore */ }
-      await h.close();
-    }
+    if (h) await h.close();
   });
 
   beforeEach(async () => {
     await h.resetState();
-    for (const seed of PROMO_BATCH) await h.imap.appendSeed("INBOX", seed);
     await h.call("clear_cache");
     await h.call("sync_emails", { folder: "INBOX", limit: 20 });
   });
 
   describe("search_emails", () => {
     it("finds seeded INBOX messages by subject substring", async () => {
-      const result = h.json<{ emails: { subject: string }[] }>(
-        await h.call("search_emails", { folder: "INBOX", subject: "credit" })
+      const needle = h.runToken ?? `greenmail-${Date.now()}`;
+      await h.imap.appendSeed("INBOX", {
+        ...PROMO_CREDIT_KARMA,
+        subject: `${needle} credit search probe`,
+      });
+      const emails = await waitForSearchMatch(
+        h,
+        { folder: "INBOX", subject: needle },
+        (email) => email.subject.includes(needle),
       );
-      expect(result.emails.some((e) => /credit/i.test(e.subject))).toBe(true);
+      expect(emails.some((email) => email.subject.includes(needle))).toBe(true);
     });
 
     it("returns empty for a subject that doesn't match", async () => {
+      const needle = `absent-${h.runToken ?? Date.now()}-xyzqv`;
       const result = h.json<{ emails: unknown[] }>(
-        await h.call("search_emails", { folder: "INBOX", subject: "nonexistent-needle-xyzqv" })
+        await h.call("search_emails", { folder: "INBOX", subject: needle })
       );
       expect(result.emails.length).toBe(0);
     });
 
     // Greenmail's IMAP SEARCH FROM uses substring matching but its tokenization
     // differs from Bridge/Dovecot in some cases. Bridge-validated.
-    it.skip("finds messages by from address — bridge-only", async () => {
-      const result = h.json<{ emails: { subject: string }[] }>(
-        await h.call("search_emails", { folder: "INBOX", from: "nvidia.com" })
+    it.runIf(bridgeConfigAvailable())("finds messages by from address — bridge-only", async () => {
+      const subject = `${h.runToken} bridge from search probe`;
+      await h.imap.appendSeed("INBOX", { ...RELEASE_NVIDIA, subject });
+      const emails = await waitForSearchMatch(
+        h,
+        { folder: "INBOX", from: "nvidia.com" },
+        (email) => email.subject === subject,
       );
-      expect(result.emails.some((e) => e.subject === RELEASE_NVIDIA.subject)).toBe(true);
+      expect(emails.some((email) => email.subject === subject)).toBe(true);
     });
   });
 
@@ -74,6 +106,9 @@ describe("search.e2e", () => {
   describe("fts_search", () => {
     it("returns a hits envelope even when the index is empty", async () => {
       const result = h.json<{ hits: unknown[] }>(
+        // This assertion checks the response envelope, not ownership lookup.
+        // A raw mpE2E UUID contains '-' operators in FTS5 query syntax, so use
+        // a deliberately syntax-safe term even when the live index is empty.
         await h.call("fts_search", { query: "credit", limit: 10 })
       );
       expect(Array.isArray(result.hits)).toBe(true);

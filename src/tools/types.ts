@@ -48,6 +48,7 @@ import type { SchedulerService } from "../services/scheduler.js";
 import type { ReminderService } from "../services/reminder-service.js";
 import type { PassService } from "../services/pass-service.js";
 import type { FtsIndexService, FtsRecord } from "../services/fts-service.js";
+import type { AccountSmtpStatus } from "../runtime/account-runtime.js";
 import type { ProtonMailConfig, EmailMessage } from "../types/index.js";
 
 export interface ToolDef {
@@ -65,10 +66,8 @@ export type ToolResult = {
   structuredContent?: Record<string, unknown>;
 };
 
-/** Mutable shared state that several handlers mutate in-place. */
+/** Mutable process-wide state that several handlers mutate in-place. */
 export interface ToolSharedState {
-  analyticsCache: { inbox: EmailMessage[]; sent: EmailMessage[]; fetchedAt: number } | null;
-  analyticsCacheInflight: Promise<{ inbox: EmailMessage[]; sent: EmailMessage[] }> | null;
   bridgeAutoStarted: boolean;
   smtpStatus: { connected: boolean; lastCheck: Date; error?: string };
 }
@@ -78,11 +77,17 @@ export interface ToolCallContext {
   /** Arguments forwarded from the MCP client. */
   args: Record<string, unknown>;
 
+  /** Account resolved by the dispatcher for this call (default or `account_id`). */
+  accountId: string;
+
+  /** Opaque identity fingerprint of the resolved mailbox at dispatch time. */
+  accountIdentity: string;
+
   /** Per-call resolved services (honor `account_id` routing). */
   imapService: SimpleIMAPService;
   smtpService: SMTPService;
 
-  /** Module-level singletons — never re-bound per call. */
+  /** Process-wide or account-owned services selected by the dispatcher. */
   simpleloginService: SimpleLoginService;
   analyticsService: AnalyticsService;
   schedulerService: SchedulerService;
@@ -109,6 +114,10 @@ export interface ToolCallContext {
   /** Live server config (SMTP host/port/username for reply-to, etc.). */
   config: ProtonMailConfig;
 
+  /** Account-owned SMTP health snapshot, selected by the dispatcher. */
+  smtpStatus: AccountSmtpStatus;
+  setSmtpStatus: (status: AccountSmtpStatus) => void;
+
   /** Response limits — hot-reloaded from config, provided by the gate. */
   limits: {
     maxResponseBytes: number;
@@ -130,10 +139,13 @@ export interface ToolCallContext {
 
   /** Analytics cache warmer — shared across handlers that need it. */
   getAnalyticsEmails: () => Promise<{ inbox: EmailMessage[]; sent: EmailMessage[] }>;
+  /** Invalidate only this call's account-owned analytics cache after a mailbox mutation. */
+  invalidateAnalytics: () => void;
   recordFromEmail: (m: EmailMessage) => FtsRecord;
 
   /** Bridge lifecycle helpers (start_bridge / shutdown_server / restart_server). */
-  launchProtonBridge: () => Promise<void>;
+  /** Launch Bridge for this call's resolved account configuration. */
+  launchProtonBridge: (config?: ProtonMailConfig) => Promise<void>;
   killProtonBridge: () => Promise<void>;
   isBridgeReachable: (host: string, port: number, timeoutMs?: number) => Promise<boolean>;
   gracefulShutdown: (signal: string) => Promise<void>;

@@ -131,8 +131,12 @@ export async function loadCredentials(): Promise<{ password: string; smtpToken: 
     const keyring = await getKeyring();
     if (!keyring) return null;
 
-    const password = new keyring.Entry(SERVICE_NAME, KEY_PASSWORD).getPassword() ?? "";
-    const smtpToken = new keyring.Entry(SERVICE_NAME, KEY_SMTP_TOKEN).getPassword() ?? "";
+    // Read each field independently. A damaged or temporarily inaccessible
+    // sibling entry must not hide a healthy credential in the same namespace.
+    let password = "";
+    let smtpToken = "";
+    try { password = new keyring.Entry(SERVICE_NAME, KEY_PASSWORD).getPassword() ?? ""; } catch { /* field unavailable */ }
+    try { smtpToken = new keyring.Entry(SERVICE_NAME, KEY_SMTP_TOKEN).getPassword() ?? ""; } catch { /* field unavailable */ }
 
     if (!password && !smtpToken) return null;
     return { password, smtpToken };
@@ -141,24 +145,41 @@ export async function loadCredentials(): Promise<{ password: string; smtpToken: 
   }
 }
 
+export interface CredentialSaveResult {
+  passwordStored: boolean;
+  smtpTokenStored: boolean;
+}
+
 /**
  * Save credentials to the OS keychain.
- * Returns true on success, false if keychain is unavailable.
+ * Reports each field independently. Keychain backends can accept one write and
+ * reject the next, so a single boolean cannot safely tell the caller which
+ * config fallback may be removed.
  */
-export async function saveCredentials(password: string, smtpToken: string): Promise<boolean> {
+export async function saveCredentials(password: string, smtpToken: string): Promise<CredentialSaveResult> {
+  const result: CredentialSaveResult = {
+    passwordStored: false,
+    smtpTokenStored: false,
+  };
   try {
     const keyring = await getKeyring();
-    if (!keyring) return false;
+    if (!keyring) return result;
 
     if (password) {
-      new keyring.Entry(SERVICE_NAME, KEY_PASSWORD).setPassword(password);
+      try {
+        new keyring.Entry(SERVICE_NAME, KEY_PASSWORD).setPassword(password);
+        result.passwordStored = true;
+      } catch { /* preserve the config fallback for this field */ }
     }
     if (smtpToken) {
-      new keyring.Entry(SERVICE_NAME, KEY_SMTP_TOKEN).setPassword(smtpToken);
+      try {
+        new keyring.Entry(SERVICE_NAME, KEY_SMTP_TOKEN).setPassword(smtpToken);
+        result.smtpTokenStored = true;
+      } catch { /* preserve the config fallback for this field */ }
     }
-    return true;
+    return result;
   } catch {
-    return false;
+    return result;
   }
 }
 
@@ -193,8 +214,17 @@ export async function loadAccountCredentials(
   try {
     const keyring = await getKeyring();
     if (!keyring) return null;
-    const password = new keyring.Entry(SERVICE_NAME, accountPasswordKey(accountId)).getPassword() ?? "";
-    const smtpToken = new keyring.Entry(SERVICE_NAME, accountSmtpTokenKey(accountId)).getPassword() ?? "";
+    // Read fields independently. One corrupt/unavailable entry must not hide a
+    // healthy sibling credential; callers merge each field separately with
+    // its config fallback.
+    let password = "";
+    let smtpToken = "";
+    try {
+      password = new keyring.Entry(SERVICE_NAME, accountPasswordKey(accountId)).getPassword() ?? "";
+    } catch { /* leave this field unavailable */ }
+    try {
+      smtpToken = new keyring.Entry(SERVICE_NAME, accountSmtpTokenKey(accountId)).getPassword() ?? "";
+    } catch { /* leave this field unavailable */ }
     if (!password && !smtpToken) return null;
     return { password, smtpToken };
   } catch {
@@ -202,35 +232,48 @@ export async function loadAccountCredentials(
   }
 }
 
+export interface AccountCredentialSaveResult {
+  /** True only when this non-empty field reached its own keychain entry. */
+  passwordStored: boolean;
+  /** True only when this non-empty field reached its own keychain entry. */
+  smtpTokenStored: boolean;
+}
+
 /**
  * Save an account's password / smtp-token into the keychain. Empty
  * strings are silently skipped (the keychain entry keeps whatever
- * value it had before) — this lets the Accounts UI send back
- * "•••••••" as a placeholder when the user didn't change the field
- * without blowing away the real value. Returns true on any success
- * (at least one value stored), false if the keychain is unavailable
- * or both inputs are empty.
+ * value it had before) — this lets the Accounts UI retain unchanged fields.
+ * Results are field-specific because keyrings are not transactional: writing
+ * one entry can succeed before its sibling throws. The registry then scrubs
+ * only successful fields and retains a config fallback for each failure.
  */
 export async function saveAccountCredentials(
   accountId: string,
   password: string,
   smtpToken: string,
-): Promise<boolean> {
+): Promise<AccountCredentialSaveResult> {
+  const result: AccountCredentialSaveResult = {
+    passwordStored: false,
+    smtpTokenStored: false,
+  };
   try {
     const keyring = await getKeyring();
-    if (!keyring) return false;
-    let wrote = false;
+    if (!keyring) return result;
     if (password) {
-      new keyring.Entry(SERVICE_NAME, accountPasswordKey(accountId)).setPassword(password);
-      wrote = true;
+      try {
+        new keyring.Entry(SERVICE_NAME, accountPasswordKey(accountId)).setPassword(password);
+        result.passwordStored = true;
+      } catch { /* preserve config fallback for this field */ }
     }
     if (smtpToken) {
-      new keyring.Entry(SERVICE_NAME, accountSmtpTokenKey(accountId)).setPassword(smtpToken);
-      wrote = true;
+      try {
+        new keyring.Entry(SERVICE_NAME, accountSmtpTokenKey(accountId)).setPassword(smtpToken);
+        result.smtpTokenStored = true;
+      } catch { /* preserve config fallback for this field */ }
     }
-    return wrote;
+    return result;
   } catch {
-    return false;
+    return result;
   }
 }
 
@@ -244,9 +287,14 @@ export async function deleteAccountCredentials(accountId: string): Promise<boole
   try {
     const keyring = await getKeyring();
     if (!keyring) return false;
-    try { new keyring.Entry(SERVICE_NAME, accountPasswordKey(accountId)).deletePassword(); } catch { /* not set */ }
-    try { new keyring.Entry(SERVICE_NAME, accountSmtpTokenKey(accountId)).deletePassword(); } catch { /* not set */ }
-    return true;
+    // An absent entry normally returns false rather than throwing and still
+    // counts as successfully cleared. A thrown deletion, however, means a
+    // caller (notably the configuration reset flow) must be told that cleanup
+    // could not be verified instead of receiving a false success signal.
+    let cleared = true;
+    try { new keyring.Entry(SERVICE_NAME, accountPasswordKey(accountId)).deletePassword(); } catch { cleared = false; }
+    try { new keyring.Entry(SERVICE_NAME, accountSmtpTokenKey(accountId)).deletePassword(); } catch { cleared = false; }
+    return cleared;
   } catch {
     return false;
   }
@@ -283,11 +331,9 @@ export async function migrateFromConfig(
   let migrated = false;
   if (password || smtpToken) {
     const saved = await saveCredentials(password, smtpToken);
-    if (saved) {
-      config.connection.password = "";
-      config.connection.smtpToken = "";
-      migrated = true;
-    }
+    if (saved.passwordStored) config.connection.password = "";
+    if (saved.smtpTokenStored) config.connection.smtpToken = "";
+    migrated = saved.passwordStored || saved.smtpTokenStored;
   }
 
   // Store OAuth secrets (new) — same pattern, separate keychain entries.
@@ -312,7 +358,15 @@ export async function migrateFromConfig(
   }
 
   if (migrated) {
-    config.credentialStorage = "keychain";
+    const hasPlaintextFallback = !!(
+      config.connection.password
+      || config.connection.smtpToken
+      || config.connection.remoteBearerToken
+      || config.connection.remoteOauthAdminPassword
+      || config.connection.passAccessToken
+      || config.connection.simpleloginApiKey
+    );
+    config.credentialStorage = hasPlaintextFallback ? "config" : "keychain";
     saveConfigFn(config);
   }
   return migrated;
@@ -348,6 +402,33 @@ export async function saveAuxiliaryCredentials(passAccessToken: string, simplelo
   }
 }
 
+/**
+ * Delete selected auxiliary secrets after an explicit Settings UI clear.
+ * Keeping this separate from saveAuxiliaryCredentials is intentional: callers
+ * commonly pass an empty value to mean "leave this untouched", while an
+ * explicit clear must remove the durable keychain entry too.
+ */
+export async function deleteAuxiliaryCredentials(targets: {
+  passAccessToken?: boolean;
+  simpleloginApiKey?: boolean;
+}): Promise<boolean> {
+  try {
+    const keyring = await getKeyring();
+    if (!keyring) return false;
+    if (targets.passAccessToken) {
+      // A false return merely means the entry was already absent. A thrown
+      // delete must fail the clear request instead of reporting false success.
+      new keyring.Entry(SERVICE_NAME, KEY_PASS_PAT).deletePassword();
+    }
+    if (targets.simpleloginApiKey) {
+      new keyring.Entry(SERVICE_NAME, KEY_SIMPLELOGIN_KEY).deletePassword();
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Load remoteBearerToken + remoteOauthAdminPassword from the keychain. */
 export async function loadRemoteSecrets(): Promise<{ remoteBearerToken: string; remoteOauthAdminPassword: string } | null> {
   try {
@@ -369,6 +450,26 @@ export async function saveRemoteSecrets(remoteBearerToken: string, remoteOauthAd
     if (!keyring) return false;
     if (remoteBearerToken) new keyring.Entry(SERVICE_NAME, KEY_REMOTE_BEARER).setPassword(remoteBearerToken);
     if (remoteOauthAdminPassword) new keyring.Entry(SERVICE_NAME, KEY_REMOTE_OAUTH_ADMIN).setPassword(remoteOauthAdminPassword);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Delete the remote-server secrets kept in the OS keychain.
+ *
+ * A configuration reset must remove these alongside mailbox and integration
+ * credentials.  Keep this separate from saveRemoteSecrets(): an empty value
+ * during an ordinary settings save means "leave the existing secret alone",
+ * whereas reset is an explicit request to erase it.
+ */
+export async function deleteRemoteSecrets(): Promise<boolean> {
+  try {
+    const keyring = await getKeyring();
+    if (!keyring) return false;
+    new keyring.Entry(SERVICE_NAME, KEY_REMOTE_BEARER).deletePassword();
+    new keyring.Entry(SERVICE_NAME, KEY_REMOTE_OAUTH_ADMIN).deletePassword();
     return true;
   } catch {
     return false;

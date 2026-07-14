@@ -27,8 +27,7 @@ import {
 } from "../utils/helpers.js";
 import { validateSearchInput } from "./search-input.js";
 import { extractActionItems, parseIcs } from "../services/content-parser.js";
-import { FtsUnavailableError } from "../services/fts-service.js";
-import type { FtsIndexService } from "../services/fts-service.js";
+import { FtsOwnershipError, FtsUnavailableError } from "../services/fts-service.js";
 
 // TOOL-013: track in-progress rebuilds per resolved DB path rather than a
 // single module-global boolean. Per-account routing means two concurrent
@@ -38,7 +37,7 @@ const _ftsRebuilding = new Set<string>();
 import type { EmailMessage, EmailFolder } from "../types/index.js";
 import { logger } from "../utils/logger.js";
 import { isFolderNotFoundError } from "../utils/error-classify.js";
-import type { ToolDef, ToolHandler, ToolModule } from "./types.js";
+import type { ToolCallContext, ToolDef, ToolHandler, ToolModule } from "./types.js";
 
 const EMAIL_SUMMARY_SCHEMA = {
   type: "object",
@@ -152,7 +151,7 @@ export const defsEarly: ToolDef[] = [
     name: "search_emails",
     title: "Search Emails",
     description:
-      "Search emails by sender, recipient (To/CC/BCC), subject, body content, date range (received or sent), size, read/replied/starred/draft status, or attachment presence. Searches are server-side IMAP SEARCH except hasAttachment which filters locally. Use `folder` for a single folder or `folders` for multiple (pass [\"*\"] to search all). Returns summary fields. Use get_email_by_id for full content.",
+      "Search the live mailbox by sender, recipient (To/CC/BCC), subject, body content, date range (received or sent), size, read/replied/starred/draft status, or attachment presence. Uses server-side IMAP SEARCH except hasAttachment, which filters locally. Use fts_search only for faster local ranked search after its index is built. Use folder for one folder or folders for many (pass [\"*\"] for all); returns summaries, so use get_email_by_id for full content.",
     annotations: { readOnlyHint: true, openWorldHint: true },
     inputSchema: {
       type: "object",
@@ -217,7 +216,7 @@ export const defsEarly: ToolDef[] = [
     name: "list_labels",
     title: "List Labels",
     description:
-      "List all Proton Mail labels with message counts. Returns only labels (Labels/ prefix), not regular folders.",
+      "List only Proton Mail labels with message counts (Labels/ prefix), not regular folders. Use get_folders when you also need regular folders, folder type, or IMAP special-use metadata.",
     annotations: { readOnlyHint: true, openWorldHint: true },
     inputSchema: { type: "object", properties: {} },
     outputSchema: {
@@ -244,7 +243,7 @@ export const defsEarly: ToolDef[] = [
     name: "get_emails_by_label",
     title: "Get Emails by Label",
     description:
-      "Fetch emails from a specific label folder. Shortcut for get_emails with folder set to Labels/<label>.",
+      "Legacy convenience wrapper for get_emails with folder set to Labels/<label>. Prefer get_emails when you need the canonical pagination and summaryOnly options.",
     annotations: { readOnlyHint: true, openWorldHint: true },
     inputSchema: {
       type: "object",
@@ -275,12 +274,13 @@ export const defsLate: ToolDef[] = [
     name: "download_attachment",
     title: "Download Attachment",
     description:
-      "Download the binary content of an email attachment as a base64-encoded string. Use get_email_by_id first to see available attachments and their indices (0-based).",
+      "Download the binary content of an email attachment as a base64-encoded string. Use get_email_by_id first to see available attachments and their indices (0-based). Provide the message folder to avoid a cross-folder UID collision; it is required for folder-restricted agents.",
     annotations: { readOnlyHint: true, openWorldHint: true },
     inputSchema: {
       type: "object",
       properties: {
         email_id: { type: "string", description: "IMAP UID of the email" },
+        folder: { type: "string", description: "Folder the email lives in. Required for folder-restricted agents and recommended for all callers because IMAP UIDs are per-folder." },
         attachment_index: { type: "number", description: "0-based index of the attachment (from get_email_by_id attachments array)" },
       },
       required: ["email_id", "attachment_index"],
@@ -301,7 +301,7 @@ export const defsLate: ToolDef[] = [
     name: "get_thread",
     title: "Get Email Thread",
     description:
-      "Return all messages that look like they belong to the same thread as the given email. Uses the normalized Subject (Re:/Fwd: stripped) to collect related messages from INBOX + Sent. Useful for summarising long conversations in one call.",
+      "Return all messages that look like they belong to the same thread as the given email. Uses the normalized Subject (Re:/Fwd: stripped) to collect related messages from INBOX + Sent. Folder-restricted agents only receive messages from their allowed folders. Useful for summarising long conversations in one call.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: "object",
@@ -358,7 +358,7 @@ export const defsLate: ToolDef[] = [
     name: "fts_search",
     title: "Full-Text Search (Local Index)",
     description:
-      "BM25-ranked keyword search over the locally-indexed mail corpus. Supports FTS5 syntax: phrases (\"exact phrase\"), boolean (foo AND bar, foo OR bar, NOT baz), prefix (proto*), and column filters (subject:invoice from:alice). Faster and smarter than search_emails, but requires the local index to be built — call fts_rebuild if fts_status shows it empty.",
+      "BM25-ranked keyword search over the locally indexed mail corpus. Supports FTS5 syntax: phrases (\"exact phrase\"), boolean (foo AND bar, foo OR bar, NOT baz), prefix (proto*), and column filters (subject:invoice from:alice). Use search_emails for live, authoritative IMAP results; use this for faster ranked local search after fts_rebuild has populated the index.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       type: "object",
@@ -498,12 +498,92 @@ export const defsLate: ToolDef[] = [
 
 export const defs: ToolDef[] = [...defsEarly, ...defsLate];
 
+/**
+ * A folder allowlist is meaningful only when it has at least one path. The
+ * dispatcher always supplies this accessor in production; the optional call
+ * keeps direct handler tests (which intentionally use a tiny context) on the
+ * unrestricted compatibility path.
+ */
+function callerAllowedFolders(ctx: ToolCallContext): string[] | undefined {
+  const allowed = ctx.getCallerAllowedFolders?.();
+  return Array.isArray(allowed) && allowed.length > 0 ? allowed : undefined;
+}
+
+function folderIsAllowed(folder: string, allowedFolders: string[]): boolean {
+  return allowedFolders.some((allowed) => allowed.toLowerCase() === folder.toLowerCase());
+}
+
+/**
+ * A UID is scoped to its IMAP folder. For a restricted caller, a folderless
+ * UID cannot be proven to refer to an allowed message, so do not make the
+ * service's all-folder fallback available. Check both the requested folder and
+ * the service's resolved folder: the latter protects this boundary even if a
+ * cache or future service implementation resolves an allowed-looking hint to a
+ * different mailbox.
+ */
+function requireAuthorizedFolderProvenance(
+  tool: string,
+  folderHint: string | undefined,
+  allowedFolders: string[] | undefined,
+): void {
+  if (!allowedFolders) return;
+  if (!folderHint) {
+    throw new McpError(
+      ErrorCode.InvalidRequest,
+      `Blocked: ${tool} requires a folder for a folder-restricted agent.`,
+    );
+  }
+  if (!folderIsAllowed(folderHint, allowedFolders)) {
+    throw new McpError(
+      ErrorCode.InvalidRequest,
+      `Blocked: folder '${folderHint}' is outside this agent's folder allowlist.`,
+    );
+  }
+}
+
+function requireResolvedEmailInAllowedFolder(
+  email: EmailMessage,
+  allowedFolders: string[] | undefined,
+  expectedFolder?: string,
+): void {
+  if (!allowedFolders) return;
+  if (!folderIsAllowed(email.folder, allowedFolders)) {
+    throw new McpError(
+      ErrorCode.InvalidRequest,
+      "Blocked: the resolved email is outside this agent's folder allowlist.",
+    );
+  }
+  if (expectedFolder && email.folder.toLowerCase() !== expectedFolder.toLowerCase()) {
+    throw new McpError(
+      ErrorCode.InvalidRequest,
+      "Blocked: the resolved email does not match the requested folder.",
+    );
+  }
+}
+
+function requireResolvedSearchEmailInAllowedScope(
+  email: EmailMessage,
+  searchFolders: string[] | undefined,
+  allowedFolders: string[] | undefined,
+): void {
+  requireResolvedEmailInAllowedFolder(email, allowedFolders);
+  if (!allowedFolders || !searchFolders || searchFolders.includes("*") || searchFolders.includes("all")) return;
+  if (!folderIsAllowed(email.folder, searchFolders)) {
+    throw new McpError(
+      ErrorCode.InvalidRequest,
+      "Blocked: a search result does not match the requested folder scope.",
+    );
+  }
+}
+
 export const handlers: Record<string, ToolHandler> = {
   get_emails: async (ctx) => {
     const { args, imapService, ok, limits, encodeCursor, decodeCursor } = ctx;
     const folder = (args.folder as string) || "INBOX";
     const geValidErr = validateTargetFolder(folder);
     if (geValidErr) throw new McpError(ErrorCode.InvalidParams, geValidErr);
+    const allowedFolders = callerAllowedFolders(ctx);
+    requireAuthorizedFolderProvenance("get_emails", folder, allowedFolders);
     if (args.limit !== undefined && typeof args.limit !== "number") {
       throw new McpError(ErrorCode.InvalidParams, "'limit' must be a number.");
     }
@@ -532,6 +612,7 @@ export const handlers: Record<string, ToolHandler> = {
       }
       throw err;
     }
+    for (const email of emails) requireResolvedEmailInAllowedFolder(email, allowedFolders, folder);
 
     let nextCursor: string | undefined;
     if (emails.length === limit) {
@@ -551,10 +632,13 @@ export const handlers: Record<string, ToolHandler> = {
     const { args, imapService, ok, limits } = ctx;
     const rawEmailId = requireNumericEmailId(args.emailId);
     const folderHint = optionalFolderHint(args.folder);
+    const allowedFolders = callerAllowedFolders(ctx);
+    requireAuthorizedFolderProvenance("get_email_by_id", folderHint, allowedFolders);
     const email = await imapService.getEmailById(rawEmailId, folderHint);
     if (!email) {
       return { content: [{ type: "text" as const, text: "Email not found" }], isError: true };
     }
+    requireResolvedEmailInAllowedFolder(email, allowedFolders, folderHint);
     if (email.body && email.body.length > limits.maxEmailBodyChars) {
       // Clone before truncating: imapService may cache the returned object, so
       // mutating email.body in place would persist the truncation into later
@@ -572,8 +656,11 @@ export const handlers: Record<string, ToolHandler> = {
 
   search_emails: async (ctx) => {
     const { args, imapService, ok, limits } = ctx;
-    const searchOptions = validateSearchInput(args, limits.maxEmailListResults);
+    const allowedFolders = callerAllowedFolders(ctx);
+    const searchOptions = validateSearchInput(args, limits.maxEmailListResults, allowedFolders);
     const results = await imapService.searchEmails(searchOptions);
+    const requestedSearchFolders = searchOptions.folders ?? [searchOptions.folder ?? "INBOX"];
+    for (const email of results) requireResolvedSearchEmailInAllowedScope(email, requestedSearchFolders, allowedFolders);
     const searchedIn = searchOptions.folders ? searchOptions.folders.join(", ") : (searchOptions.folder ?? "INBOX");
     return ok({ emails: results, count: results.length, folder: searchedIn });
   },
@@ -606,6 +693,8 @@ export const handlers: Record<string, ToolHandler> = {
     const lblValidErr = validateLabelName(lblName);
     if (lblValidErr) throw new McpError(ErrorCode.InvalidParams, lblValidErr);
     const lblFolder = `Labels/${lblName}`;
+    const allowedFolders = callerAllowedFolders(ctx);
+    requireAuthorizedFolderProvenance("get_emails_by_label", lblFolder, allowedFolders);
     if (args.limit !== undefined && typeof args.limit !== "number") {
       throw new McpError(ErrorCode.InvalidParams, "'limit' must be a number.");
     }
@@ -634,6 +723,7 @@ export const handlers: Record<string, ToolHandler> = {
       }
       throw err;
     }
+    for (const email of lblEmails) requireResolvedEmailInAllowedFolder(email, allowedFolders, lblFolder);
     let lblNextCursor: string | undefined;
     if (lblEmails.length === lblLimit) {
       lblNextCursor = encodeCursor({ folder: lblFolder, offset: lblOffset + lblLimit, limit: lblLimit });
@@ -646,6 +736,9 @@ export const handlers: Record<string, ToolHandler> = {
   download_attachment: async (ctx) => {
     const { args, imapService, ok, limits } = ctx;
     const rawAttEmailId = requireNumericEmailId(args.email_id, "email_id");
+    const folderHint = optionalFolderHint(args.folder);
+    const allowedFolders = callerAllowedFolders(ctx);
+    requireAuthorizedFolderProvenance("download_attachment", folderHint, allowedFolders);
     const rawAttIdx = args.attachment_index as number;
     const MAX_ATTACHMENT_INDEX = 50;
     if (!Number.isInteger(rawAttIdx) || rawAttIdx < 0) {
@@ -654,7 +747,17 @@ export const handlers: Record<string, ToolHandler> = {
     if (rawAttIdx > MAX_ATTACHMENT_INDEX) {
       throw new McpError(ErrorCode.InvalidParams, `attachment_index must be at most ${MAX_ATTACHMENT_INDEX}.`);
     }
-    const attResult = await imapService.downloadAttachment(rawAttEmailId, rawAttIdx);
+    // The attachment service returns binary data, not its source folder. Resolve
+    // the email first for a restricted caller so we can verify that a hinted UID
+    // did not resolve from another folder before handing out its attachment.
+    if (allowedFolders) {
+      const email = await imapService.getEmailById(rawAttEmailId, folderHint);
+      if (!email) {
+        return { content: [{ type: "text" as const, text: "Attachment not found" }], isError: true };
+      }
+      requireResolvedEmailInAllowedFolder(email, allowedFolders, folderHint);
+    }
+    const attResult = await imapService.downloadAttachment(rawAttEmailId, rawAttIdx, folderHint);
     if (!attResult) {
       return { content: [{ type: "text" as const, text: "Attachment not found" }], isError: true };
     }
@@ -664,15 +767,6 @@ export const handlers: Record<string, ToolHandler> = {
         `Attachment "${attResult.filename}" too large: ${encodedLen} bytes encoded (limit ${limits.maxAttachmentBytes})`,
         "ResponseGuard",
       );
-      const attError = {
-        success: false,
-        reason: "Attachment too large to return inline",
-        filename: attResult.filename,
-        contentType: attResult.contentType,
-        sizeBytes: attResult.size,
-        encodedSizeBytes: encodedLen,
-        limitBytes: limits.maxAttachmentBytes,
-      };
       return {
         content: [{ type: "text" as const, text: `Attachment "${attResult.filename}" is too large (${attResult.size} bytes raw, ${encodedLen} bytes encoded). Limit: ${limits.maxAttachmentBytes} bytes. Increase maxAttachmentBytes in Settings → Debug Logs → Response Limits to download larger files.` }],
         isError: true,
@@ -685,6 +779,8 @@ export const handlers: Record<string, ToolHandler> = {
     const { args, imapService, ok } = ctx;
     const threadEmailId = requireNumericEmailId(args.email_id, "email_id");
     const threadFolderHint = optionalFolderHint(args.folder);
+    const allowedFolders = callerAllowedFolders(ctx);
+    requireAuthorizedFolderProvenance("get_thread", threadFolderHint, allowedFolders);
     const maxMsgs = typeof args.max_messages === "number"
       ? Math.min(Math.max(1, args.max_messages), 200)
       : 50;
@@ -692,17 +788,47 @@ export const handlers: Record<string, ToolHandler> = {
     if (!seed) {
       return { content: [{ type: "text" as const, text: "Seed message not found" }], isError: true };
     }
+    requireResolvedEmailInAllowedFolder(seed, allowedFolders, threadFolderHint);
     const normalizeSubject = (s: string) => s.replace(/^(\s*(re|fwd|fw):\s*)+/i, "").trim();
     const normalized = normalizeSubject(seed.subject || "");
-    const [inbox, sent] = await Promise.all([
-      imapService.searchEmails({ folder: "INBOX", subject: normalized, limit: maxMsgs }),
-      imapService.searchEmails({ folder: "Sent",  subject: normalized, limit: maxMsgs }).catch(() => [] as EmailMessage[]),
-    ]);
+    // Unrestricted callers retain the historical INBOX + Sent expansion. A
+    // folder-restricted caller may only query every folder from its grant and
+    // must never inherit those hard-coded mailboxes.
+    const threadFolders = allowedFolders ?? ["INBOX", "Sent"];
+    const related = await Promise.all(
+      threadFolders.map(async (folder, index) => {
+        try {
+          return {
+            folder,
+            messages: await imapService.searchEmails({ folder, subject: normalized, limit: maxMsgs }),
+          };
+        } catch (error) {
+          // Preserve the old best-effort Sent behavior only for unrestricted
+          // callers. A restricted folder failing to search is not permission to
+          // silently fall back to a different mailbox.
+          if (!allowedFolders && index > 0) return { folder, messages: [] as EmailMessage[] };
+          throw error;
+        }
+      }),
+    );
     const byId = new Map<string, EmailMessage>();
-    for (const m of [seed, ...inbox, ...sent]) {
+    const addRelated = (m: EmailMessage) => {
       const normSubj = normalizeSubject(m.subject || "");
-      if (normSubj !== normalized) continue;
-      byId.set(m.id, m);
+      if (normSubj !== normalized) return;
+      // UIDs are per-folder. Deduping only by UID previously allowed INBOX:42
+      // and Sent:42 to overwrite one another, producing ambiguous output.
+      byId.set(`${m.folder.toLowerCase()}\u0000${m.id}`, m);
+    };
+    addRelated(seed);
+    for (const { folder, messages } of related) {
+      for (const m of messages) {
+        // A restricted thread is allowed to search several folders, but each
+        // result must still be attributable to the particular IMAP mailbox
+        // queried. Checking only the whole allowlist would accept an adapter
+        // response from a different allowed folder and break UID provenance.
+        requireResolvedEmailInAllowedFolder(m, allowedFolders, folder);
+        addRelated(m);
+      }
     }
     // TOOL-010: the outputSchema advertises EMAIL_SUMMARY_SCHEMA, but the
     // handler used to return full EmailMessage objects (entire body per
@@ -852,7 +978,7 @@ export const handlers: Record<string, ToolHandler> = {
       const stats = fts.stats();
       return ok({ available: true, ...stats });
     } catch (err: unknown) {
-      if (err instanceof FtsUnavailableError) {
+      if (err instanceof FtsUnavailableError || err instanceof FtsOwnershipError) {
         return ok({ available: false, reason: err.message });
       }
       throw err;
@@ -862,10 +988,14 @@ export const handlers: Record<string, ToolHandler> = {
   extract_action_items: async (ctx) => {
     const { args, imapService, ok } = ctx;
     const aiEmailId = requireNumericEmailId(args.email_id, "email_id");
-    const email = await imapService.getEmailById(aiEmailId, optionalFolderHint(args.folder));
+    const folderHint = optionalFolderHint(args.folder);
+    const allowedFolders = callerAllowedFolders(ctx);
+    requireAuthorizedFolderProvenance("extract_action_items", folderHint, allowedFolders);
+    const email = await imapService.getEmailById(aiEmailId, folderHint);
     if (!email) {
       return { content: [{ type: "text" as const, text: "Email not found" }], isError: true };
     }
+    requireResolvedEmailInAllowedFolder(email, allowedFolders, folderHint);
     const action_items = extractActionItems(email.body || "");
     return ok({ action_items });
   },
@@ -873,10 +1003,14 @@ export const handlers: Record<string, ToolHandler> = {
   extract_meeting: async (ctx) => {
     const { args, imapService, ok } = ctx;
     const emEmailId = requireNumericEmailId(args.email_id, "email_id");
-    const email = await imapService.getEmailById(emEmailId, optionalFolderHint(args.folder));
+    const folderHint = optionalFolderHint(args.folder);
+    const allowedFolders = callerAllowedFolders(ctx);
+    requireAuthorizedFolderProvenance("extract_meeting", folderHint, allowedFolders);
+    const email = await imapService.getEmailById(emEmailId, folderHint);
     if (!email) {
       return { content: [{ type: "text" as const, text: "Email not found" }], isError: true };
     }
+    requireResolvedEmailInAllowedFolder(email, allowedFolders, folderHint);
     let icsText: string | null = null;
     for (const att of email.attachments ?? []) {
       const ct = (att.contentType ?? "").toLowerCase();

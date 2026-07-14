@@ -19,7 +19,7 @@ import { readFileSync } from "fs";
 import { loadConfig, getConfigPath } from "../config/loader.js";
 import { getLogFilePath } from "../utils/logger.js";
 import { lockPathForAccount } from "../utils/singleton-lock.js";
-import { homeFile } from "../utils/home-path.js";
+import { profileHomeFile } from "../utils/home-path.js";
 import { gatherSetupStatus, type SetupStatusResult } from "../diagnostics/setup-status.js";
 
 export interface RunningInstance {
@@ -48,7 +48,7 @@ export interface StatusCliDeps {
   /** Probe a running instance's GET /api/status. Injectable for tests. */
   probe?: (port: number) => Promise<Record<string, unknown> | null>;
   /** Resolve the live PID from the singleton lock. Injectable for tests. */
-  readPid?: (accountIdentity: string | undefined) => number | null;
+  readPid?: (profileIdentity: string) => number | null;
   /** Offline diagnosis. Injectable for tests. */
   gather?: typeof gatherSetupStatus;
   /** Persisted agent-grant counts (used when no instance is running). */
@@ -67,10 +67,10 @@ function isPidAlive(pid: number): boolean {
   }
 }
 
-/** Read the live holder PID from this account's singleton lock, or null. */
-function readLockPid(accountIdentity: string | undefined): number | null {
+/** Read the live holder PID from this configuration profile's singleton lock, or null. */
+function readLockPid(profileIdentity: string): number | null {
   try {
-    const pid = parseInt(readFileSync(lockPathForAccount(accountIdentity), "utf-8").trim(), 10);
+    const pid = parseInt(readFileSync(lockPathForAccount(profileIdentity), "utf-8").trim(), 10);
     return Number.isInteger(pid) && pid > 0 && isPidAlive(pid) ? pid : null;
   } catch {
     return null;
@@ -104,7 +104,7 @@ function probeApiStatus(port: number): Promise<Record<string, unknown> | null> {
 /** Count persisted grants by status without instantiating the live store. */
 function readGrantCounts(): { pending: number; active: number } {
   try {
-    const path = homeFile("MAILPOUCH_AGENTS", ".mailpouch-agents.json");
+    const path = profileHomeFile("MAILPOUCH_AGENTS", ".mailpouch-agents.json", getConfigPath());
     const parsed = JSON.parse(readFileSync(path, "utf-8")) as { grants?: Array<{ status?: string }> };
     const grants = Array.isArray(parsed.grants) ? parsed.grants : [];
     return {
@@ -129,10 +129,10 @@ export async function runStatusCli(argv: string[], deps: StatusCliDeps = {}): Pr
   if (unknown) { err(`error: unknown argument '${unknown}'.`); err(USAGE); return 2; }
 
   const cfg = loadConfig();
-  const accountIdentity = cfg?.connection.username || "";
+  const profileIdentity = `profile:${getConfigPath()}`;
   const settingsPort = cfg?.settingsPort ?? 8766;
 
-  const pid = readPid(accountIdentity);
+  const pid = readPid(profileIdentity);
   const payload = await probe(settingsPort);
   const diagnosis = await gather();
 

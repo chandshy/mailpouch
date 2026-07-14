@@ -16,6 +16,7 @@
 import { createRequire } from "module";
 import { statSync, chmodSync, existsSync } from "fs";
 import { logger } from "../utils/logger.js";
+import type { EmailMessage } from "../types/index.js";
 
 /** Tighten the FTS DB to 0600. The index contains decrypted email bodies,
  *  subjects, and senders — must be owner-readable only. better-sqlite3 opens
@@ -41,9 +42,28 @@ export class FtsUnavailableError extends Error {
   }
 }
 
+/**
+ * Raised when a caller tries to use an index that has not been bound to an
+ * account identity, or whose durable owner marker was changed by another
+ * process.  FTS rows contain decrypted mail, so failing closed is essential.
+ */
+export class FtsOwnershipError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "FtsOwnershipError";
+  }
+}
+
 export interface FtsRecord {
-  /** Stable cross-folder identifier — prefer the Proton X-Pm-Internal-Id header, else IMAP UID. */
+  /** Identifier returned to callers; normal email records use the mailbox-local IMAP UID. */
   id: string;
+  /**
+   * Internal durable row identity. Generic IMAP UIDs are unique only inside a
+   * folder, so callers that index them must provide a folder-qualified key.
+   * Omitted for compatibility with direct callers whose `id` is already
+   * globally unique.
+   */
+  storageKey?: string;
   subject: string;
   from: string;
   to: string;
@@ -51,6 +71,45 @@ export interface FtsRecord {
   body: string;
   /** Seconds since Unix epoch for the message date. */
   dateEpoch: number;
+}
+
+/**
+ * Build an unambiguous FTS row key for an email.
+ *
+ * Proton's internal ID survives folder moves and is globally stable. Plain
+ * IMAP accounts only expose UIDs, which may repeat in every mailbox, so their
+ * row key must include the folder. Keep this separate from `FtsRecord.id`:
+ * search results must still return the UID callers use with the IMAP tools.
+ */
+export function ftsStorageKeyForEmail(email: {
+  id: string;
+  folder?: string;
+  protonId?: string;
+}): string {
+  if (email.protonId) return `proton:${encodeURIComponent(email.protonId)}`;
+  return `imap:${encodeURIComponent(email.folder ?? "INBOX")}:${encodeURIComponent(email.id)}`;
+}
+
+/**
+ * Convert an email into an FTS record while keeping the result ID compatible
+ * with `get_email_by_id`: it is always the mailbox-local IMAP UID. Proton's
+ * internal ID is used only for the private storage key, where it can dedupe a
+ * moved message without leaking an unusable ID through FTS search results.
+ */
+export function ftsRecordFromEmail(
+  email: Pick<EmailMessage, "id" | "protonId" | "subject" | "from" | "to" | "folder" | "date">,
+  body: string,
+): FtsRecord {
+  return {
+    id: email.id,
+    storageKey: ftsStorageKeyForEmail(email),
+    subject: email.subject ?? "",
+    from: email.from ?? "",
+    to: (email.to ?? []).join(", "),
+    folder: email.folder ?? "",
+    body,
+    dateEpoch: Math.floor((email.date?.getTime?.() ?? 0) / 1000),
+  };
 }
 
 export interface FtsHit extends FtsRecord {
@@ -106,16 +165,22 @@ type DatabaseConstructor = new (path: string) => SqliteDatabase;
 export class FtsIndexService {
   private readonly db: SqliteDatabase;
   private readonly dbPath: string;
+  /** Identity this process successfully bound through ensureOwnerIdentity(). */
+  private boundOwnerIdentity: string | undefined;
+  /** One-way fuse: a stale instance must never reclaim or reuse the index. */
+  private ownerInvalidated = false;
   private readonly stmts: {
     upsert: SqliteStatement;
-    remove: SqliteStatement;
+    removeByStorageKey: SqliteStatement;
+    removeById: SqliteStatement;
     searchAll: SqliteStatement;
     searchFolder: SqliteStatement;
     count: SqliteStatement;
   };
 
-  // Increment when the body format changes so stale HTML/raw indexes auto-clear.
-  static readonly BODY_FORMAT_VERSION = 2;
+  // Increment when the stored row format changes so old raw-UID rows cannot
+  // collide with the new folder-qualified generic-IMAP keys.
+  static readonly BODY_FORMAT_VERSION = 3;
 
   constructor(db: SqliteDatabase, dbPath: string) {
     this.db = db;
@@ -139,15 +204,20 @@ export class FtsIndexService {
         folder UNINDEXED,
         body,
         date_epoch UNINDEXED,
+        storage_key UNINDEXED,
         tokenize='porter unicode61'
       );
     `);
     this.stmts = {
       upsert: this.db.prepare(
-        `INSERT INTO messages (id, subject, "from", "to", folder, body, date_epoch)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO messages (id, subject, "from", "to", folder, body, date_epoch, storage_key)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       ),
-      remove: this.db.prepare(`DELETE FROM messages WHERE id = ?`),
+      removeByStorageKey: this.db.prepare(`DELETE FROM messages WHERE storage_key = ?`),
+      // The public remove() API historically accepted the ID surfaced by
+      // search. Retain that contract even when multiple folders have a given
+      // generic IMAP UID; upsert uses the private storage-key statement.
+      removeById: this.db.prepare(`DELETE FROM messages WHERE id = ?`),
       // `date_epoch >= ?` lives in the WHERE so the date floor is applied BEFORE
       // the LIMIT (a post-LIMIT filter under-returns). Binding 0 when no
       // sinceEpoch is supplied matches everything (epochs are non-negative).
@@ -173,9 +243,76 @@ export class FtsIndexService {
     };
   }
 
-  /** Insert or replace a record. Single-row path; see upsertMany for bulk. */
-  upsert(record: FtsRecord): void {
-    this.stmts.remove.run(record.id);
+  /** Read the durable owner marker inside the caller's SQLite transaction. */
+  private readOwnerMarker(): string | undefined {
+    const row = this.db.prepare(`SELECT value FROM _meta WHERE key = 'owner_identity'`).get() as { value?: unknown } | undefined;
+    return typeof row?.value === "string" ? row.value : undefined;
+  }
+
+  /**
+   * Execute a transaction explicitly rather than using better-sqlite3's
+   * default deferred helper. Owner transitions need BEGIN IMMEDIATE so another
+   * process cannot observe or interleave the clear/marker write half-way
+   * through the operation.
+   */
+  private transaction<T>(mode: "read" | "write", operation: () => T): T {
+    let active = false;
+    try {
+      this.db.exec(mode === "write" ? "BEGIN IMMEDIATE" : "BEGIN");
+      active = true;
+      const result = operation();
+      this.db.exec("COMMIT");
+      active = false;
+      return result;
+    } catch (err) {
+      if (active) {
+        try { this.db.exec("ROLLBACK"); } catch { /* original error wins */ }
+      }
+      throw err;
+    }
+  }
+
+  private staleOwnershipError(): FtsOwnershipError {
+    return new FtsOwnershipError(
+      "This FTS index instance is stale because its mailbox owner changed; open a new account-owned index.",
+    );
+  }
+
+  /**
+   * Check the in-memory binding against the durable marker while a transaction
+   * is open. Once this detects a mismatch, the instance is permanently
+   * invalidated: it cannot reclaim the marker or access decrypted rows later.
+   */
+  private assertCurrentOwner(): void {
+    if (this.ownerInvalidated) throw this.staleOwnershipError();
+    if (!this.boundOwnerIdentity) {
+      throw new FtsOwnershipError("FTS index must be bound with ensureOwnerIdentity() before use.");
+    }
+    if (this.readOwnerMarker() !== this.boundOwnerIdentity) {
+      this.ownerInvalidated = true;
+      throw this.staleOwnershipError();
+    }
+  }
+
+  private withCurrentOwnerRead<T>(operation: () => T): T {
+    if (this.ownerInvalidated) throw this.staleOwnershipError();
+    return this.transaction("read", () => {
+      this.assertCurrentOwner();
+      return operation();
+    });
+  }
+
+  private withCurrentOwnerWrite<T>(operation: () => T): T {
+    if (this.ownerInvalidated) throw this.staleOwnershipError();
+    return this.transaction("write", () => {
+      this.assertCurrentOwner();
+      return operation();
+    });
+  }
+
+  private upsertUnsafe(record: FtsRecord): void {
+    const storageKey = record.storageKey ?? record.id;
+    this.stmts.removeByStorageKey.run(storageKey);
     this.stmts.upsert.run(
       record.id,
       record.subject ?? "",
@@ -184,24 +321,25 @@ export class FtsIndexService {
       record.folder ?? "",
       record.body ?? "",
       record.dateEpoch ?? 0,
+      storageKey,
     );
+  }
+
+  /** Insert or replace a record. Single-row path; see upsertMany for bulk. */
+  upsert(record: FtsRecord): void {
+    this.withCurrentOwnerWrite(() => this.upsertUnsafe(record));
   }
 
   /** Bulk upsert wrapped in a single transaction. */
   upsertMany(records: FtsRecord[]): number {
-    if (records.length === 0) return 0;
-    // better-sqlite3's transaction() preserves the argument signature of the
-    // inner fn, so we can write it concretely without any casts.
-    const tx = this.db.transaction((batch: FtsRecord[]) => {
-      for (const r of batch) this.upsert(r);
-      return batch.length;
+    return this.withCurrentOwnerWrite(() => {
+      for (const record of records) this.upsertUnsafe(record);
+      return records.length;
     });
-    return tx(records);
   }
 
   remove(id: string): boolean {
-    const res = this.stmts.remove.run(id);
-    return res.changes > 0;
+    return this.withCurrentOwnerWrite(() => this.stmts.removeById.run(id).changes > 0);
   }
 
   /**
@@ -215,12 +353,11 @@ export class FtsIndexService {
    * (PARSE-003, audit-2026-05-28).
    */
   rebuild(records: FtsRecord[]): number {
-    const tx = this.db.transaction((batch: FtsRecord[]) => {
+    return this.withCurrentOwnerWrite(() => {
       this.db.exec(`DELETE FROM messages`);
-      for (const r of batch) this.upsert(r);
-      return batch.length;
+      for (const record of records) this.upsertUnsafe(record);
+      return records.length;
     });
-    return tx(records);
   }
 
   /**
@@ -245,7 +382,7 @@ export class FtsIndexService {
     }
   }
 
-  search(opts: FtsSearchOptions): FtsHit[] {
+  private searchUnsafe(opts: FtsSearchOptions): FtsHit[] {
     const limit = Math.min(Math.max(1, opts.limit ?? 20), 200);
     const folder = opts.folder?.trim();
     // Date floor pushed into every query's WHERE (not a post-LIMIT filter, which
@@ -307,18 +444,75 @@ export class FtsIndexService {
     return mapped;
   }
 
+  search(opts: FtsSearchOptions): FtsHit[] {
+    return this.withCurrentOwnerRead(() => this.searchUnsafe(opts));
+  }
+
   stats(): FtsStats {
-    const row = this.stmts.count.get() as { n?: number } | undefined;
-    const n = typeof row?.n === "number" ? row.n : 0;
-    let sizeBytes = 0;
-    try {
-      sizeBytes = statSync(this.dbPath).size;
-    } catch { /* ignore — stats best-effort */ }
-    return { messageCount: n, dbPath: this.dbPath, databaseBytes: sizeBytes };
+    return this.withCurrentOwnerRead(() => {
+      const row = this.stmts.count.get() as { n?: number } | undefined;
+      const n = typeof row?.n === "number" ? row.n : 0;
+      let sizeBytes = 0;
+      try {
+        sizeBytes = statSync(this.dbPath).size;
+      } catch { /* ignore — stats best-effort */ }
+      return { messageCount: n, dbPath: this.dbPath, databaseBytes: sizeBytes };
+    });
+  }
+
+  /**
+   * Bind this on-disk index to an opaque mailbox identity.
+   *
+   * Account IDs are editable labels: retaining an index when the same ID is
+   * repointed to a different mailbox would expose the former mailbox through
+   * search.  The owner marker is intentionally checked on every acquisition
+   * so a process restart cannot bypass the in-memory reset path.
+   *
+   * Returns true when the index had to be cleared.
+   */
+  ensureOwnerIdentity(identity: string): boolean {
+    const requestedIdentity = typeof identity === "string" ? identity.trim() : "";
+    if (!requestedIdentity) throw new Error("FTS owner identity is required");
+    if (this.ownerInvalidated) throw this.staleOwnershipError();
+
+    const changed = this.transaction("write", () => {
+      const storedIdentity = this.readOwnerMarker();
+      // A service that was previously bound must not win a later race by
+      // clearing a successor's database and writing its old marker back.
+      if (this.boundOwnerIdentity !== undefined && storedIdentity !== this.boundOwnerIdentity) {
+        this.ownerInvalidated = true;
+        throw this.staleOwnershipError();
+      }
+      if (storedIdentity === requestedIdentity) {
+        return false;
+      }
+
+      this.clearUnsafe();
+      this.db.prepare(`INSERT OR REPLACE INTO _meta (key, value) VALUES ('owner_identity', ?)`).run(requestedIdentity);
+      return true;
+    });
+
+    // Do not publish the in-memory binding until COMMIT has succeeded. If the
+    // filesystem rejects the transaction, retaining the prior binding makes a
+    // later operation re-check the durable marker instead of trusting a state
+    // that never reached disk.
+    this.boundOwnerIdentity = requestedIdentity;
+
+    logger.info(
+      changed
+        ? "FTS owner identity changed; cleared account index"
+        : "FTS index owner identity verified",
+      "FtsIndexService",
+    );
+    return changed;
   }
 
   /** Delete everything from the index. Follow with upsertMany() to rebuild. */
   clear(): void {
+    this.withCurrentOwnerWrite(() => this.clearUnsafe());
+  }
+
+  private clearUnsafe(): void {
     this.db.exec(`DELETE FROM messages`);
   }
 

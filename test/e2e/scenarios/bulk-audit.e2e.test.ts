@@ -20,7 +20,7 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { startE2E, type E2EHarness } from "../mcp-client.js";
+import { bridgeConfigAvailable, startE2E, type E2EHarness } from "../mcp-client.js";
 import * as docker from "../support/docker.js";
 import {
   PROMO_CREDIT_KARMA,
@@ -35,26 +35,31 @@ const A = PROMO_CREDIT_KARMA;  // "Your credit score update"
 const B = PROMO_RED_LOBSTER;   // "Endless Shrimp is back"
 const C = RELEASE_NVIDIA;      // "NVIDIA CUDA 13 is released"
 
-describe("bulk-audit.e2e — mail moves source→target without loss", () => {
+// Custom mailbox lifecycle is Greenmail-only. Live Bridge exercises the same
+// message operations against exact-owned INBOX UIDs in safe-bridge.e2e.
+describe.skipIf(bridgeConfigAvailable())("bulk-audit.e2e — mail moves source→target without loss", () => {
   let h: E2EHarness;
-  let n = 0; // per-test uniquifier → full isolation regardless of wipe()
 
   beforeAll(async () => {
-    await docker.restart();
-    h = await startE2E();
-  }, 60_000);
+    if (!bridgeConfigAvailable()) await docker.restart();
+    h = await startE2E({ safe: true });
+    expect(h.scratch).toBeDefined();
+    // Disposable Greenmail starts with INBOX only. Deletion tools move mail
+    // to Trash, while a real Proton account already exposes that system folder.
+    if (!bridgeConfigAvailable()) {
+      await h.imap.createMailbox("Trash");
+      await h.call("sync_folders");
+    }
+  });
 
   afterAll(async () => { if (h) await h.close(); });
 
   beforeEach(async () => {
     await h.resetState();
-    n++;
   });
 
-  const mk = async (path: string): Promise<string> => {
-    try { await h.imap.createMailbox(path); } catch { /* exists */ }
-    return path;
-  };
+  const mk = (kind: "folders" | "labels" | "spaced" = "folders"): Promise<string> =>
+    h.scratch!.create(kind);
   /** Sorted subjects actually present in a folder (real server state). */
   async function subjectsIn(folder: string): Promise<string[]> {
     const uids = await h.imap.listUids(folder);
@@ -69,8 +74,8 @@ describe("bulk-audit.e2e — mail moves source→target without loss", () => {
 
   // ── bulk_move_emails: MOVE source→target, conserve identities ─────────────
   it("bulk_move_emails relocates every message from a non-INBOX source to the target (no loss)", async () => {
-    const src = await mk(`Folders/AuditMv${n}`);
-    const dst = await mk(`Folders/AuditMvDst${n}`);
+    const src = await mk();
+    const dst = await mk();
     const u1 = await h.imap.appendSeed(src, A);
     const u2 = await h.imap.appendSeed(src, B);
     const u3 = await h.imap.appendSeed(src, C);
@@ -88,8 +93,8 @@ describe("bulk-audit.e2e — mail moves source→target without loss", () => {
   });
 
   it("bulk_move_emails works from a space-named non-INBOX source ('All Mail' analog)", async () => {
-    const src = await mk(`All Mail ${n}`); // space in the name — the Bug-A shape
-    const dst = await mk(`Folders/AuditAM${n}`);
+    const src = await mk("spaced"); // space in the name — the Bug-A shape
+    const dst = await mk();
     const u1 = await h.imap.appendSeed(src, A);
     const u2 = await h.imap.appendSeed(src, C);
 
@@ -108,13 +113,17 @@ describe("bulk-audit.e2e — mail moves source→target without loss", () => {
   // ── bulk_move_to_label: COPY (apply label), source retained, label created ─
   // The exact tool from the bug report; its E2E was previously it.skip-ped.
   it("bulk_move_to_label copies every message into an auto-created label (source retained, no loss)", async () => {
-    const src = await mk(`Folders/AuditLbl${n}`);
-    const label = `Audit${n}`;
-    const labelFolder = `Labels/${label}`;
+    const src = await mk();
+    const labelFolder = h.mode === "bridge"
+      ? await h.scratch!.create("labels")
+      : h.scratch!.path("labels");
+    const label = labelFolder.slice("Labels/".length);
     const u1 = await h.imap.appendSeed(src, A);
     const u2 = await h.imap.appendSeed(src, B);
 
-    expect(await h.imap.mailboxExists(labelFolder)).toBe(false); // tool must create it
+    if (h.mode === "greenmail") {
+      expect(await h.imap.mailboxExists(labelFolder)).toBe(false); // tool must create it
+    }
 
     const r = h.json<BulkResult>(await h.call("bulk_move_to_label", {
       emailIds: [u1, u2].map(String),
@@ -130,8 +139,11 @@ describe("bulk-audit.e2e — mail moves source→target without loss", () => {
   });
 
   it("bulk_move_to_label applies a label to messages sourced from 'All Mail'", async () => {
-    const src = await mk(`All Mail ${n}`);
-    const label = `Audit${n}`;
+    const src = await mk("spaced");
+    const labelFolder = h.mode === "bridge"
+      ? await h.scratch!.create("labels")
+      : h.scratch!.path("labels");
+    const label = labelFolder.slice("Labels/".length);
     const u1 = await h.imap.appendSeed(src, A);
     const u2 = await h.imap.appendSeed(src, C);
 
@@ -144,19 +156,20 @@ describe("bulk-audit.e2e — mail moves source→target without loss", () => {
     expect(r.success).toBe(2);
     expect(r.failed).toBe(0);
     expect(await subjectsIn(src)).toEqual(sorted([A.subject, C.subject]));  // retained
-    expect(await subjectsIn(`Labels/${label}`)).toEqual(sorted([A.subject, C.subject]));
+    expect(await subjectsIn(labelFolder)).toEqual(sorted([A.subject, C.subject]));
   });
 
   // ── bulk_remove_label: messages leave the label folder (no collateral) ────
   it("bulk_remove_label removes exactly the targeted messages from the label", async () => {
-    const labelFolder = await mk(`Labels/AuditRm${n}`);
+    const labelFolder = await mk("labels");
+    const label = labelFolder.slice("Labels/".length);
     const u1 = await h.imap.appendSeed(labelFolder, A);
     const u2 = await h.imap.appendSeed(labelFolder, B);
     await h.imap.appendSeed(labelFolder, C); // kept
 
     const r = h.json<BulkResult>(await h.call("bulk_remove_label", {
       emailIds: [u1, u2].map(String),
-      label: `AuditRm${n}`,
+      label,
     }));
 
     expect(r.success).toBe(2);
@@ -166,7 +179,7 @@ describe("bulk-audit.e2e — mail moves source→target without loss", () => {
 
   // ── bulk_delete_emails: source loses exactly the targeted (others kept) ────
   it("bulk_delete_emails removes exactly the targeted messages from a non-INBOX source", async () => {
-    const src = await mk(`Folders/AuditDel${n}`);
+    const src = await mk();
     const u1 = await h.imap.appendSeed(src, A);
     const u2 = await h.imap.appendSeed(src, B);
     await h.imap.appendSeed(src, C); // kept
@@ -184,7 +197,7 @@ describe("bulk-audit.e2e — mail moves source→target without loss", () => {
 
   // ── flag ops: nothing relocated or lost, flag actually set ────────────────
   it("bulk_star sets \\Flagged on a non-INBOX source without moving or losing mail", async () => {
-    const src = await mk(`Folders/AuditStar${n}`);
+    const src = await mk();
     const u1 = await h.imap.appendSeed(src, A);
     const u2 = await h.imap.appendSeed(src, B);
 
@@ -202,7 +215,7 @@ describe("bulk-audit.e2e — mail moves source→target without loss", () => {
   });
 
   it("bulk_mark_read sets \\Seen on a non-INBOX source without moving or losing mail", async () => {
-    const src = await mk(`Folders/AuditSeen${n}`);
+    const src = await mk();
     const u1 = await h.imap.appendSeed(src, A);
     const u2 = await h.imap.appendSeed(src, B);
 
@@ -220,13 +233,15 @@ describe("bulk-audit.e2e — mail moves source→target without loss", () => {
   });
 
   // ── honest-counts contract: a partly-missing batch never over-counts ──────
-  it("bulk_move_emails reports an honest success/failed split when some UIDs don't exist", async () => {
-    const src = await mk(`Folders/AuditHonest${n}`);
-    const dst = await mk(`Folders/AuditHonestDst${n}`);
+  it.skipIf(bridgeConfigAvailable())("bulk_move_emails reports an honest success/failed split when some UIDs don't exist", async () => {
+    const src = await mk();
+    const dst = await mk();
     const real = await h.imap.appendSeed(src, A);
+    const missing1 = real + 1_000_000;
+    const missing2 = missing1 + 1;
 
     const r = h.json<BulkResult>(await h.call("bulk_move_emails", {
-      emailIds: [String(real), "8880001", "8880002"],
+      emailIds: [String(real), String(missing1), String(missing2)],
       targetFolder: dst,
       sourceFolder: src,
     }));

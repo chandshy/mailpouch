@@ -71,6 +71,24 @@ describe("IDLE reconnect policy", () => {
     expect(f.message).toMatch(/authentication failed/i);
   });
 
+  it("keeps the dedicated IDLE client on its existing timeout policy", async () => {
+    state.mode = "auth";
+    const ctor = ImapFlow as unknown as ReturnType<typeof vi.fn>;
+    ctor.mockClear();
+    const svc = new SimpleIMAPService();
+    primeConfig(svc);
+    await svc.startIdle();
+
+    await vi.waitFor(() => {
+      expect(ctor).toHaveBeenCalledTimes(1);
+    }, { timeout: 2000, interval: 10 });
+
+    const options = ctor.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(options.connectionTimeout).toBe(30_000);
+    expect(options).not.toHaveProperty("greetingTimeout");
+    expect(options).not.toHaveProperty("socketTimeout");
+  });
+
   it("KEEPS retrying (does not stop) on a transient connection failure, recording the issue", async () => {
     state.mode = "conn";
     const svc = new SimpleIMAPService();
