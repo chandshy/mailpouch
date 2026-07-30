@@ -49,8 +49,15 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
             arch_label: linux-arm64-gnu
+          # Cross-compiled from the arm64 macOS runner. GitHub retired the
+          # macos-13 Intel image, and that label no longer schedules at all —
+          # this job sat queued forever (never once completed) and left the
+          # whole workflow permanently incomplete. Unlike the Linux case this
+          # cross-compile is safe and first-class: the macOS SDK ships both
+          # slices and Apple's clang targets x86_64 from Apple silicon
+          # natively, so no foreign sysroot or package mixing is involved.
           - target: x86_64-apple-darwin
-            os: macos-13   # last Intel runner GitHub provides
+            os: macos-latest
             arch_label: darwin-x64
           - target: aarch64-apple-darwin
             os: macos-latest
