@@ -33,6 +33,32 @@ local Proton Bridge E2E, then posts `success`/`failure` for `HEAD`. It scrubs
 > **must** point at a disposable Proton account — never a real mailbox. There is currently no
 > disposable account provisioned on this machine; the `~/.mailpouch-e2e-*.json` files are
 > leftover harness configs derived from the live account, **not** safe targets.
+>
+> This is not theoretical: the v3.2.0 attestation run (2026-07-14) was pointed at the live
+> mailbox and left 13 `mpE2E-*` scratch mailboxes behind, which were still there on
+> 2026-07-30 and had to be cleaned up by hand.
+
+Note this is a **local, manual** step — there is no `bridge-e2e` workflow. A commit therefore
+has *no* Bridge status until someone runs the script against that exact SHA. "Missing status"
+means the E2E never ran for those bytes, which is different from the E2E failing.
+
+### Waiving the Bridge E2E
+
+When no disposable account is available, a release can be published without Bridge evidence —
+but only as a deliberate, recorded act:
+
+```bash
+gh workflow run publish.yml -f release_tag=vX.Y.Z -f waive_bridge_e2e=true
+```
+
+The waiver is a **`workflow_dispatch` input only**. It is not a repo variable and not a
+default, so it shows up in the run's inputs and cannot become ambient state that quietly
+erodes the gate. The `release: published` trigger has no inputs, so the automatic path stays
+strict. CI and preship attestations are **never** waivable.
+
+Do **not** hand-POST a green `proton-bridge-e2e` status instead. That would make the gate look
+satisfied while proving nothing, and would devalue every future release's attestation. Waiving
+prints a loud `release-attestation WAIVED` line in the job log; forging prints `OK`.
 
 ## npm authentication — trusted publishing (OIDC)
 

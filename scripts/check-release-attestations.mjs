@@ -51,8 +51,27 @@ for (const workflow of REQUIRED_RELEASE_WORKFLOWS) {
   );
 }
 
-const combinedStatus = await github(`/commits/${sha}/status?per_page=100`);
-const bridge = requireSuccessfulBridgeStatus({ expectedSha: sha, combinedStatus });
-process.stdout.write(
-  `release-attestation OK: Proton Bridge E2E (${bridge.url ?? "no URL"})\n`,
-);
+// The Bridge E2E attestation can be waived, but ONLY by an explicit act at
+// release time — `waive_bridge_e2e: true` on a manual workflow_dispatch. It is
+// deliberately not a repo variable or a default: a waiver has to be a decision
+// someone makes and that shows up in the run's inputs, not ambient state that
+// quietly erodes the gate. The `release: published` trigger cannot set it, so
+// the normal path stays strict.
+//
+// The alternative — hand-POSTing a green `proton-bridge-e2e` status — is worse
+// in the way that matters: it makes every future release's attestation
+// unfalsifiable-looking but meaningless. Waiving loudly keeps the signal honest.
+//
+// CI and preship attestations above are NEVER waivable.
+if (process.env.MAILPOUCH_WAIVE_BRIDGE_E2E === "true") {
+  process.stdout.write(
+    "release-attestation WAIVED: Proton Bridge E2E was explicitly waived for this release " +
+      `(commit ${sha}). No live Proton Bridge evidence exists for these bytes.\n`,
+  );
+} else {
+  const combinedStatus = await github(`/commits/${sha}/status?per_page=100`);
+  const bridge = requireSuccessfulBridgeStatus({ expectedSha: sha, combinedStatus });
+  process.stdout.write(
+    `release-attestation OK: Proton Bridge E2E (${bridge.url ?? "no URL"})\n`,
+  );
+}
