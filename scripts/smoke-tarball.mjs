@@ -55,19 +55,27 @@ try {
   // tarball on those runners); npm 11 stopped, breaking `npx <pkg>` on every
   // fresh POSIX install. Inspect the archive, not the installed tree, so any
   // npm version catches the regression. `tar` ships on all CI runners.
-  const tarList = spawnSync("tar", ["-tvzf", tgzPath], { encoding: "utf-8", timeout: 60_000 });
-  if (tarList.error || tarList.status !== 0) {
-    throw new Error(`tar -tvzf ${tgzName} failed: ${tarList.error?.message || tarList.stderr}`);
-  }
-  for (const target of Object.values(pkg.bin)) {
-    const entry = tarList.stdout.split("\n").find((line) => line.endsWith(`package/${target}`));
-    if (!entry) throw new Error(`Tarball is missing bin target package/${target}`);
-    const modeField = entry.trimStart().split(/\s+/)[0];
-    if (!/^-..x/.test(modeField)) {
-      throw new Error(
-        `Tarball bin target package/${target} is not executable (${modeField}); ` +
-        `run \`npm run build\` so scripts/fix-bin-modes.mjs sets 0755 before packing`,
-      );
+  //
+  // POSIX only. Windows has no executable bit (npm generates .cmd/.ps1 shims
+  // instead), and bsdtar there does not emit the POSIX mode column this parses,
+  // so the check cannot be expressed on that platform. The mode still ships
+  // correctly from a Windows pack because npm records 0755 from package.json's
+  // bin metadata — it is the POSIX runners that must assert it.
+  if (process.platform !== "win32") {
+    const tarList = spawnSync("tar", ["-tvzf", tgzPath], { encoding: "utf-8", timeout: 60_000 });
+    if (tarList.error || tarList.status !== 0) {
+      throw new Error(`tar -tvzf ${tgzName} failed: ${tarList.error?.message || tarList.stderr}`);
+    }
+    for (const target of Object.values(pkg.bin)) {
+      const entry = tarList.stdout.split("\n").find((line) => line.endsWith(`package/${target}`));
+      if (!entry) throw new Error(`Tarball is missing bin target package/${target}`);
+      const modeField = entry.trimStart().split(/\s+/)[0];
+      if (!/^-..x/.test(modeField)) {
+        throw new Error(
+          `Tarball bin target package/${target} is not executable (${modeField}); ` +
+          `run \`npm run build\` so scripts/fix-bin-modes.mjs sets 0755 before packing`,
+        );
+      }
     }
   }
 
