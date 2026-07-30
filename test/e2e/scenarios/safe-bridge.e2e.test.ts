@@ -192,6 +192,59 @@ describe.skipIf(!bridgeConfigAvailable())("safe-bridge.e2e — exact-owned messa
     ]);
   }, 90_000);
 
+  /**
+   * The load-bearing safety property of remove_label: unlabelling detaches the
+   * message from Labels/<name> and MUST leave it alive in its source folder.
+   * `deleteFromFolder` implements that as \Deleted + EXPUNGE against the label
+   * mailbox, which is only non-destructive because Proton treats an EXPUNGE
+   * from a Labels/ mailbox as "remove this label", not "delete this message".
+   *
+   * That assumption lives entirely in Bridge, and Bridge has been actively
+   * churning it: BRIDGE-485 (v3.24.0) separated expunge-from-old-location from
+   * the unlabel path, BRIDGE-488 (v3.24.0) reverted RemoveFromMailbox to its
+   * pre-3.23.0 behaviour, and BRIDGE-522 (v3.24.1) put the old unlabel endpoint
+   * behind a feature flag. If any of that flips, remove_label silently becomes
+   * a permanent delete.
+   *
+   * It cannot be covered in the Greenmail lane: there a Labels/ mailbox is an
+   * ordinary folder, so an EXPUNGE genuinely destroys the message and a test
+   * that only asserts "gone from the label" passes either way. Hence bridge-only.
+   */
+  it("remove_label detaches the label and leaves the message alive in its source folder", async () => {
+    const label = await h.scratch!.create("labels");
+    const labelName = label.slice("Labels/".length);
+    const owned = seed("owned-unlabel-survives");
+    const inboxUid = await appendVisible("INBOX", owned);
+
+    h.json(await h.call("move_to_label", {
+      emailId: String(inboxUid),
+      label: labelName,
+      sourceFolder: "INBOX",
+    }));
+    // Labelling is additive — the message is in both places before we unlabel.
+    await waitForSubjects([
+      { folder: "INBOX", subject: owned.subject, present: true },
+      { folder: label, subject: owned.subject, present: true },
+    ]);
+
+    // Labels/ mailboxes have their own UID space, so re-resolve the UID there.
+    const inLabel = await h.imap.searchSubjects(label, [owned.subject]);
+    const labelUid = (inLabel.get(owned.subject) ?? [])[0];
+    expect(labelUid, "message should be resolvable inside the label mailbox").toBeDefined();
+
+    h.json(await h.call("remove_label", {
+      emailId: String(labelUid),
+      label: labelName,
+    }));
+
+    // The invariant: detached from the label, STILL PRESENT in INBOX. The
+    // second assertion is the one that catches an unlabel-turned-delete.
+    await waitForSubjects([
+      { folder: label, subject: owned.subject, present: false },
+      { folder: "INBOX", subject: owned.subject, present: true },
+    ]);
+  }, 90_000);
+
   it("searches a run-owned message without mutating existing mail", async () => {
     const owned = seed("owned-search");
     await appendVisible("INBOX", owned);
