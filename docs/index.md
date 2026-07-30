@@ -8,6 +8,9 @@
 | [SECURITY.md](../SECURITY.md) | Security reviewers | Threat model, rate limiting, escalation design, remote agent authentication (OAuth / service accounts), audit trail, credential storage |
 | [CONTRIBUTING.md](../CONTRIBUTING.md) | Contributors | Build setup, test suite, PR guidelines |
 | [improvement-loop.md](improvement-loop.md) | Maintainers & coding agents | Persistent audit → implement → validate → re-audit workflow |
+| [audit-2026-07-30.md](audit-2026-07-30.md) | Maintainers & security reviewers | Data-loss/safety audit; the `remove_label` survival invariant and why it is bridge-lane only; upstream Proton API & product status |
+| [audit-2026-05-28.md](audit-2026-05-28.md) | Maintainers & security reviewers | Earlier security audit findings (XPORT-*, PERM-*, CRED-* IDs referenced throughout the code) |
+| [quality-audit.md](quality-audit.md) | Maintainers | Per-finding ledger from the Bridge-capability program; grep for `Resolved`/`Acknowledged` |
 | [CHANGELOG.md](../CHANGELOG.md) | All | Version history |
 
 ## Technical Reference (Proton Bridge)
