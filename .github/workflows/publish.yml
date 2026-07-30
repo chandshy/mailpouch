@@ -141,14 +141,21 @@ jobs:
           # supply-chain rationale above (no untrusted script runs with the
           # publish token in scope). dist/ is already built by the step above.
           #
-          # No --provenance flag: under trusted publishing npm generates and
-          # publishes provenance automatically, and passing the flag explicitly
-          # is redundant. Authentication is OIDC via the `id-token: write`
-          # permission above — there is no NODE_AUTH_TOKEN here on purpose.
-          # Requires the npm trusted publisher for this package to name this
-          # repo AND this workflow filename (publish.yml); see docs/releasing.md.
+          # Auth is in transition to OIDC trusted publishing, so BOTH paths are
+          # wired and this step works either way:
+          #   * Trusted publisher configured on npmjs.com -> npm authenticates
+          #     over OIDC using the `id-token: write` permission above, and
+          #     generates provenance automatically (no --provenance needed).
+          #   * Not yet configured -> npm falls back to NODE_AUTH_TOKEN below.
+          # `--provenance` is therefore NOT passed: it is automatic on the OIDC
+          # path, and on the token path it would require extra setup to satisfy.
+          # Once a release has published over OIDC, drop the NODE_AUTH_TOKEN env
+          # below and enable "require 2FA and disallow tokens" on the package.
+          # See docs/releasing.md.
           npm publish --access public --ignore-scripts
         fi
+      env:
+        NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   publish-gpr:
     needs: verify-release

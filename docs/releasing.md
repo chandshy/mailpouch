@@ -36,10 +36,21 @@ local Proton Bridge E2E, then posts `success`/`failure` for `HEAD`. It scrubs
 
 ## npm authentication — trusted publishing (OIDC)
 
-The npm job authenticates with **OIDC trusted publishing**, not a long-lived token. There is
-no `NODE_AUTH_TOKEN` in the publish step by design: short-lived OIDC credentials cannot be
-exfiltrated from a compromised transitive dependency the way a stored token can, and there is
-no token to rotate or accidentally expire mid-release.
+The npm job is **mid-migration to OIDC trusted publishing**, and both auth paths are wired so
+the step works either way:
+
+- **Trusted publisher configured on npmjs.com** → npm authenticates over OIDC using the
+  job's `id-token: write` permission and generates provenance automatically.
+- **Not yet configured** → npm falls back to `NODE_AUTH_TOKEN` (`secrets.NPM_TOKEN`).
+
+The goal is to retire the token entirely. Short-lived OIDC credentials cannot be exfiltrated
+from a compromised transitive dependency the way a stored token can, and there is no token to
+rotate or to silently expire between releases — which is exactly what happened before the
+v3.2.1 release (`npm whoami` → `401`).
+
+**Finish the migration after the first successful OIDC publish:** remove the
+`NODE_AUTH_TOKEN` env from the publish step, delete the `NPM_TOKEN` repo secret, and enable
+*"Require two-factor authentication and disallow tokens"* on the package.
 
 ### One-time setup on npmjs.com
 
