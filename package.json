@@ -1,6 +1,6 @@
 {
   "name": "mailpouch",
-  "version": "3.2.0",
+  "version": "3.2.1",
   "description": "mailpouch — lean, permission-gated MCP access to Proton Mail via Proton Bridge, with up to 86 tools, resources, and prompts.",
   "type": "module",
   "main": "dist/index.js",
@@ -9,7 +9,7 @@
     "mailpouch-settings": "dist/settings-main.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node scripts/fix-bin-modes.mjs",
     "settings": "node dist/settings-main.js",
     "build:clean": "npm run clean && npm run build",
     "dev": "tsc --watch",

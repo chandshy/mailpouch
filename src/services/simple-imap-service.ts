@@ -3252,7 +3252,11 @@ export class SimpleIMAPService {
         // A genuine rejected login is terminal; "too many login attempts" is a
         // transient lockout (caused BY retrying) that DOES clear on its own, so
         // treat that as a backoff case rather than a permanent stop.
-        const throttled = /too many login attempts|rate limit|try again later|temporarily/.test(text);
+        // "no such user" is what Proton Bridge answers while it is still
+        // loading accounts after a (re)start — and retrying a nonexistent
+        // user cannot lock an account out — so it backs off instead of
+        // halting; the 30-minute schedule cap bounds the retry rate.
+        const throttled = /too many login attempts|rate limit|try again later|temporarily|no such user/.test(text);
 
         if (cls.category === 'auth' && !throttled) {
           this.idleAuthFailure = { message: cls.message, at: new Date() };

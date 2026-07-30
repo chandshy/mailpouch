@@ -50,6 +50,27 @@ try {
     throw new Error(`Tarball missing: ${tgzPath}`);
   }
 
+  // The tarball itself must carry the executable bit on every bin target.
+  // npm <= 10 silently chmod +x'ed bin targets at install (masking a 0644
+  // tarball on those runners); npm 11 stopped, breaking `npx <pkg>` on every
+  // fresh POSIX install. Inspect the archive, not the installed tree, so any
+  // npm version catches the regression. `tar` ships on all CI runners.
+  const tarList = spawnSync("tar", ["-tvzf", tgzPath], { encoding: "utf-8", timeout: 60_000 });
+  if (tarList.error || tarList.status !== 0) {
+    throw new Error(`tar -tvzf ${tgzName} failed: ${tarList.error?.message || tarList.stderr}`);
+  }
+  for (const target of Object.values(pkg.bin)) {
+    const entry = tarList.stdout.split("\n").find((line) => line.endsWith(`package/${target}`));
+    if (!entry) throw new Error(`Tarball is missing bin target package/${target}`);
+    const modeField = entry.trimStart().split(/\s+/)[0];
+    if (!/^-..x/.test(modeField)) {
+      throw new Error(
+        `Tarball bin target package/${target} is not executable (${modeField}); ` +
+        `run \`npm run build\` so scripts/fix-bin-modes.mjs sets 0755 before packing`,
+      );
+    }
+  }
+
   // 2. Install the tarball into a fresh dir. `--no-package-lock` keeps the
   //    install lean; `--omit=optional` avoids architecture-specific native
   //    deps that aren't installable on every runner.
@@ -103,6 +124,24 @@ try {
       throw new Error(`${name} --version output did not contain ${PKG_VERSION}: got "${out}"`);
     }
     binOutputs.push(`${name}=${out}`);
+  }
+
+  // The tarball itself must carry the executable bit on every bin target:
+  // npm 11 (Node 24) no longer chmods bin targets at install, so a 0644
+  // target in the tarball breaks `npx <pkg>` on fresh POSIX installs even
+  // though npm <= 10 test runners silently repair it and pass the shim exec
+  // above. Assert the installed target mode directly.
+  if (process.platform !== "win32") {
+    const { statSync } = await import("node:fs");
+    for (const target of Object.values(pkg.bin)) {
+      const installedTarget = join(installDir, "node_modules", pkg.name, target);
+      const mode = statSync(installedTarget).mode & 0o111;
+      if (mode === 0) {
+        throw new Error(
+          `Installed bin target ${target} is not executable (tarball must ship 0755; see scripts/fix-bin-modes.mjs)`,
+        );
+      }
+    }
   }
 
   // The improvement commands are published in package.json, so verify the
