@@ -206,7 +206,15 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
   // binds one Server to one transport, so each session also gets its own Server
   // via opts.createServer. A new session is created when an unsessioned POST
   // carries an `initialize` request; subsequent requests route by session id.
-  const sessions = new Map<string, StreamableHTTPServerTransport>();
+  //
+  // XPORT-016: the session id is a routing handle, NOT a credential. Every entry
+  // records the OAuth client_id that opened it so a session can only ever be
+  // driven by its owner. Without that binding any *other* authenticated agent
+  // could present a peer's Mcp-Session-Id and attach to its transport — reading
+  // the peer's server→client SSE stream on GET, or tearing the session down on
+  // DELETE. The MCP security model is explicit that possession of a state handle
+  // must not be treated as authentication.
+  const sessions = new Map<string, { transport: StreamableHTTPServerTransport; owner: string }>();
 
   // Rate limiters — one bucket per client IP for unauthed endpoints; one
   // bucket per token (sha256-fingerprint) for authed /mcp calls.
@@ -491,14 +499,27 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
       // Route to the per-session transport. Existing session → reuse it.
       const sessionId = req.headers["mcp-session-id"];
       const sid = Array.isArray(sessionId) ? sessionId[0] : sessionId;
-      let transport: StreamableHTTPServerTransport | undefined = sid ? sessions.get(sid) : undefined;
+      const entry = sid ? sessions.get(sid) : undefined;
+      // XPORT-016: a session belongs to the client that opened it. Another
+      // agent's token is a valid credential but not a claim on this session, so
+      // treat a foreign session id as if it did not exist — that both refuses
+      // the request and avoids confirming to a prober that the id is live.
+      let transport: StreamableHTTPServerTransport | undefined =
+        entry && entry.owner === callerClientId ? entry.transport : undefined;
+      if (entry && entry.owner !== callerClientId) {
+        logger.warn(
+          `Rejected session ${sid} presented by ${callerClientId}: owned by a different OAuth client`,
+          "HTTPTransport",
+        );
+      }
 
       if (!transport) {
         // No existing session. Only an `initialize` POST may open one.
         if (req.method === "POST" && isInitializeRequest(body)) {
+          const owner = callerClientId;
           const created = new StreamableHTTPServerTransport({
             sessionIdGenerator: () => randomUUID(),
-            onsessioninitialized: (newId) => { sessions.set(newId, created); },
+            onsessioninitialized: (newId) => { sessions.set(newId, { transport: created, owner }); },
           });
           created.onclose = () => { if (created.sessionId) sessions.delete(created.sessionId); };
           const mcp = opts.createServer ? opts.createServer() : opts.server;
@@ -566,8 +587,8 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
     close: async () => {
       clearInterval(sweep);
       unsubGrantChanges();
-      for (const t of sessions.values()) {
-        try { await t.close(); } catch { /* best effort */ }
+      for (const { transport } of sessions.values()) {
+        try { await transport.close(); } catch { /* best effort */ }
       }
       sessions.clear();
       await new Promise<void>((resolve) => server.close(() => resolve()));

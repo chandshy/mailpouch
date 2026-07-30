@@ -643,6 +643,78 @@ describe("HTTP transport", () => {
       }, 15_000);
     });
 
+    describe("session ownership (XPORT-016)", () => {
+      // The Mcp-Session-Id is a routing handle, not a credential. A second agent
+      // holding its OWN valid token must not be able to attach to a peer's
+      // session by presenting the peer's id — on GET that would hand it the
+      // peer's server->client SSE stream, and on DELETE it would let it tear the
+      // peer's session down.
+      async function twoAuthedClients() {
+        const port = await freePort();
+        const sa = newServiceAccountStore();
+        const a = sa.issue({ name: "session-owner-a", preset: "read_only" });
+        const b = sa.issue({ name: "session-thief-b", preset: "read_only" });
+        handle = await startHttpTransport({ server: buildServer(), port, host: "127.0.0.1", oauthEnabled: true, serviceAccounts: sa });
+        const url = `http://127.0.0.1:${port}`;
+        const tokenA = (await clientCredentialsToken(url, a.account.clientId, a.clientSecret)).token;
+        const tokenB = (await clientCredentialsToken(url, b.account.clientId, b.clientSecret)).token;
+        const init = await mcpInitialize(url, tokenA);
+        expect(init.status).toBe(200);
+        const sid = init.headers.get("mcp-session-id") ?? "";
+        expect(sid).toBeTruthy();
+        return { url, tokenA, tokenB, sid };
+      }
+
+      const listTools = (url: string, token: string, sid: string) =>
+        fetch(`${url}/mcp`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json, text/event-stream",
+            Authorization: `Bearer ${token}`,
+            "mcp-session-id": sid,
+          },
+          body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }),
+        });
+
+      it("refuses a POST that presents another client's session id", async () => {
+        const { url, tokenB, sid } = await twoAuthedClients();
+        const res = await listTools(url, tokenB, sid);
+        // Treated as if the session did not exist, so a prober cannot use the
+        // response to confirm the id is live.
+        expect(res.status).toBe(400);
+        expect(JSON.stringify(await res.json())).toContain("no valid session ID");
+      }, 15_000);
+
+      it("refuses a GET (SSE attach) on another client's session id", async () => {
+        const { url, tokenB, sid } = await twoAuthedClients();
+        const res = await fetch(`${url}/mcp`, {
+          method: "GET",
+          headers: { Accept: "text/event-stream", Authorization: `Bearer ${tokenB}`, "mcp-session-id": sid },
+        });
+        expect(res.status).toBe(400);
+        await res.body?.cancel();
+      }, 15_000);
+
+      it("refuses a DELETE on another client's session id, and the owner keeps working", async () => {
+        const { url, tokenA, tokenB, sid } = await twoAuthedClients();
+        const stolen = await fetch(`${url}/mcp`, {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${tokenB}`, "mcp-session-id": sid },
+        });
+        expect(stolen.status).toBe(400);
+        // The owner's session survived the attempted teardown.
+        const owner = await listTools(url, tokenA, sid);
+        expect(owner.status).toBe(200);
+      }, 15_000);
+
+      it("still routes the owning client to its own session", async () => {
+        const { url, tokenA, sid } = await twoAuthedClients();
+        const res = await listTools(url, tokenA, sid);
+        expect(res.status).toBe(200);
+      }, 15_000);
+    });
+
     it("serves RFC 9728 oauth-protected-resource metadata", async () => {
       const { url } = await startOauth();
       const res = await fetch(`${url}/.well-known/oauth-protected-resource`);

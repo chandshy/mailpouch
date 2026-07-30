@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+
+- MCP sessions on the HTTP transport are now bound to the OAuth client that opened them. A session id is a routing handle, not a credential: previously any *other* authenticated agent could present a peer's `Mcp-Session-Id` and attach to that session — reading the peer's server→client SSE stream on `GET`, or tearing the session down on `DELETE`. A session id presented by a non-owner is now treated as if it did not exist.
+- Cleared all outstanding dependency advisories by moving to `@modelcontextprotocol/sdk` 1.30.0, which resolves patched `fast-uri`, `@hono/node-server`, and `body-parser` transitives. `npm audit` reports no findings.
+
 ## [3.2.0] — 2026-07-12
 
 ### Added
