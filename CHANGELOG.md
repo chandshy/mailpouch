@@ -7,15 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.2.1] — 2026-07-30
+
 ### Security
 
 - MCP sessions on the HTTP transport are now bound to the OAuth client that opened them. A session id is a routing handle, not a credential: previously any *other* authenticated agent could present a peer's `Mcp-Session-Id` and attach to that session — reading the peer's server→client SSE stream on `GET`, or tearing the session down on `DELETE`. A session id presented by a non-owner is now treated as if it did not exist.
-
-## [3.2.1] — 2026-07-14
-
-### Security
-
 - Cleared all outstanding dependency advisories by moving to `@modelcontextprotocol/sdk` 1.30.0, which resolves patched `fast-uri`, `@hono/node-server`, and `body-parser` transitives. `npm audit` reports no findings.
+- Added a Bridge-lane regression test asserting that `remove_label` detaches a label and leaves the message alive in its source folder. Unlabelling is `\Deleted` + `EXPUNGE` against `Labels/<name>`, which is only non-destructive because Proton Bridge maps that to "unlabel" — an upstream-owned invariant Bridge has changed three times across v3.24.0–v3.24.1. Verified holding on Bridge v3.25.0.
 
 ### Fixed
 
