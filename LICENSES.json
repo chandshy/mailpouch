@@ -1,15 +1,15 @@
 {
-  "generatedAt": "2026-07-14",
+  "generatedAt": "2026-07-30",
   "rootPackage": "mailpouch@3.2.0",
   "deps": [
     {
       "name": "@hono/node-server",
-      "version": "1.19.14",
+      "version": "2.0.12",
       "license": "MIT"
     },
     {
       "name": "@modelcontextprotocol/sdk",
-      "version": "1.29.0",
+      "version": "1.30.0",
       "license": "MIT"
     },
     {
@@ -49,7 +49,7 @@
     },
     {
       "name": "ajv",
-      "version": "8.18.0",
+      "version": "8.20.0",
       "license": "MIT"
     },
     {
@@ -84,7 +84,7 @@
     },
     {
       "name": "body-parser",
-      "version": "2.2.2",
+      "version": "2.3.0",
       "license": "MIT"
     },
     {
@@ -120,6 +120,11 @@
     {
       "name": "content-type",
       "version": "1.0.5",
+      "license": "MIT"
+    },
+    {
+      "name": "content-type",
+      "version": "2.0.0",
       "license": "MIT"
     },
     {
@@ -284,7 +289,7 @@
     },
     {
       "name": "fast-uri",
-      "version": "3.1.2",
+      "version": "4.1.1",
       "license": "BSD-3-Clause"
     },
     {
@@ -394,7 +399,7 @@
     },
     {
       "name": "imapflow",
-      "version": "1.4.7",
+      "version": "1.6.1",
       "license": "MIT"
     },
     {
@@ -534,7 +539,7 @@
     },
     {
       "name": "node-abi",
-      "version": "3.89.0",
+      "version": "3.94.0",
       "license": "MIT"
     },
     {
@@ -804,7 +809,7 @@
     },
     {
       "name": "tar-fs",
-      "version": "2.1.4",
+      "version": "2.1.5",
       "license": "MIT"
     },
     {
@@ -834,7 +839,7 @@
     },
     {
       "name": "type-is",
-      "version": "2.0.1",
+      "version": "2.1.0",
       "license": "MIT"
     },
     {
