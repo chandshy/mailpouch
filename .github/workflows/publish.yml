@@ -86,10 +86,15 @@ jobs:
       with:
         ref: ${{ needs.verify-release.outputs.commit_sha }}
 
+    # Node 24 (not the 20.x the other jobs use) is REQUIRED here: npm trusted
+    # publishing needs npm >= 11.5.1 / Node >= 22.14.0 to speak OIDC. Node 20
+    # ships npm 10.x, which silently falls back to token auth. This pin is about
+    # the publish protocol only and is unrelated to the package's own
+    # `engines.node: >=20` support floor.
     - name: Use Node.js
       uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
       with:
-        node-version: '20.x'
+        node-version: '24.x'
         registry-url: 'https://registry.npmjs.org'
         cache: 'npm'
 
@@ -135,10 +140,15 @@ jobs:
           # lifecycle scripts here is also consistent with the BUILD-011
           # supply-chain rationale above (no untrusted script runs with the
           # publish token in scope). dist/ is already built by the step above.
-          npm publish --provenance --access public --ignore-scripts
+          #
+          # No --provenance flag: under trusted publishing npm generates and
+          # publishes provenance automatically, and passing the flag explicitly
+          # is redundant. Authentication is OIDC via the `id-token: write`
+          # permission above — there is no NODE_AUTH_TOKEN here on purpose.
+          # Requires the npm trusted publisher for this package to name this
+          # repo AND this workflow filename (publish.yml); see docs/releasing.md.
+          npm publish --access public --ignore-scripts
         fi
-      env:
-        NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   publish-gpr:
     needs: verify-release
