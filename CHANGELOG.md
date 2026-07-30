@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.1] — 2026-07-14
+
+### Fixed
+
+- Published bin targets (`dist/index.js`, `dist/settings-main.js`) now ship executable in the tarball. npm ≤ 10 silently repaired the missing bit at install; npm 11 (Node 24) does not, which made `npx mailpouch` and the `mailpouch` CLI fail with `Permission denied` on every fresh POSIX install. The build stamps 0755 (`scripts/fix-bin-modes.mjs`) and the tarball smoke test now inspects the archive's modes directly so any npm version catches a regression.
+- IDLE reconnection no longer halts permanently when Proton Bridge answers `no such user` — Bridge returns that while still loading accounts after a (re)start, and the halt bricked the connection until a manual server restart. It now retries on the standard backoff schedule; retrying a nonexistent user cannot lock an account out.
+- The Bridge watchdog can now find the Debian/Ubuntu launcher (`protonmail-bridge`) when attempting an automatic Bridge restart; previously it logged "executable not found" and gave up on stock Linux installs.
+
 ## [3.2.0] — 2026-07-12
 
 ### Added

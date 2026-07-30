@@ -11,7 +11,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // connect() behaviour is toggled per test.
-const state: { mode: "auth" | "throttle" | "conn" | "ok" } = { mode: "auth" };
+const state: { mode: "auth" | "throttle" | "no-user" | "conn" | "ok" } = { mode: "auth" };
 
 vi.mock("imapflow", () => {
   const ImapFlow = vi.fn(function () {
@@ -25,6 +25,7 @@ vi.mock("imapflow", () => {
         if (state.mode === "ok") return Promise.resolve();
         if (state.mode === "auth") return Promise.reject(Object.assign(new Error("login"), { authenticationFailed: true }));
         if (state.mode === "throttle") return Promise.reject(Object.assign(new Error("NO too many login attempts"), { responseText: "too many login attempts" }));
+        if (state.mode === "no-user") return Promise.reject(Object.assign(new Error("NO no such user"), { responseText: "no such user", authenticationFailed: true }));
         return Promise.reject(Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }));
       }),
     };
@@ -116,6 +117,24 @@ describe("IDLE reconnect policy", () => {
       expect((svc as unknown as { idleLastIssue: unknown }).idleLastIssue).not.toBeNull();
     }, { timeout: 2000, interval: 10 });
 
+    expect((svc as unknown as { idleActive: boolean }).idleActive).toBe(true);
+    expect((svc as unknown as { idleAuthFailure: unknown }).idleAuthFailure).toBeNull();
+
+    svc.stopIdle();
+  });
+
+  it("treats 'no such user' (Bridge still loading accounts) as transient, NOT a permanent stop", async () => {
+    state.mode = "no-user";
+    const svc = new SimpleIMAPService();
+    primeConfig(svc);
+    await svc.startIdle();
+
+    await vi.waitFor(() => {
+      expect((svc as unknown as { idleLastIssue: unknown }).idleLastIssue).not.toBeNull();
+    }, { timeout: 2000, interval: 10 });
+
+    // Bridge answers "no such user" while it is still loading accounts after
+    // a restart; halting here bricked the connection until a manual restart.
     expect((svc as unknown as { idleActive: boolean }).idleActive).toBe(true);
     expect((svc as unknown as { idleAuthFailure: unknown }).idleAuthFailure).toBeNull();
 

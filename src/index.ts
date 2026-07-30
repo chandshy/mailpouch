@@ -2256,8 +2256,12 @@ async function launchProtonBridge(bridgeConfig: ProtonMailConfig = config): Prom
   } else {
     const linuxCandidates = [
       "/usr/bin/proton-bridge",
+      // Debian/Ubuntu package installs the launcher as protonmail-bridge.
+      "/usr/bin/protonmail-bridge",
       "/usr/local/bin/proton-bridge",
+      "/usr/local/bin/protonmail-bridge",
       `${homedir()}/.local/bin/proton-bridge`,
+      `${homedir()}/.local/bin/protonmail-bridge`,
       "/opt/proton-bridge/proton-bridge",
     ];
     const linuxFound = linuxCandidates.find(p => existsSync(p));
