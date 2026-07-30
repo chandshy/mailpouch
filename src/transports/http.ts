@@ -33,7 +33,7 @@ import { createServer as createSecureServer } from "https";
 import { readFileSync } from "fs";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import type { Server as McpServer } from "@modelcontextprotocol/sdk/server/index.js";
 import { logger } from "../utils/logger.js";
 import { OAuthStore } from "./oauth-store.js";
@@ -507,8 +507,13 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
       let transport: StreamableHTTPServerTransport | undefined =
         entry && entry.owner === callerClientId ? entry.transport : undefined;
       if (entry && entry.owner !== callerClientId) {
+        // Log a short digest, never the id itself: a live session id is a
+        // routing secret, and an attacker probing ids would otherwise turn the
+        // log file into a dump of valid ones. The digest is enough to correlate
+        // repeated probes against the same session.
+        const sidDigest = createHash("sha256").update(sid!).digest("hex").slice(0, 12);
         logger.warn(
-          `Rejected session ${sid} presented by ${callerClientId}: owned by a different OAuth client`,
+          `Rejected session ${sidDigest} presented by ${callerClientId}: owned by a different OAuth client`,
           "HTTPTransport",
         );
       }
