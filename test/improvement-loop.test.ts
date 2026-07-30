@@ -54,7 +54,7 @@ function auditPath(name: string): string {
   return join(".improvement-loop", "audits", name);
 }
 
-function makeItem(id: string, command = [process.execPath, "-e", "process.exit(0)"]) {
+function makeItem(id: string, command = [process.execPath, "-e", "process.exit(0)"], timeoutMs = 1_000) {
   return {
     id,
     priority: "P1",
@@ -62,7 +62,7 @@ function makeItem(id: string, command = [process.execPath, "-e", "process.exit(0
     area: "test",
     summary: `Exercise ${id} safely.`,
     acceptanceCriteria: ["A focused regression passes."],
-    validation: [{ label: "check", command, timeoutMs: 1_000 }],
+    validation: [{ label: "check", command, timeoutMs }],
     status: "queued",
     createdAt: "2026-07-11T00:00:00.000Z",
   };
@@ -87,7 +87,15 @@ async function waitFor(condition: () => boolean, timeoutMs = 3_000): Promise<voi
 }
 
 afterEach(() => {
-  for (const root of temporaryRoots.splice(0)) rmSync(root, { recursive: true, force: true });
+  // maxRetries is load-bearing on Windows. These tests spawn real Node
+  // processes inside the temp root; a child that has just been killed or has
+  // just exited can still hold a handle briefly, and the directory removal
+  // then fails with `EBUSY: resource busy or locked, rmdir`, failing an
+  // otherwise-passing test from teardown. `force` only suppresses ENOENT, not
+  // EBUSY — retrying is Node's documented remedy for exactly this case.
+  for (const root of temporaryRoots.splice(0)) {
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
 });
 
 describe("improvement-loop runner", () => {
@@ -227,17 +235,49 @@ describe("improvement-loop runner", () => {
   it("releases the state lock while validation runs, so a material blocker can win safely", async () => {
     const root = createRoot();
     expectOk(run(root, "init"));
-    const slow = [process.execPath, "-e", "setTimeout(() => process.exit(0), 1500)"];
-    const audit = writeAudit(root, "slow.json", [makeItem("LOOP-001", slow)]);
+
+    // The check blocks until the test creates this file, rather than sleeping
+    // for a fixed period. The old form slept 1500ms against a 1000ms validation
+    // timeout, so the "validation is still running" precondition held only by
+    // wall-clock luck. Gating on a file makes it true by construction on any
+    // runner at any speed, which is what this test actually needs to assert.
+    //
+    // (The flake this test exhibited on Windows CI was NOT caused by that
+    // window closing — it was `acquireLock` failing instantly when `validate`
+    // still held the lock. That is fixed in scripts/improvement-loop.mjs; this
+    // gate removes the remaining timing assumption rather than papering over it.)
+    //
+    // The self-imposed deadline is a backstop so a bug here can never hang the
+    // suite — it is not the mechanism, and is far longer than the gate ever
+    // stays closed in practice.
+    const release = join(root, "release-validation");
+    const gated = [
+      process.execPath,
+      "-e",
+      `const fs=require("node:fs");const f=${JSON.stringify(release)};` +
+        "const deadline=Date.now()+30000;" +
+        "(function poll(){ if (fs.existsSync(f) || Date.now() > deadline) process.exit(0); setTimeout(poll, 25); })();",
+    ];
+    const audit = writeAudit(root, "slow.json", [makeItem("LOOP-001", gated, 30_000)]);
     expectOk(run(root, "re-audit", "--audit", audit, "--summary", "Initial audit."));
     expectOk(run(root, "import", audit, "--approve-commands"));
     expectOk(run(root, "begin", "LOOP-001"));
 
     const validating = runAsync(root, "validate", "LOOP-001");
     await waitFor(() => Boolean(readSnapshot(root).state.validationRun));
+
+    // The check is still running and cannot finish yet, so this exercises the
+    // real property: the state lock is NOT held for the duration of validation.
     expectOk(run(root, "block", "LOOP-001", "--summary", "External dependency is unavailable."));
+
+    writeFileSync(release, "go");
     const result = await validating;
+
+    // Non-zero because the run is DISCARDED (the active item was blocked while
+    // checks ran), not because the check failed or timed out — the check now
+    // exits 0. See the `validation_discarded` path in scripts/improvement-loop.mjs.
     expect(result.code).not.toBe(0);
+    expect(result.stdout).toContain("Validation discarded");
     expect(readSnapshot(root).backlog.items[0].status).toBe("blocked");
     expect(readSnapshot(root).state.validationRun).toBeNull();
   });

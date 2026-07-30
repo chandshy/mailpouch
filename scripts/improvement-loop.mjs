@@ -39,6 +39,17 @@ const ITEM_STATUSES = new Set(["queued", "in_progress", "completed", "blocked"])
 const DEFAULT_CHECK_TIMEOUT_MS = 15 * 60 * 1000;
 const MAX_CHECK_TIMEOUT_MS = 4 * 60 * 60 * 1000;
 const LOCK_INITIALIZATION_GRACE_MS = 10 * 1000;
+/** How long to wait out a lock held by a live process before giving up. */
+const LOCK_CONTENTION_BUDGET_MS = 5 * 1000;
+/**
+ * Much shorter budget for a lock directory that exists but has no owner.json
+ * yet. That gap is the microseconds between one process's mkdir and its owner
+ * write — if the file has not appeared almost immediately, the writer died
+ * mid-initialization and waiting the full contention budget only delays a
+ * failure that is not going to resolve.
+ */
+const LOCK_INITIALIZING_WAIT_MS = 250;
+const LOCK_CONTENTION_POLL_MS = 25;
 
 function now() {
   return new Date().toISOString();
@@ -188,12 +199,38 @@ function readLockOwner(lockPath) {
   }
 }
 
+/** Block the calling thread. acquireLock is synchronous, so this cannot await. */
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
 function acquireLock(root, { initializing = false } = {}) {
   const p = initializing ? paths(root) : requireLayout(root);
   if (initializing) requireDirectory(p.directory, "Improvement-loop directory");
   const lockPath = p.lock;
   const token = randomUUID();
-  for (let attempt = 0; attempt < 4; attempt++) {
+  // Contention by a LIVE holder is transient and must be waited out, not
+  // failed on. Commands hold this lock only for short mutate() sections —
+  // `validate` in particular deliberately releases it while checks run — so a
+  // second command frequently arrives microseconds into someone else's
+  // critical section. The previous code failed instantly in that case: the
+  // retry loop looked like it handled contention, but every branch called
+  // fail(), which exits the process, so nothing was ever retried except an
+  // lstat error. That surfaced as a flaky "block exited 1" on loaded Windows
+  // CI runners, where the window between a snapshot becoming visible on disk
+  // and its writer releasing the lock is widest.
+  //
+  // Waiting is bounded so a genuinely long-running loop still reports the same
+  // "already running" error, just after a grace period instead of immediately.
+  const startedAt = Date.now();
+  const waitOrFail = (message, budgetMs) => {
+    if (Date.now() - startedAt < budgetMs) {
+      sleepSync(LOCK_CONTENTION_POLL_MS);
+      return;
+    }
+    fail(message);
+  };
+  for (;;) {
     try {
       mkdirSync(lockPath, { mode: 0o700 });
       const owner = { pid: process.pid, token, createdAt: now() };
@@ -209,6 +246,9 @@ function acquireLock(root, { initializing = false } = {}) {
       try {
         lockStat = lstatSync(lockPath);
       } catch {
+        // Released between mkdir and lstat — retry immediately, but still
+        // under the deadline so a pathological churn cannot spin forever.
+        waitOrFail("Could not acquire the improvement-loop lock.", LOCK_CONTENTION_BUDGET_MS);
         continue;
       }
       if (!lockStat.isDirectory() || lockStat.isSymbolicLink()) {
@@ -216,22 +256,24 @@ function acquireLock(root, { initializing = false } = {}) {
       }
       const owner = readLockOwner(lockPath);
       if (owner && isProcessAlive(owner.pid)) {
-        fail(`Improvement loop is already running (pid ${owner.pid}).`);
+        waitOrFail(`Improvement loop is already running (pid ${owner.pid}).`, LOCK_CONTENTION_BUDGET_MS);
+        continue;
       }
       // A process may have created the directory but not written owner.json.
       // Treat that short window as contended rather than deleting a live lock.
       if (!owner && Date.now() - lockStat.mtimeMs < LOCK_INITIALIZATION_GRACE_MS) {
-        fail("Improvement loop lock is being initialized; retry shortly.");
+        waitOrFail("Improvement loop lock is being initialized; retry shortly.", LOCK_INITIALIZING_WAIT_MS);
+        continue;
       }
       // Do not automatically reclaim a dead or malformed owner. Two
       // contenders can otherwise race between stale detection and replacement,
       // allowing one to remove the other's newly acquired lock. Failing closed
-      // leaves an operator an explicit, auditable recovery decision.
+      // leaves an operator an explicit, auditable recovery decision. This case
+      // is NOT retried — a stale lock never clears on its own.
       const detail = owner ? `stale owner pid ${owner.pid}` : "missing or invalid owner metadata";
       fail(`Improvement-loop lock has ${detail}. Confirm no loop process is running, then remove ${lockPath} manually before retrying.`);
     }
   }
-  fail("Could not acquire the improvement-loop lock.");
 }
 
 function normalizeCheck(value, itemId, index) {
