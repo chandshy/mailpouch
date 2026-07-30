@@ -36,21 +36,21 @@ local Proton Bridge E2E, then posts `success`/`failure` for `HEAD`. It scrubs
 
 ## npm authentication — trusted publishing (OIDC)
 
-The npm job is **mid-migration to OIDC trusted publishing**, and both auth paths are wired so
-the step works either way:
+The npm job authenticates with **OIDC trusted publishing**. There is deliberately **no
+`NODE_AUTH_TOKEN`** in the publish step — a token in scope takes precedence over OIDC, so
+leaving one set would silently keep using classic auth and skip the provenance attestation
+that trusted publishing generates automatically.
 
-- **Trusted publisher configured on npmjs.com** → npm authenticates over OIDC using the
-  job's `id-token: write` permission and generates provenance automatically.
-- **Not yet configured** → npm falls back to `NODE_AUTH_TOKEN` (`secrets.NPM_TOKEN`).
+Short-lived OIDC credentials cannot be exfiltrated from a compromised transitive dependency
+the way a stored token can, and there is no token to rotate or to silently expire between
+releases — which is exactly what happened before v3.2.1 (`npm whoami` → `401`).
 
-The goal is to retire the token entirely. Short-lived OIDC credentials cannot be exfiltrated
-from a compromised transitive dependency the way a stored token can, and there is no token to
-rotate or to silently expire between releases — which is exactly what happened before the
-v3.2.1 release (`npm whoami` → `401`).
+**Configured 2026-07-30** for `chandshy/mailpouch` → `publish.yml`, allowed actions
+*npm publish* + *npm stage publish*, package public.
 
-**Finish the migration after the first successful OIDC publish:** remove the
-`NODE_AUTH_TOKEN` env from the publish step, delete the `NPM_TOKEN` repo secret, and enable
-*"Require two-factor authentication and disallow tokens"* on the package.
+**Remaining hardening**, once a release has published over OIDC: delete the now-unused
+`NPM_TOKEN` repo secret, and enable *"Require two-factor authentication and disallow tokens"*
+on the package so a leaked classic token can never publish.
 
 ### One-time setup on npmjs.com
 

@@ -141,21 +141,19 @@ jobs:
           # supply-chain rationale above (no untrusted script runs with the
           # publish token in scope). dist/ is already built by the step above.
           #
-          # Auth is in transition to OIDC trusted publishing, so BOTH paths are
-          # wired and this step works either way:
-          #   * Trusted publisher configured on npmjs.com -> npm authenticates
-          #     over OIDC using the `id-token: write` permission above, and
-          #     generates provenance automatically (no --provenance needed).
-          #   * Not yet configured -> npm falls back to NODE_AUTH_TOKEN below.
-          # `--provenance` is therefore NOT passed: it is automatic on the OIDC
-          # path, and on the token path it would require extra setup to satisfy.
-          # Once a release has published over OIDC, drop the NODE_AUTH_TOKEN env
-          # below and enable "require 2FA and disallow tokens" on the package.
-          # See docs/releasing.md.
+          # Auth is OIDC trusted publishing — the npm trusted publisher for this
+          # package names chandshy/mailpouch + publish.yml, and the job carries
+          # `id-token: write` above. There is deliberately NO NODE_AUTH_TOKEN
+          # here: a token in scope would take precedence, so leaving one set
+          # would silently keep using classic auth and skip the automatic
+          # provenance that trusted publishing generates.
+          #
+          # No --provenance flag: it is automatic under trusted publishing.
+          #
+          # Requires Node >= 22.14 / npm >= 11.5.1 (pinned to 24.x above) —
+          # older npm silently falls back to token auth. See docs/releasing.md.
           npm publish --access public --ignore-scripts
         fi
-      env:
-        NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   publish-gpr:
     needs: verify-release
