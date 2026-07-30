@@ -9,6 +9,13 @@ on:
         description: Existing v<package-version> tag to publish
         required: true
         type: string
+      waive_bridge_e2e:
+        description: >-
+          Publish WITHOUT live Proton Bridge E2E evidence. Only for releases where no
+          disposable Bridge account is available. CI and preship attestations still apply.
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   verify-release:
@@ -44,6 +51,9 @@ jobs:
         GITHUB_API_URL: ${{ github.api_url }}
         GITHUB_REPOSITORY: ${{ github.repository }}
         GITHUB_TOKEN: ${{ github.token }}
+        # Only ever set by an explicit manual dispatch — the `release: published`
+        # trigger has no inputs, so that path can never waive.
+        MAILPOUCH_WAIVE_BRIDGE_E2E: ${{ inputs.waive_bridge_e2e }}
       run: node scripts/check-release-attestations.mjs "$COMMIT_SHA"
 
     - name: Use Node.js
