@@ -2710,9 +2710,14 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
           }
           (existing.mcpServers as Record<string, unknown>)["mailpouch"] = built.entry;
 
-          // Write atomically via temp file + rename
+          // Atomic write via temp file + rename. claude_desktop_config.json
+          // routinely holds API keys for OTHER MCP servers, and renameSync
+          // replaces the inode — so writing the temp file at the umask default
+          // would silently widen a user's hardened 0600 config to 0644 and
+          // expose someone else's secrets. Match the 0600 hygiene used by the
+          // write-claude-code sibling and by config/loader.ts.
           const tmpPath = claudeConfigPath + ".tmp." + randomBytes(6).toString("hex");
-          writeFileSync(tmpPath, JSON.stringify(existing, null, 2), "utf8");
+          writeFileSync(tmpPath, JSON.stringify(existing, null, 2), { encoding: "utf8", mode: 0o600 });
           renameSync(tmpPath, claudeConfigPath);
 
           json(res, 200, { ok: true, configPath: claudeConfigPath, transport: built.transport, entry: built.entry, ...(built.coercedToHttp ? { coercedToHttp: true } : {}), ...(built.warning ? { warning: built.warning } : {}) });
