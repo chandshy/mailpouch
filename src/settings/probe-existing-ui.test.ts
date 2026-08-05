@@ -1,0 +1,111 @@
+/**
+ * These tests exist because the *helper* being tested was not enough.
+ *
+ * instanceIdMatches() had unit tests from the day the nonce check landed, but
+ * nothing exercised the probe that calls it. Reverting the call site to the
+ * original `typeof parsed.hasConfig === "boolean"` left the whole suite green
+ * while restoring the vulnerability: whoever bound the settings port first
+ * became the URL mailpouch advertises to the tray and to agents — the page
+ * where the user is asked to type their Bridge password.
+ *
+ * So each test here stands up a REAL listener on a real port and asserts what
+ * the probe decides about it. Reverting the identity check turns the first
+ * test red, which is the only property that makes this suite worth running.
+ */
+
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import http from "node:http";
+import type { AddressInfo } from "node:net";
+import { mkdtempSync, rmSync } from "fs";
+import { homedir } from "os";
+import { join } from "path";
+import { probeExistingMailpouchUi } from "./probe-existing-ui.js";
+import { publishInstanceId, clearInstanceId } from "./instance-identity.js";
+
+/** Stand up a listener that answers GET /api/status with `payload`. */
+async function listener(payload: string | (() => string)): Promise<{ port: number; close: () => Promise<void> }> {
+  const server = http.createServer((req, res) => {
+    if (req.url !== "/api/status") { res.statusCode = 404; res.end(); return; }
+    res.setHeader("content-type", "application/json");
+    res.end(typeof payload === "function" ? payload() : payload);
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+  const port = (server.address() as AddressInfo).port;
+  return {
+    port,
+    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+  };
+}
+
+describe("settings-UI probe identity", () => {
+  let directory: string;
+  let previousConfigPath: string | undefined;
+  let stop: (() => Promise<void>) | null = null;
+
+  beforeEach(() => {
+    directory = mkdtempSync(join(homedir(), ".mailpouch-probe-test-"));
+    previousConfigPath = process.env.MAILPOUCH_CONFIG;
+    process.env.MAILPOUCH_CONFIG = join(directory, ".mailpouch.json");
+  });
+
+  afterEach(async () => {
+    if (stop) { await stop(); stop = null; }
+    clearInstanceId();
+    if (previousConfigPath === undefined) delete process.env.MAILPOUCH_CONFIG;
+    else process.env.MAILPOUCH_CONFIG = previousConfigPath;
+    rmSync(directory, { recursive: true, force: true });
+  });
+
+  // THE regression test. This is the exact payload the original bug accepted.
+  it("refuses a squatter that echoes hasConfig but has no nonce", async () => {
+    publishInstanceId(); // a real UI is registered, but not the squatter
+    const l = await listener(JSON.stringify({ hasConfig: true, version: "3.2.1" }));
+    stop = l.close;
+    expect(await probeExistingMailpouchUi(l.port)).toBeNull();
+  });
+
+  it("refuses a squatter that guesses a wrong nonce", async () => {
+    publishInstanceId();
+    const l = await listener(JSON.stringify({ hasConfig: true, instanceId: "f".repeat(64) }));
+    stop = l.close;
+    expect(await probeExistingMailpouchUi(l.port)).toBeNull();
+  });
+
+  it("accepts the genuine UI echoing the published nonce", async () => {
+    const id = publishInstanceId();
+    const l = await listener(JSON.stringify({ hasConfig: true, instanceId: id }));
+    stop = l.close;
+    expect(await probeExistingMailpouchUi(l.port)).toBe(`http://localhost:${l.port}`);
+  });
+
+  it("refuses a listener that is not serving JSON at all", async () => {
+    publishInstanceId();
+    const l = await listener("<html>not mailpouch</html>");
+    stop = l.close;
+    expect(await probeExistingMailpouchUi(l.port)).toBeNull();
+  });
+
+  it("refuses a listener that floods the probe with a huge body", async () => {
+    const id = publishInstanceId();
+    // Valid nonce, but buried past the 4 KB cap — the cap must win.
+    const l = await listener(() => " ".repeat(8192) + JSON.stringify({ instanceId: id }));
+    stop = l.close;
+    expect(await probeExistingMailpouchUi(l.port)).toBeNull();
+  });
+
+  it("returns null when nothing is listening on the port", async () => {
+    publishInstanceId();
+    // Bind and immediately release, so the port is almost certainly free.
+    const l = await listener("{}");
+    const freePort = l.port;
+    await l.close();
+    expect(await probeExistingMailpouchUi(freePort)).toBeNull();
+  });
+
+  it("refuses even a correct-looking response when no instance has published", async () => {
+    // No publishInstanceId() — nothing legitimate is running.
+    const l = await listener(JSON.stringify({ hasConfig: true, instanceId: "a".repeat(64) }));
+    stop = l.close;
+    expect(await probeExistingMailpouchUi(l.port)).toBeNull();
+  });
+});
