@@ -9,9 +9,9 @@ The pitch in one line: if you picked Proton Mail because you didn't want a third
 It is real because the primitives are real: OAuth 2.1 with PKCE S256, RFC 7591 dynamic client registration, RFC 8707 resource indicators, RFC 9728 protected-resource metadata, and an OAuth `client_credentials` grant so headless agents authenticate too — every agent gets its own gated, revocable identity. Credentials live in the OS keychain. A local FTS5 index with BM25 ranking handles phrase, boolean, prefix, and column-filter queries so your search terms never leave your laptop. Desktop notifications use native `osascript` / `notify-send` / `powershell.exe` with no added dependency; webhook dispatch auto-detects CloudEvents 1.0, Slack, or Discord, signs with HMAC, and retries with eight-attempt exponential backoff. So how do you point it at your Bridge install and wire up a client?
 
 [![CI](https://github.com/chandshy/mailpouch/actions/workflows/ci.yml/badge.svg)](https://github.com/chandshy/mailpouch/actions/workflows/ci.yml)
-[![npm version](https://img.shields.io/badge/npm-v3.2.1-blue.svg)](https://www.npmjs.com/package/mailpouch)
+[![npm version](https://img.shields.io/badge/npm-v4.0.0-blue.svg)](https://www.npmjs.com/package/mailpouch)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Node.js](https://img.shields.io/badge/node-%3E%3D20.0.0-brightgreen.svg)](https://nodejs.org/)
+[![Node.js](https://img.shields.io/badge/node-%3E%3D22.0.0-brightgreen.svg)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-6.0-blue.svg)](https://www.typescriptlang.org/)
 [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-1.29+-green.svg)](https://github.com/modelcontextprotocol/sdk)
 [![Tests](https://img.shields.io/badge/tests-Vitest-brightgreen.svg)](#development)
@@ -113,8 +113,8 @@ With read-only permissions (the default), Claude can read, search, and analyse y
 
 | Requirement | Version | Notes |
 |---|---|---|
-| **Node.js** | >= 20.0.0 | Check with `node --version` · [nodejs.org](https://nodejs.org) |
-| **npm** | >= 9.0.0 | Bundled with Node.js |
+| **Node.js** | >= 22.0.0 | Check with `node --version` · [nodejs.org](https://nodejs.org) |
+| **npm** | >= 10.0.0 | Bundled with Node.js |
 | **Proton Bridge** | >= 3.22.0 | Must be running and signed in · [proton.me/mail/bridge](https://proton.me/mail/bridge) |
 | **Proton Mail account** | **Paid plan** | Bridge requires a paid Proton plan (Mail Plus, Unlimited, etc.) |
 | **MCP client** | Latest | Claude Desktop, Cline, or any MCP-compatible host · [claude.ai/download](https://claude.ai/download) |

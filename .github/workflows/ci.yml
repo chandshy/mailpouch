@@ -18,7 +18,7 @@ jobs:
     #
     # Windows is pinned to 2022 rather than windows-latest. The latter moved to
     # Server 2025 / Visual Studio 2026, which node-gyp 10 cannot discover when
-    # better-sqlite3 needs a source build (for example when a fresh Node 20
+    # better-sqlite3 needs a source build (for example when a fresh Node
     # patch has no prebuilt binary). Windows 2022 supplies the supported VS
     # 2022 C++ toolchain while preserving the same win32-x64 coverage.
     #
@@ -33,7 +33,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-2022]
-        node-version: [20.x, 22.x]
+        node-version: [22.x, 24.x]
 
     name: ${{ matrix.os }} / node ${{ matrix.node-version }}
 

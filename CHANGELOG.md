@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.0] — 2026-08-05
+
+### Breaking
+
+- **Node 20 is no longer supported. The minimum is now Node 22.** Node 20 reached end of life on 2026-04-30 and no longer receives security patches, which made the runtime the weakest link in an otherwise fully patched tree. `engines.node` is now `>=22.0.0` and `engines.npm` is `>=10.0.0`; the CI matrix moves from Node 20/22 to 22/24. There is no code-level migration — users on Node 20 must upgrade Node.
+
+### Changed
+
+- `better-sqlite3` 12.11.1 → 13.0.2. This is what forced the timing: 13.x refuses to install on Node 20 (`EBADENGINE` on all three platforms), which is why the dependabot PR for it could never go green against an `engines.node: >=20.0.0` package. It also drops a large transitive subtree — the license inventory falls from 177 prod deps to 145.
+- `nodemailer` 9.0.3 → 9.0.4, `@types/better-sqlite3` 7.6.13 → 9.6.0.
+- Raised the `overrides` floors to the versions that actually carry the fixes shipped earlier in this release — `fast-uri` >=4.1.2, `hono` >=4.12.34, and a new `ip-address` >=10.4.0 entry — so a transitive cannot quietly resolve back to a vulnerable release once the advisory is no longer fresh.
+
 ### Security
 
 - **mailpouch no longer adopts another process's settings URL.** This is the headline change, and it replaces a mechanism rather than patching one.
