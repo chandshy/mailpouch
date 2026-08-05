@@ -86,7 +86,7 @@ describe("settings-UI probe identity", () => {
   it("accepts the genuine UI answering the challenge", async () => {
     publishInstanceId();
     const l = await listener((challenge) =>
-      JSON.stringify({ hasConfig: true, instanceProof: answerChallenge(challenge) }));
+      JSON.stringify({ hasConfig: true, instanceProof: answerChallenge(challenge, l.port) }));
     stop = l.close;
     expect(await probeExistingMailpouchUi(l.port)).toBe(`http://localhost:${l.port}`);
   });
@@ -101,10 +101,35 @@ describe("settings-UI probe identity", () => {
     expect(await probeExistingMailpouchUi(l.port)).toBeNull();
   });
 
+  // THE relay test. A squatter on the probed port forwards our challenge to
+  // the real instance on its fallback port — /api/status is unauthenticated,
+  // so the real instance answers anyone — and echoes the reply back. Before
+  // the proof was bound to the port, that won. Now the relayed proof answers
+  // for the wrong port and is refused.
+  it("refuses a squatter relaying the challenge to a real instance on another port", async () => {
+    publishInstanceId();
+
+    // The real instance, on a different port, answering honestly for itself.
+    const real = await listener((challenge) =>
+      JSON.stringify({ hasConfig: true, instanceProof: answerChallenge(challenge, real.port) }));
+
+    // The squatter: forwards whatever challenge it is given to `real`, and
+    // returns the real instance's proof verbatim.
+    const squatter = await listener((challenge) =>
+      JSON.stringify({ hasConfig: true, instanceProof: answerChallenge(challenge, real.port) }));
+
+    stop = async () => { await squatter.close(); await real.close(); };
+
+    expect(await probeExistingMailpouchUi(squatter.port)).toBeNull();
+    // Sanity: the real instance on its own port still verifies, so the test
+    // is proving port-binding rather than a blanket failure.
+    expect(await probeExistingMailpouchUi(real.port)).toBe(`http://localhost:${real.port}`);
+  });
+
   // A proof is bound to the challenge it answered; a stale one is worthless.
   it("refuses a squatter replaying a proof from an earlier challenge", async () => {
     publishInstanceId();
-    const stale = answerChallenge("an-old-challenge");
+    const stale = answerChallenge("an-old-challenge", 8766);
     const l = await listener(JSON.stringify({ hasConfig: true, instanceProof: stale }));
     stop = l.close;
     expect(await probeExistingMailpouchUi(l.port)).toBeNull();
@@ -121,7 +146,7 @@ describe("settings-UI probe identity", () => {
     publishInstanceId();
     // Valid proof, but buried past the 4 KB cap — the cap must win.
     const l = await listener((challenge) =>
-      " ".repeat(8192) + JSON.stringify({ instanceProof: answerChallenge(challenge) }));
+      " ".repeat(8192) + JSON.stringify({ instanceProof: answerChallenge(challenge, l.port) }));
     stop = l.close;
     expect(await probeExistingMailpouchUi(l.port)).toBeNull();
   });

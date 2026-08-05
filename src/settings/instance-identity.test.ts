@@ -23,6 +23,7 @@ import {
 } from "./instance-identity.js";
 
 describe("settings instance identity", () => {
+  const PORT = 8766;
   let directory: string;
   let previousConfigPath: string | undefined;
 
@@ -45,13 +46,13 @@ describe("settings instance identity", () => {
     expect(id).toBeTruthy();
     expect(currentInstanceId()).toBe(id);
     const c = newChallenge();
-    expect(instanceProofMatches(c, answerChallenge(c))).toBe(true);
+    expect(instanceProofMatches(c, PORT, answerChallenge(c, PORT))).toBe(true);
   });
 
   it("never returns the nonce itself — only a proof", () => {
     const id = publishInstanceId();
     const c = newChallenge();
-    const answer = answerChallenge(c);
+    const answer = answerChallenge(c, PORT);
     expect(answer).toBeTruthy();
     expect(answer).not.toBe(id);
     expect(answer).not.toContain(id);
@@ -60,30 +61,30 @@ describe("settings instance identity", () => {
   it("rejects a proof replayed against a different challenge", () => {
     publishInstanceId();
     const first = newChallenge();
-    const answer = answerChallenge(first);
-    expect(instanceProofMatches(first, answer)).toBe(true);
+    const answer = answerChallenge(first, PORT);
+    expect(instanceProofMatches(first, PORT, answer)).toBe(true);
     expect(instanceProofMatches(newChallenge(), answer)).toBe(false);
   });
 
   it("refuses to answer a missing or oversized challenge", () => {
     publishInstanceId();
-    expect(answerChallenge(undefined)).toBeNull();
-    expect(answerChallenge("")).toBeNull();
-    expect(answerChallenge(123)).toBeNull();
-    expect(answerChallenge("x".repeat(129))).toBeNull();
+    expect(answerChallenge(undefined, PORT)).toBeNull();
+    expect(answerChallenge("", PORT)).toBeNull();
+    expect(answerChallenge(123, PORT)).toBeNull();
+    expect(answerChallenge("x".repeat(129), PORT)).toBeNull();
   });
 
   // The whole point: a squatter can echo any SHAPE it likes, but not the value.
   it("rejects a listener that forges the response shape but not the proof", () => {
     publishInstanceId();
     const c = newChallenge();
-    expect(instanceProofMatches(c, "attacker-supplied")).toBe(false);
-    expect(instanceProofMatches(c, true)).toBe(false);
-    expect(instanceProofMatches(c, undefined)).toBe(false);
-    expect(instanceProofMatches(c, null)).toBe(false);
-    expect(instanceProofMatches(c, "")).toBe(false);
-    expect(instanceProofMatches(c, 1234)).toBe(false);
-    expect(instanceProofMatches(c, {})).toBe(false);
+    expect(instanceProofMatches(c, PORT, "attacker-supplied")).toBe(false);
+    expect(instanceProofMatches(c, PORT, true)).toBe(false);
+    expect(instanceProofMatches(c, PORT, undefined)).toBe(false);
+    expect(instanceProofMatches(c, PORT, null)).toBe(false);
+    expect(instanceProofMatches(c, PORT, "")).toBe(false);
+    expect(instanceProofMatches(c, PORT, 1234)).toBe(false);
+    expect(instanceProofMatches(c, PORT, {})).toBe(false);
   });
 
   // A same-length wrong value must not slip past the length pre-check into a
@@ -91,39 +92,39 @@ describe("settings instance identity", () => {
   it("rejects a wrong proof of exactly the right length", () => {
     publishInstanceId();
     const c = newChallenge();
-    const real = answerChallenge(c)!;
+    const real = answerChallenge(c, PORT)!;
     const decoy = "f".repeat(real.length);
     expect(decoy).toHaveLength(real.length);
     expect(decoy).not.toBe(real);
-    expect(instanceProofMatches(c, decoy)).toBe(false);
+    expect(instanceProofMatches(c, PORT, decoy)).toBe(false);
   });
 
   it("rejects everything when no instance has published — probe binds its own", () => {
     expect(instanceProofMatches(newChallenge(), "anything")).toBe(false);
-    expect(answerChallenge(newChallenge())).toBeNull();
+    expect(answerChallenge(newChallenge(), PORT)).toBeNull();
     expect(currentInstanceId()).toBeNull();
   });
 
   it("stops matching a replayed proof once the instance shuts down", () => {
     publishInstanceId();
     const c = newChallenge();
-    const answer = answerChallenge(c);
-    expect(instanceProofMatches(c, answer)).toBe(true);
+    const answer = answerChallenge(c, PORT);
+    expect(instanceProofMatches(c, PORT, answer)).toBe(true);
     clearInstanceId();
-    expect(instanceProofMatches(c, answer)).toBe(false);
+    expect(instanceProofMatches(c, PORT, answer)).toBe(false);
     expect(currentInstanceId()).toBeNull();
   });
 
   it("publishes a distinct nonce per instance", () => {
     const c = newChallenge();
     publishInstanceId();
-    const firstAnswer = answerChallenge(c);
+    const firstAnswer = answerChallenge(c, PORT);
     publishInstanceId();
-    const secondAnswer = answerChallenge(c);
+    const secondAnswer = answerChallenge(c, PORT);
     expect(firstAnswer).not.toBe(secondAnswer);
     // The superseded nonce's proof must not still be honoured.
-    expect(instanceProofMatches(c, firstAnswer)).toBe(false);
-    expect(instanceProofMatches(c, secondAnswer)).toBe(true);
+    expect(instanceProofMatches(c, PORT, firstAnswer)).toBe(false);
+    expect(instanceProofMatches(c, PORT, secondAnswer)).toBe(true);
   });
 
   it("writes the nonce 0o600 so another local user cannot read it", () => {

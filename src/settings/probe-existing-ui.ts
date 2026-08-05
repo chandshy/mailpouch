@@ -60,11 +60,14 @@ export async function probeExistingMailpouchUi(port: number): Promise<string | n
             // bound this port first become the URL we advertise to the tray
             // and to agents — i.e. the page that asks for the Bridge password.
             //
-            // We verify sha256(nonce:challenge) rather than the nonce itself:
-            // /api/status is unauthenticated in loopback mode, so echoing the
-            // nonce there would hand the secret to the very process we are
-            // trying to exclude.
-            if (instanceProofMatches(challenge, parsed.instanceProof)) {
+            // We verify a hash over the nonce, the challenge, and the port we
+            // probed, rather than the nonce itself: /api/status is
+            // unauthenticated in loopback mode, so echoing the nonce there
+            // would hand the secret to the very process we are trying to
+            // exclude. The port is in the hash because without it a squatter
+            // on this port could relay our challenge to the real instance on
+            // its fallback port and forward the answer back to us.
+            if (instanceProofMatches(challenge, port, parsed.instanceProof)) {
               finish(`http://localhost:${port}`);
               return;
             }
