@@ -54,3 +54,12 @@ mailpouch-*.tgz
 
 # Local continuous-improvement state and audit history
 .improvement-loop/
+
+# Agent tooling scratch — session state, planning handoffs, and sweep output
+# from the various harnesses that drive this repo. None of it is product code
+# or product documentation, and it is per-machine, so it never belongs in git.
+# (.claude/ is listed above under IDE.)
+.agents/
+.codex/
+.graph-planning/
+.graph-architect/
