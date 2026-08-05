@@ -1,5 +1,8 @@
 import { defineConfig } from "vitest/config";
-import { BRIDGE_HOOK_TIMEOUT_MS } from "./test/e2e/support/time-budgets.mjs";
+import {
+  BRIDGE_DELIVERY_WAIT_MS,
+  BRIDGE_HOOK_TIMEOUT_MS,
+} from "./test/e2e/support/time-budgets.mjs";
 
 export default defineConfig({
   test: {
@@ -8,7 +11,14 @@ export default defineConfig({
     include: ["test/e2e/**/*.e2e.test.ts"],
     // No coverage thresholds for E2E — these tests are about server behavior,
     // not source coverage. Coverage is owned by the unit suite.
-    testTimeout: 30_000,
+    // Greenmail is in-process and stays tight. The live-Bridge lane must exceed
+    // its own delivery budget, or the per-test deadline fires first and the
+    // longer wait is unreachable — which is how a 30s cap made a remote Proton
+    // round-trip look like a send failure. The margin covers the assertions and
+    // per-test setup that run either side of the wait.
+    testTimeout: process.env.MAILPOUCH_E2E_BACKEND === "bridge"
+      ? BRIDGE_DELIVERY_WAIT_MS + 60_000
+      : 30_000,
     // Bridge projects folder/label/All Mail mutations asynchronously. Safe
     // teardown normally reconciles for up to 180 seconds on large profiles.
     // Setup owns a separate hard deadline for Bridge credential hydration,
