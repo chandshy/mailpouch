@@ -7,7 +7,7 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import http from "node:http";
 import { AddressInfo } from "node:net";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, chmodSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -112,6 +112,37 @@ describe("UI-009: write-claude-desktop refuses to clobber unparseable config", (
       const after = JSON.parse(readFileSync(cfgPath, "utf8"));
       expect(after.mcpServers.other).toBeDefined();
       expect(after.mcpServers.mailpouch).toBeDefined();
+    } finally {
+      close();
+    }
+  });
+
+  // The file we rewrite belongs to Claude Desktop, not to us, and it commonly
+  // holds API keys for OTHER MCP servers. renameSync replaces the inode, so a
+  // temp file written at the umask default silently widens a hardened 0600
+  // config to 0644 — handing a third party's secrets to every local account.
+  it("does not widen the permissions of an existing 0600 config", async () => {
+    mkdirSync(cfgDir, { recursive: true });
+    writeFileSync(cfgPath, JSON.stringify({ mcpServers: { other: { command: "x" } } }), "utf8");
+    chmodSync(cfgPath, 0o600);
+    expect(statSync(cfgPath).mode & 0o777).toBe(0o600);
+
+    const srv = createSettingsServer({ port: 8765, lan: false, accessToken: null, scheme: "http" });
+    const { port, close } = await listen(srv);
+    try {
+      const token = await csrfFrom(port);
+      const res = await request(
+        port,
+        "POST",
+        "/api/write-claude-desktop",
+        { "x-csrf-token": token, origin: `http://127.0.0.1:${port}`, "content-type": "application/json" },
+        "{}",
+      );
+      expect(JSON.parse(res.body).ok).toBe(true);
+      // The write must have happened...
+      expect(JSON.parse(readFileSync(cfgPath, "utf8")).mcpServers.mailpouch).toBeDefined();
+      // ...without loosening the mode.
+      expect(statSync(cfgPath).mode & 0o777).toBe(0o600);
     } finally {
       close();
     }
