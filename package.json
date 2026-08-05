@@ -1,6 +1,6 @@
 {
   "name": "mailpouch",
-  "version": "3.2.1",
+  "version": "4.0.0",
   "description": "mailpouch — lean, permission-gated MCP access to Proton Mail via Proton Bridge, with up to 86 tools, resources, and prompts.",
   "type": "module",
   "main": "dist/index.js",
@@ -77,8 +77,8 @@
     "url": "https://github.com/chandshy/mailpouch/issues"
   },
   "engines": {
-    "node": ">=20.0.0",
-    "npm": ">=9.0.0"
+    "node": ">=22.0.0",
+    "npm": ">=10.0.0"
   },
   "os": [
     "darwin",
@@ -91,17 +91,17 @@
   ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
-    "better-sqlite3": "^12.11.1",
+    "better-sqlite3": "^13.0.2",
     "imapflow": "^1.6.5",
     "mailparser": "^3.9.14",
-    "nodemailer": "~9.0.1"
+    "nodemailer": "^9.0.4"
   },
   "optionalDependencies": {
     "@napi-rs/keyring": "~1.3.0",
     "systray2": "~2.1.4"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.13",
+    "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^26.1.2",
     "@types/nodemailer": "^8.0.1",
     "@vitest/coverage-v8": "^4.1.10",
@@ -134,10 +134,11 @@
     "scripts/lib/cross-platform-spawn.mjs"
   ],
   "overrides": {
-    "hono": ">=4.12.25",
+    "hono": ">=4.12.34",
     "@hono/node-server": ">=1.19.13",
     "path-to-regexp": ">=8.4.2",
-    "fast-uri": ">=3.1.2"
+    "fast-uri": ">=4.1.2",
+    "ip-address": ">=10.4.0"
   },
   "publishConfig": {
     "access": "public",

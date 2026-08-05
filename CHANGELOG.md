@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.0] — 2026-08-04
+
+### Breaking
+
+- **Node 20 is no longer supported. The minimum is now Node 22.** Node 20 reached end of life on 2026-04-30, so it stopped receiving security patches; shipping against it made the runtime the weakest link in an otherwise patched dependency tree. `engines.node` is now `>=22.0.0` and `engines.npm` is `>=10.0.0`. The CI matrix moves from Node 20/22 to 22/24. Users on Node 20 must upgrade Node; there is no code-level migration.
+
+### Security
+
+- Cleared three dependency advisories that had accumulated against transitive packages, all of which were failing the ship-readiness gate on every open PR:
+  - `fast-uri` <4.1.2 (HIGH) — host confusion via a backslash authority introducer.
+  - `ip-address` <=10.3.0 (HIGH) — leading-zero octets decoded as decimal where resolvers decode octal, a CIDR suffix suppressing special-use classification, and misclassified IPv4-mapped/NAT64 addresses. All three permit SSRF and trust-boundary bypasses.
+  - `hono` <4.12.34 (MODERATE) — ReDoS in the CORS middleware via `Access-Control-Request-Headers`.
+
+  `npm audit` now reports no findings.
+- Raised the `overrides` floors to the patched versions (`fast-uri` >=4.1.2, `hono` >=4.12.34, and a new `ip-address` >=10.4.0 entry) so a transitive cannot silently resolve back to a vulnerable release.
+
+### Changed
+
+- `better-sqlite3` 12.11.1 → 13.0.2. This is what forced the Node floor: 13.x refuses to install on Node 20.
+- `imapflow` 1.6.1 → 1.6.5, `nodemailer` 9.0.3 → 9.0.4, `@types/better-sqlite3` 7.6.13 → 9.6.0.
+
 ## [3.2.1] — 2026-07-30
 
 ### Security
