@@ -52,7 +52,7 @@ import {
   buildPermissions,
   configExists,
 } from "../config/loader.js";
-import { publishInstanceId, currentInstanceId, clearInstanceId } from "./instance-identity.js";
+import { publishInstanceId, answerChallenge, clearInstanceId } from "./instance-identity.js";
 import { checkConnections } from "./connection-check.js";
 import {
   ALL_TOOLS,
@@ -1191,20 +1191,28 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
       }
 
       // ── GET /api/status ───────────────────────────────────────────────────
-      // `instanceId` is the load-bearing field the singleton probe checks
-      // (src/index.ts) — keep it. It is a nonce published at bind time beside
-      // the 0o600 config, so a listener that squatted this port cannot forge
-      // it. `hasConfig` remains for `mailpouch status` and older callers, but
-      // it is NOT an identity claim: it is a forgeable boolean. The rest is
-      // the live snapshot `mailpouch status` surfaces; present only when the
+      // `instanceProof` is the load-bearing field the singleton probe checks
+      // (src/settings/probe-existing-ui.ts). The probe sends ?challenge=<hex>
+      // and we answer sha256(nonce:challenge), proving we hold the nonce
+      // published beside the 0o600 config WITHOUT disclosing it.
+      //
+      // This route is UNAUTHENTICATED in loopback mode — the access token is
+      // only generated for LAN mode — so it must never return the nonce
+      // itself. It used to, which let any local process fetch the secret,
+      // wait for the real UI to die without a clean shutdown (leaving the
+      // file behind), then bind the port and replay it.
+      //
+      // `hasConfig` remains for `mailpouch status` and other callers, but it
+      // is NOT an identity claim: it is a forgeable boolean. The rest is the
+      // live snapshot `mailpouch status` surfaces; present only when the
       // running instance supplied a status provider.
       if (method === "GET" && path === "/api/status") {
         const live = secOpts.onStatus?.();
-        const instanceId = currentInstanceId();
+        const instanceProof = answerChallenge(url.searchParams.get("challenge"));
         json(res, 200, {
           hasConfig: configExists(),
           version: _agentSetupPkgVersion,
-          ...(instanceId ? { instanceId } : {}),
+          ...(instanceProof ? { instanceProof } : {}),
           ...(live ?? {}),
         });
         return;

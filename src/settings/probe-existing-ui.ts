@@ -1,5 +1,5 @@
 import http from "node:http";
-import { instanceIdMatches } from "./instance-identity.js";
+import { newChallenge, instanceProofMatches } from "./instance-identity.js";
 
 /**
  * Probe whether a mailpouch settings UI is already serving on `port`.
@@ -20,6 +20,8 @@ import { instanceIdMatches } from "./instance-identity.js";
  * old `typeof parsed.hasConfig === "boolean"` check left the suite green.
  */
 export async function probeExistingMailpouchUi(port: number): Promise<string | null> {
+  // Fresh per probe: a replayed proof from an earlier challenge is useless.
+  const challenge = newChallenge();
   return new Promise<string | null>((resolve) => {
     let settled = false;
     const finish = (url: string | null): void => {
@@ -28,7 +30,7 @@ export async function probeExistingMailpouchUi(port: number): Promise<string | n
       resolve(url);
     };
     const req = http.request(
-      { host: "127.0.0.1", port, path: "/api/status", method: "GET", timeout: 750 },
+      { host: "127.0.0.1", port, path: `/api/status?challenge=${challenge}`, method: "GET", timeout: 750 },
       (res) => {
         let body = "";
         res.setEncoding("utf8");
@@ -44,13 +46,16 @@ export async function probeExistingMailpouchUi(port: number): Promise<string | n
         res.on("end", () => {
           try {
             const parsed = JSON.parse(body) as Record<string, unknown>;
-            // Identity is the nonce, NOT the shape. `hasConfig` is a boolean
-            // any listener can echo; deferring on it let whoever bound this
-            // port first become the URL we advertise to the tray and to
-            // agents — i.e. the page that asks for the Bridge password.
-            // instanceIdMatches reads the nonce from beside the 0o600 config,
-            // which a squatting process running as another user cannot read.
-            if (instanceIdMatches(parsed.instanceId)) {
+            // Identity is proof-of-nonce, NOT the response shape. `hasConfig`
+            // is a boolean any listener can echo; deferring on it let whoever
+            // bound this port first become the URL we advertise to the tray
+            // and to agents — i.e. the page that asks for the Bridge password.
+            //
+            // We verify sha256(nonce:challenge) rather than the nonce itself:
+            // /api/status is unauthenticated in loopback mode, so echoing the
+            // nonce there would hand the secret to the very process we are
+            // trying to exclude.
+            if (instanceProofMatches(challenge, parsed.instanceProof)) {
               finish(`http://localhost:${port}`);
               return;
             }
