@@ -1193,8 +1193,10 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
       // ── GET /api/status ───────────────────────────────────────────────────
       // `instanceProof` is the load-bearing field the singleton probe checks
       // (src/settings/probe-existing-ui.ts). The probe sends ?challenge=<hex>
-      // and we answer sha256(nonce:challenge), proving we hold the nonce
-      // published beside the 0o600 config WITHOUT disclosing it.
+      // and we answer a hash over the nonce, that challenge, and OUR port,
+      // proving we hold the nonce published beside the 0o600 config WITHOUT
+      // disclosing it. The port is in the hash so a squatter cannot relay the
+      // challenge to a real instance on another port and forward its answer.
       //
       // This route is UNAUTHENTICATED in loopback mode — the access token is
       // only generated for LAN mode — so it must never return the nonce
@@ -1208,7 +1210,7 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
       // running instance supplied a status provider.
       if (method === "GET" && path === "/api/status") {
         const live = secOpts.onStatus?.();
-        const instanceProof = answerChallenge(url.searchParams.get("challenge"));
+        const instanceProof = answerChallenge(url.searchParams.get("challenge"), port);
         json(res, 200, {
           hasConfig: configExists(),
           version: _agentSetupPkgVersion,

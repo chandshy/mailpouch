@@ -22,9 +22,10 @@ import { getConfigPath } from "../config/loader.js";
  * is only generated for LAN mode. That let any local process fetch the secret,
  * wait for the real UI to die without a clean shutdown (which leaves the file
  * behind), then bind the port and replay it: a complete bypass of the control.
- * Instead the probe sends a fresh challenge and we answer sha256(nonce:challenge),
- * so a proof is useless to anyone who did not already hold the nonce, and
- * useless again on the next probe.
+ * Instead the probe sends a fresh challenge and we answer a hash over the
+ * nonce, the challenge, AND the port we are serving on, so a proof is useless
+ * to anyone who did not already hold the nonce, useless again on the next
+ * probe, and useless if relayed from an instance on a different port.
  *
  * ponytail: this does NOT defend against an attacker already running as the
  * config's owner — such an attacker can read the nonce file, and has the config
@@ -82,8 +83,22 @@ export function newChallenge(): string {
   return randomBytes(32).toString("hex");
 }
 
-function proof(nonce: string, challenge: string): string {
-  return createHash("sha256").update(`${nonce}:${challenge}`).digest("hex");
+/**
+ * The port is part of the proof, not decoration. Without it the proof says
+ * only "someone, somewhere, holds the nonce" — and every instance answers a
+ * given challenge identically. A squatter on the configured port could then
+ * relay the probe's challenge to the REAL instance on its fallback port
+ * (/api/status is unauthenticated in loopback mode, so it answers anyone),
+ * forward the reply, and be believed. Binding the port makes a relayed proof
+ * answer for the wrong port, so it no longer verifies.
+ *
+ * Lengths are prefixed so the concatenation is unambiguous: without that,
+ * a crafted challenge could shift the boundary between fields.
+ */
+function proof(nonce: string, challenge: string, port: number): string {
+  const parts = [nonce, challenge, String(port)];
+  const canonical = parts.map((v) => `${v.length}:${v}`).join("");
+  return createHash("sha256").update(canonical).digest("hex");
 }
 
 /**
@@ -95,10 +110,11 @@ function proof(nonce: string, challenge: string): string {
  * UI to die without a clean shutdown — leaving the file behind — then bind the
  * port and replay it. A secret served to whoever asks is not a secret.
  */
-export function answerChallenge(challenge: unknown): string | null {
+export function answerChallenge(challenge: unknown, port: number): string | null {
   if (typeof challenge !== "string" || challenge.length === 0 || challenge.length > 128) return null;
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
   if (!_current) return null;
-  return proof(_current, challenge);
+  return proof(_current, challenge, port);
 }
 
 /**
@@ -106,7 +122,7 @@ export function answerChallenge(challenge: unknown): string | null {
  * Constant-time. False whenever the file is missing, unreadable, or the proof
  * does not match — the caller then binds its own server, the safe default.
  */
-export function instanceProofMatches(challenge: string, candidate: unknown): boolean {
+export function instanceProofMatches(challenge: string, port: number, candidate: unknown): boolean {
   if (typeof candidate !== "string" || candidate.length === 0) return false;
   let nonce: string;
   try {
@@ -115,7 +131,7 @@ export function instanceProofMatches(challenge: string, candidate: unknown): boo
     return false;
   }
   if (nonce.length === 0) return false;
-  const expected = proof(nonce, challenge);
+  const expected = proof(nonce, challenge, port);
   if (candidate.length !== expected.length) return false;
   try {
     return timingSafeEqual(Buffer.from(candidate, "utf-8"), Buffer.from(expected, "utf-8"));
