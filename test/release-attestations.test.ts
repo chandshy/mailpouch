@@ -3,7 +3,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   BRIDGE_E2E_STATUS_CONTEXT,
+  BRIDGE_E2E_WAIVER_MARKER,
   REQUIRED_RELEASE_WORKFLOWS,
+  releaseNotesWaiveBridgeE2E,
   requireSuccessfulBridgeStatus,
   requireSuccessfulWorkflowRun,
 } from "../scripts/lib/release-attestations.mjs";
@@ -112,6 +114,25 @@ describe("release exact-SHA attestations", () => {
       expectedSha: SHA,
       combinedStatus: { sha: OTHER_SHA, statuses: [commitStatus()] },
     })).toThrow(/not release commit/);
+  });
+
+  it("reads the Bridge waiver only from an explicit release-notes marker", () => {
+    expect(releaseNotesWaiveBridgeE2E(`## 4.0.1\n\n${BRIDGE_E2E_WAIVER_MARKER}\n`)).toBe(true);
+    expect(releaseNotesWaiveBridgeE2E("[BRIDGE-E2E : WAIVED]")).toBe(true); // case/space tolerant
+    // Absence, and prose merely discussing the gate, must NOT waive it.
+    expect(releaseNotesWaiveBridgeE2E("## 4.0.1\n\nRoutine bugfix release.\n")).toBe(false);
+    expect(releaseNotesWaiveBridgeE2E("bridge-e2e: waived")).toBe(false); // no brackets
+    expect(releaseNotesWaiveBridgeE2E("we did not waive bridge-e2e for this one")).toBe(false);
+    expect(releaseNotesWaiveBridgeE2E(undefined)).toBe(false);
+    expect(releaseNotesWaiveBridgeE2E(null)).toBe(false);
+  });
+
+  it("gives the release trigger a waiver channel so a waived release stops failing after publish", () => {
+    const workflow = readFileSync(".github/workflows/publish.yml", "utf8");
+    // Release bodies are attacker-influencable: they must reach the checker as
+    // env, never interpolated into a run script.
+    expect(workflow).toContain("MAILPOUCH_RELEASE_BODY: ${{ github.event.release.body }}");
+    expect(workflow).not.toMatch(/run:[^\n]*github\.event\.release\.body/);
   });
 
   it("wires the publish gate to hosted workflows, Bridge status, and tagged-release checks", () => {

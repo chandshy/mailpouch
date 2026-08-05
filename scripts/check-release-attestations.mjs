@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 
+import { appendFileSync } from "node:fs";
 import {
   REQUIRED_RELEASE_WORKFLOWS,
   normalizeCommitSha,
+  releaseNotesWaiveBridgeE2E,
   requireSuccessfulBridgeStatus,
   requireSuccessfulWorkflowRun,
 } from "./lib/release-attestations.mjs";
@@ -52,22 +54,42 @@ for (const workflow of REQUIRED_RELEASE_WORKFLOWS) {
 }
 
 // The Bridge E2E attestation can be waived, but ONLY by an explicit act at
-// release time — `waive_bridge_e2e: true` on a manual workflow_dispatch. It is
+// release time, in one of two channels: `waive_bridge_e2e: true` on a manual
+// workflow_dispatch, or the marker in the GitHub release notes. It is
 // deliberately not a repo variable or a default: a waiver has to be a decision
-// someone makes and that shows up in the run's inputs, not ambient state that
-// quietly erodes the gate. The `release: published` trigger cannot set it, so
-// the normal path stays strict.
+// someone makes and that shows up on the release itself, not ambient state
+// that quietly erodes the gate.
+//
+// The release-notes channel exists because `release: published` takes no
+// inputs. Without it that trigger could never waive, so shipping a waived
+// release meant dispatching manually and letting the release event fail a few
+// minutes later — after the package was already on npm. Three consecutive
+// releases did exactly that, which turned a red Publish run into the expected
+// outcome of a normal release and taught everyone to ignore the gate. A gate
+// that always fails protects nothing; this one now fails only when evidence is
+// genuinely missing AND nobody said so out loud.
 //
 // The alternative — hand-POSTing a green `proton-bridge-e2e` status — is worse
 // in the way that matters: it makes every future release's attestation
 // unfalsifiable-looking but meaningless. Waiving loudly keeps the signal honest.
 //
 // CI and preship attestations above are NEVER waivable.
-if (process.env.MAILPOUCH_WAIVE_BRIDGE_E2E === "true") {
-  process.stdout.write(
+const waivedByDispatch = process.env.MAILPOUCH_WAIVE_BRIDGE_E2E === "true";
+const waivedByNotes = releaseNotesWaiveBridgeE2E(process.env.MAILPOUCH_RELEASE_BODY);
+if (waivedByDispatch || waivedByNotes) {
+  const via = waivedByDispatch ? "workflow_dispatch input" : "release-notes marker";
+  const message =
     "release-attestation WAIVED: Proton Bridge E2E was explicitly waived for this release " +
-      `(commit ${sha}). No live Proton Bridge evidence exists for these bytes.\n`,
-  );
+    `(commit ${sha}, via ${via}). No live Proton Bridge evidence exists for these bytes.`;
+  process.stdout.write(`${message}\n`);
+  // Also surface it on the run summary: a waiver buried in step logs is not the
+  // "loud" this gate's design depends on.
+  if (process.env.GITHUB_STEP_SUMMARY) {
+    appendFileSync(
+      process.env.GITHUB_STEP_SUMMARY,
+      `### ⚠️ Proton Bridge E2E waived\n\n${message}\n`,
+    );
+  }
 } else {
   const combinedStatus = await github(`/commits/${sha}/status?per_page=100`);
   const bridge = requireSuccessfulBridgeStatus({ expectedSha: sha, combinedStatus });

@@ -51,9 +51,12 @@ jobs:
         GITHUB_API_URL: ${{ github.api_url }}
         GITHUB_REPOSITORY: ${{ github.repository }}
         GITHUB_TOKEN: ${{ github.token }}
-        # Only ever set by an explicit manual dispatch — the `release: published`
-        # trigger has no inputs, so that path can never waive.
+        # Only ever set by an explicit manual dispatch.
         MAILPOUCH_WAIVE_BRIDGE_E2E: ${{ inputs.waive_bridge_e2e }}
+        # The `release: published` trigger takes no inputs, so its waiver channel
+        # is a marker in the release notes. Passed via env, never interpolated
+        # into the run script: release bodies are attacker-influencable text.
+        MAILPOUCH_RELEASE_BODY: ${{ github.event.release.body }}
       run: node scripts/check-release-attestations.mjs "$COMMIT_SHA"
 
     - name: Use Node.js

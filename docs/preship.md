@@ -217,6 +217,33 @@ evidence. It uses `GH_TOKEN`/`GITHUB_TOKEN` in the parent when supplied,
 otherwise the token from `gh auth token`; that credential needs permission to
 write commit statuses.
 
+### Releasing without live Bridge evidence
+
+If no disposable Bridge account is available for a release, the Bridge E2E
+attestation can be waived — but only by an explicit act recorded on the release
+itself. There are two channels, and no ambient/default one:
+
+- **`release: published`** — put `[bridge-e2e: waived]` anywhere in the GitHub
+  release notes. Matching is case- and space-tolerant; the brackets are
+  required, so prose that merely mentions the gate does not waive it.
+- **`workflow_dispatch`** — set the `waive_bridge_e2e: true` input.
+
+Either way the Publish run prints a `release-attestation WAIVED` line and writes
+a ⚠️ block to the run summary. CI and preship attestations are never waivable,
+and a Bridge status that exists but is *red* always fails — a waiver covers
+absent evidence, never failed evidence.
+
+Prefer running `attest-bridge-e2e.mjs` over waiving. Waiving means no live
+Proton Bridge evidence exists for those published bytes, and the release notes
+will say so permanently.
+
+> The release-notes channel exists because `release: published` accepts no
+> inputs. Before it, a waived release had to be published by manual dispatch,
+> after which the release event fired a second Publish run that could not waive
+> and always failed — minutes after the package was already on npm. Releases
+> 3.2.0, 3.2.1 and 4.0.0 all shipped that way, making a red Publish run the
+> normal outcome of a successful release.
+
 The registry jobs retain `npm publish --ignore-scripts` so dependency lifecycle
 code never executes with registry credentials or OIDC authority. This is not a
 test bypass: publishing is downstream of the exact-SHA verification job, and

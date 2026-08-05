@@ -1,5 +1,26 @@
 export const BRIDGE_E2E_STATUS_CONTEXT = "mailpouch/proton-bridge-e2e";
 
+/**
+ * Marker a release author puts in the GitHub release notes to ship without live
+ * Bridge evidence. This is the `release: published` trigger's equivalent of the
+ * dispatch input `waive_bridge_e2e` — that trigger takes no inputs, so without
+ * it the only way to publish a waived release was to dispatch manually and let
+ * the release event fail afterwards. Every release from 3.2.0 to 4.0.0 went
+ * that way, which made a red Publish run the normal outcome of shipping and
+ * trained everyone to ignore it.
+ *
+ * Still an explicit, per-release act, and a louder one than a dispatch input:
+ * it is written into the release notes, where it stays visible to anyone
+ * reading that release long after the run logs age out.
+ */
+export const BRIDGE_E2E_WAIVER_MARKER = "[bridge-e2e: waived]";
+
+/** True when release notes carry the waiver marker (case/space tolerant). */
+export function releaseNotesWaiveBridgeE2E(body) {
+  if (typeof body !== "string") return false;
+  return /\[\s*bridge-e2e\s*:\s*waived\s*\]/i.test(body);
+}
+
 export const REQUIRED_RELEASE_WORKFLOWS = Object.freeze([
   Object.freeze({ id: "ci.yml", label: "CI" }),
   Object.freeze({ id: "preship.yml", label: "preship" }),
