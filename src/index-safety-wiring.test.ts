@@ -16,6 +16,21 @@ describe("production safety wiring", () => {
     );
   });
 
+  // A destructive-confirm elicitation awaits user input for an unbounded time.
+  // The grant store was re-read afterwards, but the global preset — the other
+  // half of the authorization ceiling, and in a different file — was not, so
+  // lowering the preset during the confirmation dialog did not take effect and
+  // the call proceeded under the revoked, more permissive ceiling.
+  it("re-reads the global preset after the destructive-confirm await, not just the grant", () => {
+    // The final pre-dispatch check must consume a freshly-read preset...
+    expect(source).toMatch(
+      /const finalPreset = \(loadConfig\(\) \?\? defaultConfig\(\)\)\.permissions\.preset;/,
+    );
+    expect(source).toMatch(/globalPreset: finalPreset,\n\s*\}, \{ snapshot: grantSnapshot \}\)/);
+    // ...and must NOT fall back to the value captured before the await.
+    expect(source).not.toMatch(/globalPreset,\n\s*\}, \{ snapshot: grantSnapshot \}\)/);
+  });
+
   it("binds the request-local mailbox identity around the real tool handler invocation", () => {
     expect(source).toMatch(
       /withE2EMailboxIdentity\(\s*args as Record<string, unknown>,\s*\(\) => handler\(ctx\),\s*\)/,

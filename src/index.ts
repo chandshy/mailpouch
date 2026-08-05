@@ -1183,6 +1183,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     // A destructive confirmation can await user input. Re-read authorization
     // state afterwards so an external revoke/change wins before dispatch.
     const grantSnapshot = grantManager.getAuthorizationSnapshot(caller.clientId);
+    // The global preset is part of that authorization ceiling too, and it lives
+    // in a DIFFERENT file (~/.mailpouch.json) from the grant store re-read
+    // above (~/.mailpouch-agents.json). Re-reading only the grant left the
+    // ceiling pinned to whatever it was at line ~1054, before the elicitation
+    // await — so lowering the preset while a destructive-confirm dialog was
+    // open did not take effect, and the call proceeded under the revoked,
+    // more permissive ceiling. loadConfig's cache is mtime-validated and
+    // saveConfig invalidates it, so this genuinely re-reads from disk.
+    const finalPreset = (loadConfig() ?? defaultConfig()).permissions.preset;
     const finalGrant = grantSnapshot.kind === "present" ? grantSnapshot.grant : undefined;
     const reservationResult = grantManager.check({
       clientId: caller.clientId,
@@ -1191,7 +1200,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       callerIp: caller.ip,
       targetAccountId: requestedAccountId,
       targetAccountIdentity: routedAccountIdentity,
-      globalPreset,
+      globalPreset: finalPreset,
     }, { snapshot: grantSnapshot });
     if (!reservationResult.allowed) {
       logger.warn(`Agent grant denied '${name}' for ${caller.clientId}`, "AgentGate", { reason: reservationResult.reason });
