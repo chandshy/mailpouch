@@ -531,8 +531,16 @@ export function openFtsIndex(dbPath: string): FtsIndexService {
   const Database = require("better-sqlite3") as unknown as DatabaseConstructor;
   try {
     const db = new Database(dbPath);
+    // Tighten the main db immediately, so it is never briefly world-readable.
     chmodFtsFiles(dbPath);
-    return new FtsIndexService(db, dbPath);
+    // The constructor enables `journal_mode = WAL`, and THAT is what creates
+    // the -wal/-shm sidecars. Chmod'ing only before this point left them at
+    // the umask default (0644 observed) forever, because chmodFtsFiles skips
+    // files that do not exist yet — and -wal holds live page data, i.e. the
+    // decrypted mail in the index. Re-run it once the sidecars exist.
+    const service = new FtsIndexService(db, dbPath);
+    chmodFtsFiles(dbPath);
+    return service;
   } catch (err) {
     throw new FtsUnavailableError(
       `Could not open FTS index at ${dbPath}: ${(err as Error).message}`,
