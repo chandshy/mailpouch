@@ -229,9 +229,17 @@ itself. There are two channels, and no ambient/default one:
 - **`workflow_dispatch`** — set the `waive_bridge_e2e: true` input.
 
 Either way the Publish run prints a `release-attestation WAIVED` line and writes
-a ⚠️ block to the run summary. CI and preship attestations are never waivable,
-and a Bridge status that exists but is *red* always fails — a waiver covers
-absent evidence, never failed evidence.
+a ⚠️ block to the run summary. CI and preship attestations are never waivable.
+
+The commit status is fetched and classified *before* the waiver is consulted, so
+a waiver covers absent evidence and never failed evidence:
+
+| Bridge status on the release SHA | Waived | Result |
+|---|---|---|
+| `success` | either | publishes on real evidence |
+| `failure` / `error` | either | **hard-fails** — a waiver cannot suppress a red run |
+| absent, or `pending` | yes | publishes, loudly waived |
+| absent, or `pending` | no | hard-fails |
 
 Prefer running `attest-bridge-e2e.mjs` over waiving. Waiving means no live
 Proton Bridge evidence exists for those published bytes, and the release notes

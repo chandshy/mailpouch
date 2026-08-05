@@ -90,8 +90,21 @@ function newestCommitStatus(statuses) {
   return [...statuses].sort((a, b) => numeric(b?.id) - numeric(a?.id))[0];
 }
 
-/** Require the newest local Bridge E2E status on the exact release commit. */
-export function requireSuccessfulBridgeStatus({ expectedSha, combinedStatus }) {
+/**
+ * Classify the newest Bridge E2E status on the exact release commit, without
+ * deciding whether that outcome is acceptable.
+ *
+ * A waiver may excuse *absent* evidence; it must never excuse *failed*
+ * evidence. Keeping classification separate from the verdict is what lets the
+ * caller enforce that — the previous shape short-circuited on the waiver and
+ * never fetched the status at all, so a red Bridge run published exactly as
+ * easily as an unrun one.
+ *
+ * Returns `{ kind: "success" | "failed" | "absent", evidence?, state? }`.
+ * "absent" covers both no status at all and a run still `pending`: neither is
+ * evidence the bytes work, and neither is evidence they are broken.
+ */
+export function classifyBridgeStatus({ expectedSha, combinedStatus }) {
   const sha = normalizeCommitSha(expectedSha, "release commit SHA");
   if (!combinedStatus || typeof combinedStatus !== "object") {
     throw new Error("Bridge E2E status response is invalid");
@@ -107,18 +120,33 @@ export function requireSuccessfulBridgeStatus({ expectedSha, combinedStatus }) {
   const latest = newestCommitStatus(
     combinedStatus.statuses.filter(status => status?.context === BRIDGE_E2E_STATUS_CONTEXT),
   );
-  if (!latest) {
+  if (!latest) return { kind: "absent" };
+  if (latest.state === "success") {
+    return {
+      kind: "success",
+      evidence: { id: latest.id, url: latest.target_url, description: latest.description },
+    };
+  }
+  if (latest.state === "pending") return { kind: "absent", state: "pending" };
+  return {
+    kind: "failed",
+    state: latest.state,
+    evidence: { id: latest.id, url: latest.target_url, description: latest.description },
+  };
+}
+
+/** Require the newest local Bridge E2E status on the exact release commit. */
+export function requireSuccessfulBridgeStatus({ expectedSha, combinedStatus }) {
+  const sha = normalizeCommitSha(expectedSha, "release commit SHA");
+  const verdict = classifyBridgeStatus({ expectedSha, combinedStatus });
+  if (verdict.kind === "absent" && !verdict.state) {
     throw new Error(`Missing ${BRIDGE_E2E_STATUS_CONTEXT} status for release commit ${sha}`);
   }
-  if (latest.state !== "success") {
+  if (verdict.kind !== "success") {
     throw new Error(
-      `${BRIDGE_E2E_STATUS_CONTEXT} latest status for ${sha} is ${String(latest.state)}`,
+      `${BRIDGE_E2E_STATUS_CONTEXT} latest status for ${sha} is ${String(verdict.state)}`,
     );
   }
 
-  return {
-    id: latest.id,
-    url: latest.target_url,
-    description: latest.description,
-  };
+  return verdict.evidence;
 }

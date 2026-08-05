@@ -5,6 +5,7 @@ import {
   BRIDGE_E2E_STATUS_CONTEXT,
   BRIDGE_E2E_WAIVER_MARKER,
   REQUIRED_RELEASE_WORKFLOWS,
+  classifyBridgeStatus,
   releaseNotesWaiveBridgeE2E,
   requireSuccessfulBridgeStatus,
   requireSuccessfulWorkflowRun,
@@ -125,6 +126,36 @@ describe("release exact-SHA attestations", () => {
     expect(releaseNotesWaiveBridgeE2E("we did not waive bridge-e2e for this one")).toBe(false);
     expect(releaseNotesWaiveBridgeE2E(undefined)).toBe(false);
     expect(releaseNotesWaiveBridgeE2E(null)).toBe(false);
+  });
+
+  it("separates absent Bridge evidence from failed Bridge evidence", () => {
+    const at = (state: string) => classifyBridgeStatus({
+      expectedSha: SHA,
+      combinedStatus: { sha: SHA, statuses: [commitStatus({ state })] },
+    });
+    expect(at("success").kind).toBe("success");
+    expect(at("failure")).toMatchObject({ kind: "failed", state: "failure" });
+    expect(at("error")).toMatchObject({ kind: "failed", state: "error" });
+    // Pending is not evidence the bytes work, but it is not evidence they are
+    // broken either — a waiver may still cover it.
+    expect(at("pending")).toMatchObject({ kind: "absent", state: "pending" });
+    expect(classifyBridgeStatus({
+      expectedSha: SHA,
+      combinedStatus: { sha: SHA, statuses: [commitStatus({ context: "other/check" })] },
+    })).toEqual({ kind: "absent" });
+  });
+
+  it("never lets a waiver suppress a FAILED Bridge run, only an absent one", () => {
+    const checker = readFileSync("scripts/check-release-attestations.mjs", "utf8");
+    // The status must be fetched before the waiver is consulted. Returning early
+    // on the waiver — the pre-4.0.1 shape — let a red Bridge run publish exactly
+    // as easily as an unrun one, contradicting the documented guarantee.
+    const statusFetch = checker.indexOf("classifyBridgeStatus({");
+    const waiverBranch = checker.indexOf('release-attestation WAIVED');
+    expect(statusFetch).toBeGreaterThan(-1);
+    expect(statusFetch).toBeLessThan(waiverBranch);
+    expect(checker).toContain('verdict.kind === "failed"');
+    expect(checker).toContain("a waiver cannot suppress a failed Bridge run");
   });
 
   it("gives the release trigger a waiver channel so a waived release stops failing after publish", () => {
