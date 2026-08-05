@@ -68,7 +68,7 @@ export async function probeExistingMailpouchUi(port: number): Promise<string | n
             // on this port could relay our challenge to the real instance on
             // its fallback port and forward the answer back to us.
             if (instanceProofMatches(challenge, port, parsed.instanceProof)) {
-              finish(`http://localhost:${port}`);
+              finish(`http://127.0.0.1:${port}`);
               return;
             }
           } catch { /* not JSON — not a mailpouch UI */ }

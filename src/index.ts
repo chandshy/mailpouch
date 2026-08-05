@@ -2696,7 +2696,7 @@ async function _startSettingsServerDaemon(): Promise<void> {
           }),
         });
         _settingsStop    = stop;
-        _settingsUrl     = `${scheme}://localhost:${port}`;
+        _settingsUrl     = `${scheme}://127.0.0.1:${port}`;
         _settingsEnabled = true;
         _settingsUnavailableReason = undefined;
         if (offset === 0) {
