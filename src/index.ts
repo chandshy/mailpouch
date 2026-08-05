@@ -20,7 +20,7 @@ import { homedir } from "os";
 import { createConnection } from "net";
 import { spawn } from "child_process";
 import { startSettingsServer } from "./settings/server.js";
-import { probeExistingMailpouchUi } from "./settings/probe-existing-ui.js";
+import { portOccupantLooksLikeMailpouch } from "./settings/port-occupant.js";
 import { openBrowser } from "./settings/tui.js";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -2608,7 +2608,6 @@ let _settingsUnavailableReason: string | undefined;
  * Settings UI" action must not try to kill a process we don't own; it
  * just detaches our own references.
  */
-let _settingsExternal: boolean = false;
 let _trayInstance:    TrayHandle | null = null;
 let _trayTooltip:     string = "mailpouch";
 // ── Health blink: while the mail connection is failing (IMAP login failure or
@@ -2653,21 +2652,17 @@ function _tickTrayHealth(): void {
 async function _startSettingsServerDaemon(): Promise<void> {
   const basePort = config.settingsPort ?? 8766;
 
-  // If a user-run `mailpouch-settings` instance is already serving on the
-  // configured port, reuse it silently rather than retry-and-warn. Probes with
-  // a short GET /api/status — any listener that cannot echo the instance nonce
-  // (a stray `python3 -m http.server`, or a process squatting the port to be
-  // mistaken for the settings UI) falls through to the bind-then-fallback path
-  // below, so we advertise a URL we are serving ourselves.
-  const existing = await probeExistingMailpouchUi(basePort);
-  if (existing) {
-    _settingsUrl      = existing;
-    _settingsEnabled  = true;
-    _settingsExternal = true;
-    _settingsUnavailableReason = undefined;
-    logger.info(`Reusing existing Settings UI at ${existing}`, "MCPServer");
-    return;
-  }
+  // We never adopt another process's settings URL. If the configured port is
+  // taken — even by a genuine `mailpouch-settings` daemon — we bind our own
+  // and advertise only what we serve. Handing the tray and agents a URL owned
+  // by a process whose lifetime and code version we do not control is exactly
+  // the trust we could not justify for the page that collects the Bridge
+  // password; authenticating a loopback neighbour well enough to do it safely
+  // cost four rounds of security fixes and still left a check-once-trust-
+  // forever gap. Two settings UIs is untidy, not unsafe.
+  //
+  // The occupant check survives only to pick a log level, below.
+  const occupantLooksLikeMailpouch = await portOccupantLooksLikeMailpouch(basePort);
 
   // Bind the configured port; if it's held by a FOREIGN process (not a
   // reusable mailpouch UI — the probe above already ruled that out), retrying
@@ -2701,6 +2696,14 @@ async function _startSettingsServerDaemon(): Promise<void> {
         _settingsUnavailableReason = undefined;
         if (offset === 0) {
           logger.info(`Settings UI started at ${_settingsUrl}`, "MCPServer");
+        } else if (occupantLooksLikeMailpouch) {
+          // The expected "standalone mailpouch-settings daemon plus stdio MCP"
+          // setup. Nothing is wrong, so don't warn about it — this is the one
+          // benefit the old URL-adoption path actually delivered.
+          logger.info(
+            `Settings UI started at ${_settingsUrl} (port ${basePort} is held by another mailpouch settings UI).`,
+            "MCPServer",
+          );
         } else {
           logger.warn(
             `Settings UI: configured port ${basePort} was occupied by another process — bound to ${port} instead. ` +
@@ -2740,18 +2743,6 @@ async function _startSettingsServerDaemon(): Promise<void> {
 }
 
 async function _stopSettingsServerDaemon(): Promise<void> {
-  // When we're reusing a standalone `mailpouch-settings` instance we
-  // didn't spawn, there's no process for us to stop — just detach our
-  // references so the tray toggle state stays consistent. Killing it
-  // would be wrong (we don't own its lifetime) AND impossible (no stop
-  // function was ever handed to us).
-  if (_settingsExternal) {
-    logger.info("Detaching from external Settings UI (process keeps running)", "MCPServer");
-    _settingsExternal = false;
-    _settingsEnabled  = false;
-    _settingsUrl      = "";
-    return;
-  }
   if (_settingsStop) {
     try {
       await _settingsStop();
@@ -3197,10 +3188,10 @@ async function main() {
       clearInterval(bindWatchdog);
     }
   }
-  // Only the process that owns the settings server gets a tray. If another MCP
-  // already holds the port, _settingsExternal is true and that process already
-  // has the tray — skip to avoid duplicates.
-  if (!noTray && !_settingsExternal) {
+  // Only the process that owns a settings server gets a tray. We always own
+  // ours now (we never adopt another process's URL), so this is simply "did
+  // our own bind succeed".
+  if (!noTray) {
     _initTray().catch((err: unknown) => logger.warn("Tray init error", "MCPServer", err));
   }
 
@@ -3214,7 +3205,7 @@ async function main() {
   // bind there is nothing left to keep us alive, so fail loudly rather than
   // exit silently looking like another "crash."
   if (settingsOnly) {
-    if (!_settingsEnabled && !_settingsExternal) {
+    if (!_settingsEnabled) {
       logger.error(
         `Settings UI failed to bind (port ${config.settingsPort ?? 8766} may be occupied) and --settings-only was requested — ` +
         "nothing left to run. Free the port, or set settingsPort in ~/.mailpouch.json (or the PORT env var), then retry.",

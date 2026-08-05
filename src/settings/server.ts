@@ -52,7 +52,6 @@ import {
   buildPermissions,
   configExists,
 } from "../config/loader.js";
-import { publishInstanceId, answerChallenge, clearInstanceId } from "./instance-identity.js";
 import { checkConnections } from "./connection-check.js";
 import {
   ALL_TOOLS,
@@ -1191,30 +1190,18 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
       }
 
       // ── GET /api/status ───────────────────────────────────────────────────
-      // `instanceProof` is the load-bearing field the singleton probe checks
-      // (src/settings/probe-existing-ui.ts). The probe sends ?challenge=<hex>
-      // and we answer a hash over the nonce, that challenge, and OUR port,
-      // proving we hold the nonce published beside the 0o600 config WITHOUT
-      // disclosing it. The port is in the hash so a squatter cannot relay the
-      // challenge to a real instance on another port and forward its answer.
-      //
-      // This route is UNAUTHENTICATED in loopback mode — the access token is
-      // only generated for LAN mode — so it must never return the nonce
-      // itself. It used to, which let any local process fetch the secret,
-      // wait for the real UI to die without a clean shutdown (leaving the
-      // file behind), then bind the port and replay it.
-      //
-      // `hasConfig` remains for `mailpouch status` and other callers, but it
-      // is NOT an identity claim: it is a forgeable boolean. The rest is the
-      // live snapshot `mailpouch status` surfaces; present only when the
-      // running instance supplied a status provider.
+      // `hasConfig` lets `mailpouch status` and the port-occupant log check
+      // tell a mailpouch settings UI from a stray listener. It is a forgeable
+      // boolean and NOT an identity claim — nothing security-relevant may be
+      // derived from this response. mailpouch no longer adopts another
+      // process's settings URL, so there is nothing here worth spoofing.
+      // The rest is the live snapshot `mailpouch status` surfaces; present
+      // only when the running instance supplied a status provider.
       if (method === "GET" && path === "/api/status") {
         const live = secOpts.onStatus?.();
-        const instanceProof = answerChallenge(url.searchParams.get("challenge"), port);
         json(res, 200, {
           hasConfig: configExists(),
           version: _agentSetupPkgVersion,
-          ...(instanceProof ? { instanceProof } : {}),
           ...(live ?? {}),
         });
         return;
@@ -3013,10 +3000,6 @@ export async function startSettingsServer(
     server.listen(port, bindHost, () => resolve());
   });
 
-  // Publish this instance's identity nonce only once the bind succeeded —
-  // publishing before would advertise an identity for a server that may never
-  // come up, and the probe would then reuse a port nothing is serving.
-  publishInstanceId();
 
   // ── Startup banner ────────────────────────────────────────────────────────
   if (!quiet) {
@@ -3086,10 +3069,9 @@ export async function startSettingsServer(
   }
 
   const stop = (): Promise<void> =>
-    new Promise((resolve, reject) => {
-      clearInstanceId();
-      server.close((err) => (err ? reject(err) : resolve()));
-    });
+    new Promise((resolve, reject) =>
+      server.close((err) => (err ? reject(err) : resolve()))
+    );
 
   return { scheme, stop };
 }
