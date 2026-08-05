@@ -20,7 +20,7 @@ Bridge-only smoke suite, still present) and lives entirely under
 - **Proton Bridge** running locally for Phase 2. The Bridge lane is scoped to
   run-owned messages and UUID-namespaced folders, so it can use an existing
   mailbox without erasing or modifying pre-existing mail.
-- Node 20+ (matches the package's `engines` field).
+- Node 22+ (matches the package's `engines` field).
 
 ## Quick start (Phase 1 — Greenmail)
 

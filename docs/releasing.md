@@ -97,8 +97,8 @@ On <https://www.npmjs.com/package/mailpouch> → **Settings** → **Trusted Publ
 - `package.json` `repository.url` resolves to `chandshy/mailpouch`, which **must** match the
   trusted publisher exactly ✅
 - **Node 24.x in the publish job** ✅ — trusted publishing needs **npm ≥ 11.5.1 / Node ≥ 22.14.0**.
-  Node 20 ships npm 10.x and silently falls back to token auth. This is the one change that
-  is easy to miss.
+  A 22.x line below that patch ships an npm that silently falls back to token auth. This is
+  the one change that is easy to miss.
 - GitHub-hosted runner ✅ — self-hosted runners are not supported.
 
 ### Notes
