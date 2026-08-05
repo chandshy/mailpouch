@@ -88,7 +88,7 @@ describe("settings-UI probe identity", () => {
     const l = await listener((challenge) =>
       JSON.stringify({ hasConfig: true, instanceProof: answerChallenge(challenge, l.port) }));
     stop = l.close;
-    expect(await probeExistingMailpouchUi(l.port)).toBe(`http://localhost:${l.port}`);
+    expect(await probeExistingMailpouchUi(l.port)).toBe(`http://127.0.0.1:${l.port}`);
   });
 
   // The regression test for the leak: a squatter that harvested the raw nonce
@@ -123,7 +123,7 @@ describe("settings-UI probe identity", () => {
     expect(await probeExistingMailpouchUi(squatter.port)).toBeNull();
     // Sanity: the real instance on its own port still verifies, so the test
     // is proving port-binding rather than a blanket failure.
-    expect(await probeExistingMailpouchUi(real.port)).toBe(`http://localhost:${real.port}`);
+    expect(await probeExistingMailpouchUi(real.port)).toBe(`http://127.0.0.1:${real.port}`);
   });
 
   // A proof is bound to the challenge it answered; a stale one is worthless.
