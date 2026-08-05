@@ -286,7 +286,10 @@ function c(colour: keyof typeof C, text: string): string {
 function protoLabel(pc: ProtocolCheck): string {
   if (!pc.reachable) return c("bRed", "❌ unreachable");
   if (pc.authenticated === true) return c("bGreen", "✅ connected");
-  if (pc.authenticated === false) return c("yellow", "⚠ port open · auth failed" + (pc.error ? " (" + pc.error + ")" : ""));
+  // stripAnsi as defense-in-depth: connection-check already scrubs this at the
+  // boundary, but pc.error originates from a remote server and this line goes
+  // straight to stdout. Matches the treatment of EscalationRecord.reason below.
+  if (pc.authenticated === false) return c("yellow", "⚠ port open · auth failed" + (pc.error ? " (" + stripAnsi(pc.error) + ")" : ""));
   return C.gray + "◐ port open · auth not tested" + C.reset;
 }
 

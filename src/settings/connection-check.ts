@@ -15,6 +15,7 @@ import { ImapFlow } from "imapflow";
 import nodemailer from "nodemailer";
 import { buildBridgeTlsConfig } from "../services/bridge-tls.js";
 import { loadConfig, loadCredentialsFromKeychain } from "../config/loader.js";
+import { sanitizeText } from "./security.js";
 
 export interface ProtocolCheck {
   /** The TCP port accepted a connection. */
@@ -77,7 +78,12 @@ function shortError(e: unknown): string {
   const raw = a?.response || a?.responseText
     || (a?.responseCode ? `${a.responseCode} ${a.message || ""}` : "")
     || a?.message || String(e);
-  const m = raw.toString().split("\n")[0].trim();
+  // sanitizeText strips C0/C1 controls including ESC (\x1b), so a hostile or
+  // MITM'd server cannot smuggle terminal escape sequences out of an
+  // auth-failure response. This string is rendered BOTH in the browser UI and
+  // straight to stdout by the TUI, so it is scrubbed here at the boundary
+  // where the untrusted bytes arrive rather than at each consumer.
+  const m = sanitizeText(raw.toString().split("\n")[0], 1000).trim();
   return m.length > 140 ? m.slice(0, 137) + "…" : m;
 }
 
