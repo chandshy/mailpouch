@@ -51,7 +51,32 @@ try {
   process.exit(1);
 }
 
-const vulns = report.vulnerabilities ?? {};
+// FAIL CLOSED on an audit that did not actually run.
+//
+// `npm audit --json` emits VALID JSON on a registry/network failure, but with
+// no `vulnerabilities` key:
+//
+//   { "message": "request to https://registry.npmjs.org/-/npm/v1/security/
+//                 advisories/bulk failed, reason: connect ECONNREFUSED",
+//     "error": { "summary": "", "detail": "" } }
+//
+// `report.vulnerabilities ?? {}` turned that into "zero findings", so a
+// transient registry outage made this gate print OK and exit 0 — while it is
+// wired to prepublishOnly and the pre-push hook. An audit that could not run
+// is not an audit that found nothing.
+if (report.error || typeof report.message === "string") {
+  const why = report.message ?? JSON.stringify(report.error);
+  console.error(`npm-audit ERROR: npm audit did not complete: ${why}`);
+  console.error("Refusing to report a clean audit for a run that never happened.");
+  process.exit(1);
+}
+if (!report.vulnerabilities || typeof report.vulnerabilities !== "object") {
+  console.error("npm-audit ERROR: `npm audit --json` returned no `vulnerabilities` map.");
+  console.error(res.stdout?.slice(0, 2000) || res.stderr);
+  process.exit(1);
+}
+
+const vulns = report.vulnerabilities;
 const allFindings = [];
 for (const [pkgName, info] of Object.entries(vulns)) {
   if (!info || typeof info !== "object") continue;
