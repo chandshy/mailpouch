@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [4.0.0] — 2026-08-05
 
+### Fixed
+
+- **The `remove_label` data-loss regression test can now actually run.** Unlabelling is `\Deleted` + `EXPUNGE` against `Labels/<name>`, non-destructive only because Proton Bridge maps that to "remove this label" — the one invariant in the codebase whose correctness is owned entirely by upstream. A regression test was added in 3.2.1 to guard it, but it could never execute: the live-Bridge lane set `allowMailboxCreate: mode === "greenmail"`, so creating the token-scoped `Labels/` scratch mailbox it needs was refused and it errored at setup on every run. Being the only test in the suite that creates a scratch mailbox, nothing else revealed the breakage. The fixture may now create its own ownership-scoped scratch mailboxes; `assertScratch` plus exclusive-create still confine that to the `mpE2E-<uuid>` namespace and cannot adopt an existing mailbox, and the MCP-level refusal of `create_folder`/`delete_folder`/`rename_folder` in `bridge-safety.ts` is untouched. The suite now passes 9/9 against live Bridge v3.25.0, including the unlabel-survival assertion.
+
 ### Breaking
 
 - **Node 20 is no longer supported. The minimum is now Node 22.** Node 20 reached end of life on 2026-04-30 and no longer receives security patches, which made the runtime the weakest link in an otherwise fully patched tree. `engines.node` is now `>=22.0.0` and `engines.npm` is `>=10.0.0`; the CI matrix moves from Node 20/22 to 22/24. There is no code-level migration — users on Node 20 must upgrade Node.
