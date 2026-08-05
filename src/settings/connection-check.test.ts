@@ -13,6 +13,8 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 declare global {
   // eslint-disable-next-line no-var
   var __tcpOk: boolean; var __imapAuthOk: boolean; var __smtpAuthOk: boolean; var __imapHang: boolean;
+  // Lets a test make the "server" answer with a hostile AUTH-failure string.
+  var __imapAuthErrorText: string | undefined;
 }
 
 vi.mock("net", () => {
@@ -38,7 +40,7 @@ vi.mock("imapflow", () => {
         ? new Promise(() => { /* never settles — simulates Bridge stalling mid-AUTH */ })
         : globalThis.__imapAuthOk
           ? Promise.resolve()
-          : Promise.reject(Object.assign(new Error("auth"), { responseText: "AUTHENTICATIONFAILED" })),
+          : Promise.reject(Object.assign(new Error("auth"), { responseText: globalThis.__imapAuthErrorText ?? "AUTHENTICATIONFAILED" })),
       logout: () => Promise.resolve(),
       close: () => { /* noop */ },
     };
@@ -64,6 +66,30 @@ beforeEach(() => {
   globalThis.__imapAuthOk = true;
   globalThis.__smtpAuthOk = true;
   globalThis.__imapHang = false;
+  globalThis.__imapAuthErrorText = undefined;
+});
+
+// A remote IMAP/SMTP server controls its own AUTH-failure text, and that text
+// is rendered BOTH in the browser settings UI and written straight to stdout by
+// the TUI. Escape sequences smuggled through it can clear or repaint the
+// terminal — e.g. forging a green "connected" line over a real failure.
+describe("remote error text cannot carry terminal escape sequences", () => {
+  it("strips ANSI/control bytes from a hostile AUTH-failure response", async () => {
+    globalThis.__imapAuthOk = false;
+    globalThis.__imapAuthErrorText =
+      "535 \x1b[2J\x1b[H\x1b[32m connected \x1b[0m".replace(/\\x1b/g, "\x1b");
+
+    const pc = await probeImap("127.0.0.1", 1143, "u", "p", "", true);
+
+    expect(pc.authenticated).toBe(false);
+    expect(pc.error).toBeTruthy();
+    // No ESC, no other C0/C1 control bytes survive to a consumer.
+    expect(pc.error!).not.toContain("\x1b");
+    // eslint-disable-next-line no-control-regex
+    expect(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x80-\x9f]/.test(pc.error!)).toBe(false);
+    // The human-readable part is still there — we sanitized, not blanked.
+    expect(pc.error!).toContain("535");
+  });
 });
 
 describe("probeImap", () => {
