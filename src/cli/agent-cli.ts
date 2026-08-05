@@ -5,6 +5,7 @@
  *   mailpouch agent issue  --name <n> --preset <preset> [--expires <iso>] [--folder a,b]
  *   mailpouch agent list
  *   mailpouch agent revoke <client_id>
+ *   mailpouch agent prune  [--days <n>] [--dry-run]
  *
  * Runs as a short-lived process distinct from the MCP daemon: it edits the
  * on-disk service-account + grant stores directly. `issue`/`list` are fully
@@ -15,6 +16,7 @@
 
 import type { ServiceAccountStore } from "../agents/service-account-store.js";
 import type { AgentGrantStore } from "../agents/grant-store.js";
+import { isServiceAccountGrant } from "../agents/grant-store.js";
 import { PERMISSION_PRESETS, type PermissionPreset } from "../config/schema.js";
 import type { GrantConditions } from "../agents/types.js";
 
@@ -29,7 +31,8 @@ export interface AgentCliDeps {
 const USAGE = `Usage:
   mailpouch agent issue --name <name> --preset <${PERMISSION_PRESETS.join("|")}> [--expires <iso8601>] [--folder a,b,c]
   mailpouch agent list
-  mailpouch agent revoke <client_id>`;
+  mailpouch agent revoke <client_id>
+  mailpouch agent prune [--days <n>] [--dry-run]`;
 
 /** Parse `--flag value` / `--flag=value` pairs and positional args from argv. */
 function parseFlags(args: string[]): { flags: Record<string, string>; positional: string[] } {
@@ -42,8 +45,15 @@ function parseFlags(args: string[]): { flags: Record<string, string>; positional
       if (eq >= 0) {
         flags[a.slice(2, eq)] = a.slice(eq + 1);
       } else {
-        flags[a.slice(2)] = args[i + 1] ?? "";
-        i++;
+        // A following "--flag" is the next flag, not this one's value, so
+        // valueless switches like --dry-run don't swallow it.
+        const next = args[i + 1];
+        if (next === undefined || next.startsWith("--")) {
+          flags[a.slice(2)] = "";
+        } else {
+          flags[a.slice(2)] = next;
+          i++;
+        }
       }
     } else {
       positional.push(a);
@@ -106,16 +116,22 @@ export async function runAgentCli(argv: string[], deps: AgentCliDeps): Promise<n
     }
 
     case "list": {
-      const accounts = deps.serviceAccounts.list();
-      if (accounts.length === 0) { out("No service accounts. Create one with `mailpouch agent issue`."); return 0; }
-      out(`${accounts.length} service account(s):`);
+      // Lists every grant, not just service accounts: interactive OAuth clients
+      // (an MCP app that self-registered) hold grants with no credential record,
+      // and omitting them made `status`'s active count look inconsistent with this.
+      const grants = deps.agentGrants.list().filter(g => g.status !== "revoked" && g.status !== "expired");
+      if (grants.length === 0) { out("No agents. Create a service account with `mailpouch agent issue`."); return 0; }
+      const serviceCount = grants.filter(isServiceAccountGrant).length;
+      out(`${grants.length} agent(s): ${serviceCount} service account(s), ${grants.length - serviceCount} interactive`);
       out("");
-      for (const a of accounts) {
-        const grant = deps.agentGrants.get(a.clientId);
-        const status = grant?.status ?? "(no grant)";
-        const expires = a.conditions?.expiresAt ? ` expires=${a.conditions.expiresAt}` : "";
-        out(`  ${a.clientId}  "${a.clientName}"  preset=${a.preset}  status=${status}${expires}`);
+      for (const g of grants) {
+        const kind = isServiceAccountGrant(g) ? "service" : "interactive";
+        const expires = g.conditions?.expiresAt ? ` expires=${g.conditions.expiresAt}` : "";
+        const lastCall = g.lastCallAt ? ` last=${g.lastCallAt}` : " last=never";
+        out(`  ${g.clientId}  "${g.clientName}"  kind=${kind}  preset=${g.preset}  status=${g.status}  calls=${g.totalCalls}${lastCall}${expires}`);
       }
+      out("");
+      out("Revoked/expired grants are hidden; clear them with `mailpouch agent prune`.");
       return 0;
     }
 
@@ -127,6 +143,27 @@ export async function runAgentCli(argv: string[], deps: AgentCliDeps): Promise<n
       if (!existed && !grant) { err(`error: no service account or grant found for ${clientId}.`); return 1; }
       out(`Revoked ${clientId}: service account ${existed ? "removed" : "absent"}, grant ${grant ? "revoked" : "absent"}.`);
       out("A running daemon drops the live token on its next grant-store sync or restart.");
+      return 0;
+    }
+
+    case "prune": {
+      // A bare `--days` must not fall through to the default: on a removal
+      // path, silently pruning at 90 (or at 0, via Number("")) is the kind of
+      // guess that deletes the wrong records.
+      if (flags.days !== undefined && flags.days.trim() === "") {
+        err("error: --days requires a value."); return 2;
+      }
+      const days = flags.days ? Number(flags.days) : 90;
+      if (!Number.isFinite(days) || days < 0) { err("error: --days must be a non-negative number."); return 2; }
+      if ("dry-run" in flags) {
+        const stale = deps.agentGrants.listPrunable(days);
+        out(`${stale.length} revoked/expired grant(s) older than ${days} day(s) would be removed:`);
+        for (const g of stale) out(`  ${g.clientId}  "${g.clientName}"  status=${g.status}`);
+        return 0;
+      }
+      const removed = deps.agentGrants.prune(days);
+      out(`Removed ${removed} revoked/expired grant(s) older than ${days} day(s).`);
+      out("Active and pending grants are never pruned — revoke them first.");
       return 0;
     }
 

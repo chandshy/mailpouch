@@ -83,6 +83,54 @@ describe("mailpouch agent CLI", () => {
     expect(printed).toContain("status=active");
   });
 
+  it("list includes interactive grants that have no service account", async () => {
+    const h = harness();
+    await runAgentCli(["issue", "--name", "svc", "--preset", "full"], h.deps);
+    h.agentGrants.createPending({ clientId: "pmc_interactive", clientName: "Some MCP App" });
+    h.agentGrants.approve({ clientId: "pmc_interactive", preset: "read_only" });
+    h.out.length = 0;
+    expect(await runAgentCli(["list"], h.deps)).toBe(0);
+    const printed = h.out.join("\n");
+    expect(printed).toContain('"Some MCP App"');
+    expect(printed).toContain("kind=interactive");
+    expect(printed).toContain("kind=service");
+    expect(printed).toMatch(/2 agent\(s\): 1 service account\(s\), 1 interactive/);
+  });
+
+  it("prune drops old revoked grants but keeps active ones", async () => {
+    const h = harness();
+    await runAgentCli(["issue", "--name", "gone", "--preset", "full"], h.deps);
+    await runAgentCli(["issue", "--name", "kept", "--preset", "full"], h.deps);
+    const [a, b] = h.serviceAccounts.list();
+    await runAgentCli(["revoke", a.clientId], h.deps);
+    h.out.length = 0;
+
+    // --dry-run must not mutate, and must not swallow the flag that follows it.
+    expect(await runAgentCli(["prune", "--dry-run", "--days", "0"], h.deps)).toBe(0);
+    expect(h.out.join("\n")).toContain(a.clientId);
+    expect(h.agentGrants.get(a.clientId)).toBeDefined();
+
+    h.out.length = 0;
+    expect(await runAgentCli(["prune", "--days", "0"], h.deps)).toBe(0);
+    expect(h.out.join("\n")).toMatch(/Removed 1 revoked\/expired grant/);
+    expect(h.agentGrants.get(a.clientId)).toBeUndefined();
+    expect(h.agentGrants.get(b.clientId)?.status).toBe("active");
+  });
+
+  it("prune rejects a negative --days with exit code 2", async () => {
+    const h = harness();
+    expect(await runAgentCli(["prune", "--days", "-1"], h.deps)).toBe(2);
+  });
+
+  it("prune rejects a valueless --days rather than guessing a retention window", async () => {
+    const h = harness();
+    await runAgentCli(["issue", "--name", "x", "--preset", "full"], h.deps);
+    const id = h.serviceAccounts.list()[0].clientId;
+    await runAgentCli(["revoke", id], h.deps);
+    expect(await runAgentCli(["prune", "--days"], h.deps)).toBe(2);
+    expect(h.agentGrants.get(id)).toBeDefined(); // nothing removed
+  });
+
   it("revoke removes the account and revokes the grant", async () => {
     const h = harness();
     await runAgentCli(["issue", "--name", "kill", "--preset", "full"], h.deps);
