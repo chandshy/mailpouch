@@ -108,6 +108,18 @@ describe("AgentGrantStore", () => {
     } finally { unsub(); }
   });
 
+  it("ensureActiveServiceGrant preserves call counters across client_credentials re-auth", () => {
+    const s = new AgentGrantStore(path);
+    const args = { clientId: "pmc_cnt", clientName: "cron", preset: "full" as const };
+    s.ensureActiveServiceGrant(args);
+    s.recordCall("pmc_cnt");
+    const afterCall = s.get("pmc_cnt");
+    expect(afterCall?.lastCallAt).toBeDefined();
+    s.ensureActiveServiceGrant(args); // re-auth must not reset "last used" to never
+    expect(s.get("pmc_cnt")?.lastCallAt).toBe(afterCall?.lastCallAt);
+    expect(s.get("pmc_cnt")?.totalCalls).toBe(1);
+  });
+
   it("ensureActiveServiceGrant re-activating a non-active grant DOES notify (grant-approved)", () => {
     const s = new AgentGrantStore(path);
     s.createPending({ clientId: "pmc_cc2", clientName: "cowork" }); // pending, not active

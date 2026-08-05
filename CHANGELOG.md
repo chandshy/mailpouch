@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.1] — 2026-08-05
+
+### Fixed
+
+- **`mailpouch agent list` hid every interactive agent, making it disagree with `status`.** `list` enumerated the service-account store while `status` reported active *grants*, so a daemon serving two service accounts and five self-registered OAuth clients showed "7 agents active" next to a list of 2. Nothing was wrong with either count — they were counting different populations, and the one that mattered for review (which clients can currently reach your mail) was the one you could not see. `list` now enumerates grants, tagging each `kind=service` or `kind=interactive` and showing `calls` and last-use, so the two views reconcile. Revoked and expired grants stay hidden behind the new `prune` command.
+- **Service accounts always reported "last used: never".** `ensureActiveServiceGrant` rebuilds the grant record on every `client_credentials` login and carried `createdAt`, `approvedAt` and `totalCalls` forward but not `lastCallAt`, so each re-auth erased the timestamp while the call counter kept climbing — an account with thousands of calls looked untouched. Interactive grants never take that path, which is why only they retained timestamps. Historical values are unrecoverable; the field repopulates on each account's next call.
+- **A valueless `--flag` consumed the next flag as its value.** `parseFlags` unconditionally took the following argv entry, so `--dry-run --days 0` parsed as `dry-run="--days"` and silently dropped the retention window. A following `--`-prefixed token is now treated as the next flag.
+
+### Added
+
+- **`mailpouch agent prune [--days <n>] [--dry-run]`** clears revoked and expired grants, which previously accumulated on disk forever: `AgentGrantStore.prune()` existed but was never called from production code. Defaults to a 90-day retention window, never touches active or pending grants, and `--dry-run` previews from `listPrunable()` — the same predicate the removal runs on, so the preview cannot drift from the deletion. A bare `--days` with no value is rejected rather than falling back to a guessed window.
+
 ## [4.0.0] — 2026-08-05
 
 ### Fixed

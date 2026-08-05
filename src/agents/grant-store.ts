@@ -239,6 +239,10 @@ export class AgentGrantStore {
         createdAt: existing?.createdAt ?? now,
         approvedAt: existing?.approvedAt ?? now,
         totalCalls: existing?.totalCalls ?? 0,
+        // Carried forward with totalCalls: this rebuild runs on every
+        // client_credentials login, so dropping it reset service accounts to
+        // "last used: never" no matter how many calls they had made.
+        lastCallAt: existing?.lastCallAt,
         transport: "http",
         credentialKind: "service_account",
         note: LEGACY_SERVICE_ACCOUNT_GRANT_NOTE,
@@ -449,21 +453,29 @@ export class AgentGrantStore {
     return rows;
   }
 
+  /**
+   * The grants {@link prune} would drop. Exposed so a caller can preview the
+   * removal (`agent prune --dry-run`) against the same predicate that performs
+   * it — a second copy of this rule silently drifts from the real one.
+   */
+  listPrunable(retainDays = 90, now = Date.now()): AgentGrant[] {
+    const cutoff = now - retainDays * 24 * 60 * 60_000;
+    return [...this.grants.values()].filter(g => {
+      if (g.status !== "revoked" && g.status !== "expired") return false;
+      const endAt = g.revokedAt ?? g.approvedAt ?? g.createdAt;
+      // Inclusive: retainDays=0 means "everything already revoked", which is
+      // otherwise a coin flip against a same-millisecond cutoff.
+      return Date.parse(endAt) <= cutoff;
+    });
+  }
+
   /** Drop revoked/expired grants older than `retainDays` days. */
   prune(retainDays = 90, now = Date.now()): number {
     return this.mutate(() => {
-      const cutoff = now - retainDays * 24 * 60 * 60_000;
-      let removed = 0;
-      for (const [k, g] of this.grants) {
-        if (g.status !== "revoked" && g.status !== "expired") continue;
-        const endAt = g.revokedAt ?? g.approvedAt ?? g.createdAt;
-        if (Date.parse(endAt) < cutoff) {
-          this.grants.delete(k);
-          removed++;
-        }
-      }
-      if (removed > 0) this.persist();
-      return removed;
+      const doomed = this.listPrunable(retainDays, now);
+      for (const g of doomed) this.grants.delete(g.clientId);
+      if (doomed.length > 0) this.persist();
+      return doomed.length;
     });
   }
 }
