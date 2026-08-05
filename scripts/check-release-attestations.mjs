@@ -2,7 +2,9 @@
 
 import { appendFileSync } from "node:fs";
 import {
+  BRIDGE_E2E_STATUS_CONTEXT,
   REQUIRED_RELEASE_WORKFLOWS,
+  classifyBridgeStatus,
   normalizeCommitSha,
   releaseNotesWaiveBridgeE2E,
   requireSuccessfulBridgeStatus,
@@ -76,11 +78,36 @@ for (const workflow of REQUIRED_RELEASE_WORKFLOWS) {
 // CI and preship attestations above are NEVER waivable.
 const waivedByDispatch = process.env.MAILPOUCH_WAIVE_BRIDGE_E2E === "true";
 const waivedByNotes = releaseNotesWaiveBridgeE2E(process.env.MAILPOUCH_RELEASE_BODY);
-if (waivedByDispatch || waivedByNotes) {
+const waived = waivedByDispatch || waivedByNotes;
+
+// The status is fetched unconditionally, even when waived. Checking the waiver
+// first and returning early — the previous shape — meant a waiver skipped the
+// lookup entirely, so a RED Bridge run published exactly as easily as an unrun
+// one. A waiver is a statement that no evidence was gathered; it is not a
+// licence to ignore evidence that was gathered and came back broken.
+const verdict = classifyBridgeStatus({
+  expectedSha: sha,
+  combinedStatus: await github(`/commits/${sha}/status?per_page=100`),
+});
+
+if (verdict.kind === "failed") {
+  throw new Error(
+    `${BRIDGE_E2E_STATUS_CONTEXT} latest status for ${sha} is ${String(verdict.state)}` +
+      `${verdict.evidence?.url ? ` (${verdict.evidence.url})` : ""}` +
+      (waived ? " — a waiver cannot suppress a failed Bridge run, only an absent one" : ""),
+  );
+}
+
+if (verdict.kind === "success") {
+  process.stdout.write(
+    `release-attestation OK: Proton Bridge E2E (${verdict.evidence?.url ?? "no URL"})\n`,
+  );
+} else if (waived) {
   const via = waivedByDispatch ? "workflow_dispatch input" : "release-notes marker";
+  const because = verdict.state === "pending" ? "still running" : "never run";
   const message =
     "release-attestation WAIVED: Proton Bridge E2E was explicitly waived for this release " +
-    `(commit ${sha}, via ${via}). No live Proton Bridge evidence exists for these bytes.`;
+    `(commit ${sha}, via ${via}; evidence ${because}). No live Proton Bridge evidence exists for these bytes.`;
   process.stdout.write(`${message}\n`);
   // Also surface it on the run summary: a waiver buried in step logs is not the
   // "loud" this gate's design depends on.
@@ -91,9 +118,10 @@ if (waivedByDispatch || waivedByNotes) {
     );
   }
 } else {
-  const combinedStatus = await github(`/commits/${sha}/status?per_page=100`);
-  const bridge = requireSuccessfulBridgeStatus({ expectedSha: sha, combinedStatus });
-  process.stdout.write(
-    `release-attestation OK: Proton Bridge E2E (${bridge.url ?? "no URL"})\n`,
-  );
+  // Not waived and no usable evidence — reuse the strict checker so the error
+  // wording for missing/pending evidence stays in one place.
+  requireSuccessfulBridgeStatus({
+    expectedSha: sha,
+    combinedStatus: await github(`/commits/${sha}/status?per_page=100`),
+  });
 }
