@@ -20,6 +20,7 @@ import { homedir } from "os";
 import { createConnection } from "net";
 import { spawn } from "child_process";
 import { startSettingsServer } from "./settings/server.js";
+import { instanceIdMatches } from "./settings/instance-identity.js";
 import { openBrowser } from "./settings/tui.js";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -2652,8 +2653,9 @@ function _tickTrayHealth(): void {
 /**
  * Probe whether a mailpouch settings UI is already serving on `port`.
  * Returns the base URL if the port is occupied by another mailpouch UI
- * (identified by a valid `/api/status` response with the expected shape),
- * or null if the port is free or occupied by something else.
+ * (proved by a `/api/status` response echoing the instance nonce published
+ * beside the 0o600 config), or null if the port is free, occupied by
+ * something else, or occupied by a listener that cannot prove identity.
  *
  * Used so we can defer to a user-run `mailpouch-settings` daemon instead
  * of retrying + warning — the common "standalone settings UI plus stdio
@@ -2685,7 +2687,13 @@ async function _probeExistingMailpouchUi(port: number): Promise<string | null> {
         res.on("end", () => {
           try {
             const parsed = JSON.parse(body) as Record<string, unknown>;
-            if (typeof parsed.hasConfig === "boolean") {
+            // Identity is the nonce, NOT the shape. `hasConfig` is a boolean
+            // any listener can echo; deferring on it let whoever bound this
+            // port first become the URL we advertise to the tray and to
+            // agents — i.e. the page that asks for the Bridge password.
+            // instanceIdMatches reads the nonce from beside the 0o600 config,
+            // which a squatting process running as another user cannot read.
+            if (instanceIdMatches(parsed.instanceId)) {
               finish(`http://localhost:${port}`);
               return;
             }
@@ -2708,9 +2716,10 @@ async function _startSettingsServerDaemon(): Promise<void> {
 
   // If a user-run `mailpouch-settings` instance is already serving on the
   // configured port, reuse it silently rather than retry-and-warn. Probes with
-  // a short GET /api/status — any non-mailpouch listener (e.g. a stray
-  // `python3 -m http.server`) responds with a different shape and falls through
-  // to the bind-then-fallback path below.
+  // a short GET /api/status — any listener that cannot echo the instance nonce
+  // (a stray `python3 -m http.server`, or a process squatting the port to be
+  // mistaken for the settings UI) falls through to the bind-then-fallback path
+  // below, so we advertise a URL we are serving ourselves.
   const existing = await _probeExistingMailpouchUi(basePort);
   if (existing) {
     _settingsUrl      = existing;

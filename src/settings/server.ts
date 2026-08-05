@@ -52,6 +52,7 @@ import {
   buildPermissions,
   configExists,
 } from "../config/loader.js";
+import { publishInstanceId, currentInstanceId, clearInstanceId } from "./instance-identity.js";
 import { checkConnections } from "./connection-check.js";
 import {
   ALL_TOOLS,
@@ -1190,15 +1191,20 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
       }
 
       // ── GET /api/status ───────────────────────────────────────────────────
-      // `hasConfig` is the load-bearing field the singleton probe checks
-      // (src/index.ts) — keep it. The rest is the live snapshot `mailpouch
-      // status` surfaces; present only when the running instance supplied a
-      // status provider.
+      // `instanceId` is the load-bearing field the singleton probe checks
+      // (src/index.ts) — keep it. It is a nonce published at bind time beside
+      // the 0o600 config, so a listener that squatted this port cannot forge
+      // it. `hasConfig` remains for `mailpouch status` and older callers, but
+      // it is NOT an identity claim: it is a forgeable boolean. The rest is
+      // the live snapshot `mailpouch status` surfaces; present only when the
+      // running instance supplied a status provider.
       if (method === "GET" && path === "/api/status") {
         const live = secOpts.onStatus?.();
+        const instanceId = currentInstanceId();
         json(res, 200, {
           hasConfig: configExists(),
           version: _agentSetupPkgVersion,
+          ...(instanceId ? { instanceId } : {}),
           ...(live ?? {}),
         });
         return;
@@ -2997,6 +3003,11 @@ export async function startSettingsServer(
     server.listen(port, bindHost, () => resolve());
   });
 
+  // Publish this instance's identity nonce only once the bind succeeded —
+  // publishing before would advertise an identity for a server that may never
+  // come up, and the probe would then reuse a port nothing is serving.
+  publishInstanceId();
+
   // ── Startup banner ────────────────────────────────────────────────────────
   if (!quiet) {
     const localUrl  = `${scheme}://localhost:${port}`;
@@ -3065,9 +3076,10 @@ export async function startSettingsServer(
   }
 
   const stop = (): Promise<void> =>
-    new Promise((resolve, reject) =>
-      server.close((err) => (err ? reject(err) : resolve()))
-    );
+    new Promise((resolve, reject) => {
+      clearInstanceId();
+      server.close((err) => (err ? reject(err) : resolve()));
+    });
 
   return { scheme, stop };
 }

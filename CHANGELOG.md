@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- The settings-UI singleton probe now authenticates the listener it defers to. Previously `_probeExistingMailpouchUi` treated *any* process answering `GET /api/status` with a boolean `hasConfig` field as a genuine mailpouch settings UI, and permanently adopted its URL. Since a response shape is trivial to forge, whoever bound the settings port first became the address mailpouch advertised through the tray and to agents — which is where the user is asked to type their Bridge password. The real UI now publishes a 256-bit nonce beside the config at `0o600` and echoes it on `/api/status`; the probe compares it constant-time and binds its own server on any mismatch. This closes the case of a *different* local user or a sandboxed process, which can bind loopback but cannot read the config. It does not (and cannot) defend against an attacker already running as the config's owner, who has the config and keyring regardless.
+
+  Mixed-version note: a v4 process will not reuse a pre-v4 `mailpouch-settings` daemon, because the older daemon publishes no nonce. It falls back to binding its own port, so you may briefly see two settings UIs until both are upgraded.
 - Cleared three dependency advisories that had accumulated against transitive packages, all of which were failing the ship-readiness gate on every open PR:
   - `fast-uri` <4.1.2 (HIGH) — host confusion via a backslash authority introducer.
   - `ip-address` <=10.3.0 (HIGH) — leading-zero octets decoded as decimal where resolvers decode octal, a CIDR suffix suppressing special-use classification, and misclassified IPv4-mapped/NAT64 addresses. All three permit SSRF and trust-boundary bypasses.
