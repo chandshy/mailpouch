@@ -23,6 +23,10 @@ import { ImapFlow } from "imapflow";
 import { bridgeConfigAvailable, startE2E, type E2EHarness } from "../mcp-client.js";
 import * as docker from "../support/docker.js";
 import { TEST_USER, TEST_USER_BOB } from "../support/docker.js";
+import { BRIDGE_DELIVERY_WAIT_MS } from "../support/time-budgets.mjs";
+
+/** Live Proton round-trips are remote; Greenmail is in-process. */
+const DELIVERY_WAIT_MS = bridgeConfigAvailable() ? BRIDGE_DELIVERY_WAIT_MS : 30_000;
 
 /**
  * Poll bob's INBOX until at least `expected` messages are present. Greenmail
@@ -118,7 +122,7 @@ async function wipeBobInbox(): Promise<void> {
 /** Bridge delivery verification is self-addressed and identity-scoped. Poll
  * only for the unique run-token subject; pre-existing Inbox mail is never
  * enumerated, changed, or used as an assertion target. */
-async function waitForOwnedSubject(h: E2EHarness, subject: string, timeoutMs = 30_000): Promise<number[]> {
+async function waitForOwnedSubject(h: E2EHarness, subject: string, timeoutMs = DELIVERY_WAIT_MS): Promise<number[]> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const uids = await h.imap.searchSubject("INBOX", subject);
@@ -132,7 +136,7 @@ async function waitForBridgeDelivery(
   h: E2EHarness,
   messageId: string,
   bodyToken: string,
-  timeoutMs = 30_000,
+  timeoutMs = DELIVERY_WAIT_MS,
 ): Promise<number[]> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {

@@ -11,6 +11,15 @@ export const BRIDGE_CLEANUP_SETTLE_MS = 600_000;
  * projections from concrete-folder cleanup disappear without creating an
  * ambiguous rescue cycle around an already-deleted record. */
 export const BRIDGE_ALL_MAIL_RESCUE_STABILITY_MS = 30_000;
+/** A self-addressed send must leave via Proton's SMTP, be processed server-side,
+ * and return over IMAP before the assertion can see it. That round-trip is
+ * bounded by Proton's load, not by mailpouch: at 30s it failed 2 of 6 identical
+ * live runs on the same assertion while `send_email` reported success every
+ * time, so the suite was measuring remote latency and reporting it as a product
+ * defect — on a gate that blocks releases. Polling exits as soon as the message
+ * lands, so a generous ceiling costs nothing on a healthy round-trip.
+ * Greenmail is in-process and stays at its own tight budget. */
+export const BRIDGE_DELIVERY_WAIT_MS = 120_000;
 /** One ambiguous live mutation must fail well before the convergence phase.
  * Closing the socket prevents any later client-side command from dispatching;
  * the durable manifest makes the next explicit recovery attempt authoritative. */
