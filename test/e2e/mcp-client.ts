@@ -906,7 +906,27 @@ export async function startE2E(opts: StartE2EOptions = {}): Promise<E2EHarness> 
       tls: imapTls,
       allowWipe,
       allowCreateSystemFolders: mode === "greenmail",
-      allowMailboxCreate: mode === "greenmail",
+      // The live-Bridge lane must be able to create its OWN token-scoped
+      // scratch mailboxes, or ScratchSession — which this harness constructs
+      // for every bridge run — can never create anything, and any test that
+      // needs a scratch Labels/ mailbox dies at setup. That is exactly what
+      // happened to the remove_label unlabel-survival regression test: it is
+      // Bridge-only by necessity (Greenmail cannot express the invariant, as
+      // there a Labels/ mailbox is an ordinary folder), so it errored on every
+      // run and never actually guarded the invariant it was written for.
+      //
+      // This does NOT loosen the live-mailbox safety model. Two other guards
+      // remain, and they are the ones doing the work:
+      //   - createMailbox still requires assertScratch(path, ownershipToken)
+      //     and exclusive creation whenever allowCreateSystemFolders is false
+      //     (which it is, above, for bridge) — so creation is confined to the
+      //     mpE2E-<uuid> namespace and can never adopt a pre-existing mailbox.
+      //   - the MCP-level refusal of create_folder/delete_folder/rename_folder
+      //     lives in bridge-safety.ts and is untouched by this flag, so the
+      //     "refuses live folder creation before MCP dispatch" test still holds.
+      // `safe` is always true for bridge (see the guard above rejecting
+      // safe:false), so this reads as "greenmail, or an ownership-scoped run".
+      allowMailboxCreate: mode === "greenmail" || safe,
       requireUidPlusForMutations: mode === "bridge",
       ownershipManifestRoot: bridgeAuthorityScope?.scopeRoot,
     });
