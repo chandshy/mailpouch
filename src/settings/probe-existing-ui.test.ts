@@ -20,20 +20,31 @@ import { mkdtempSync, rmSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
 import { probeExistingMailpouchUi } from "./probe-existing-ui.js";
-import { publishInstanceId, clearInstanceId } from "./instance-identity.js";
+import { publishInstanceId, clearInstanceId, answerChallenge } from "./instance-identity.js";
 
 /** Stand up a listener that answers GET /api/status with `payload`. */
-async function listener(payload: string | (() => string)): Promise<{ port: number; close: () => Promise<void> }> {
+async function listener(
+  payload: string | ((challenge: string) => string),
+): Promise<{ port: number; close: () => Promise<void> }> {
   const server = http.createServer((req, res) => {
-    if (req.url !== "/api/status") { res.statusCode = 404; res.end(); return; }
+    const u = new URL(req.url ?? "/", "http://localhost");
+    if (u.pathname !== "/api/status") { res.statusCode = 404; res.end(); return; }
     res.setHeader("content-type", "application/json");
-    res.end(typeof payload === "function" ? payload() : payload);
+    const challenge = u.searchParams.get("challenge") ?? "";
+    res.end(typeof payload === "function" ? payload(challenge) : payload);
   });
+  // Track sockets so close() cannot hang on a lingering connection — a test
+  // server that outlives its test slows every later file in the worker.
+  const sockets = new Set<import("node:net").Socket>();
+  server.on("connection", (s) => { sockets.add(s); s.on("close", () => sockets.delete(s)); });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
   const port = (server.address() as AddressInfo).port;
   return {
     port,
-    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    close: () => new Promise<void>((resolve) => {
+      for (const s of sockets) s.destroy();
+      server.close(() => resolve());
+    }),
   };
 }
 
@@ -64,18 +75,39 @@ describe("settings-UI probe identity", () => {
     expect(await probeExistingMailpouchUi(l.port)).toBeNull();
   });
 
-  it("refuses a squatter that guesses a wrong nonce", async () => {
+  it("refuses a squatter that guesses a wrong proof", async () => {
     publishInstanceId();
-    const l = await listener(JSON.stringify({ hasConfig: true, instanceId: "f".repeat(64) }));
+    const l = await listener(JSON.stringify({ hasConfig: true, instanceProof: "f".repeat(64) }));
     stop = l.close;
     expect(await probeExistingMailpouchUi(l.port)).toBeNull();
   });
 
-  it("accepts the genuine UI echoing the published nonce", async () => {
-    const id = publishInstanceId();
-    const l = await listener(JSON.stringify({ hasConfig: true, instanceId: id }));
+  // The genuine UI answers the challenge the way the real server does.
+  it("accepts the genuine UI answering the challenge", async () => {
+    publishInstanceId();
+    const l = await listener((challenge) =>
+      JSON.stringify({ hasConfig: true, instanceProof: answerChallenge(challenge) }));
     stop = l.close;
     expect(await probeExistingMailpouchUi(l.port)).toBe(`http://localhost:${l.port}`);
+  });
+
+  // The regression test for the leak: a squatter that harvested the raw nonce
+  // from the old unauthenticated /api/status must still be refused, because
+  // the probe now wants a proof bound to a fresh challenge.
+  it("refuses a squatter replaying a harvested raw nonce", async () => {
+    const id = publishInstanceId();
+    const l = await listener(JSON.stringify({ hasConfig: true, instanceId: id, instanceProof: id }));
+    stop = l.close;
+    expect(await probeExistingMailpouchUi(l.port)).toBeNull();
+  });
+
+  // A proof is bound to the challenge it answered; a stale one is worthless.
+  it("refuses a squatter replaying a proof from an earlier challenge", async () => {
+    publishInstanceId();
+    const stale = answerChallenge("an-old-challenge");
+    const l = await listener(JSON.stringify({ hasConfig: true, instanceProof: stale }));
+    stop = l.close;
+    expect(await probeExistingMailpouchUi(l.port)).toBeNull();
   });
 
   it("refuses a listener that is not serving JSON at all", async () => {
@@ -86,9 +118,10 @@ describe("settings-UI probe identity", () => {
   });
 
   it("refuses a listener that floods the probe with a huge body", async () => {
-    const id = publishInstanceId();
-    // Valid nonce, but buried past the 4 KB cap — the cap must win.
-    const l = await listener(() => " ".repeat(8192) + JSON.stringify({ instanceId: id }));
+    publishInstanceId();
+    // Valid proof, but buried past the 4 KB cap — the cap must win.
+    const l = await listener((challenge) =>
+      " ".repeat(8192) + JSON.stringify({ instanceProof: answerChallenge(challenge) }));
     stop = l.close;
     expect(await probeExistingMailpouchUi(l.port)).toBeNull();
   });
@@ -104,7 +137,7 @@ describe("settings-UI probe identity", () => {
 
   it("refuses even a correct-looking response when no instance has published", async () => {
     // No publishInstanceId() — nothing legitimate is running.
-    const l = await listener(JSON.stringify({ hasConfig: true, instanceId: "a".repeat(64) }));
+    const l = await listener(JSON.stringify({ hasConfig: true, instanceProof: "a".repeat(64) }));
     stop = l.close;
     expect(await probeExistingMailpouchUi(l.port)).toBeNull();
   });

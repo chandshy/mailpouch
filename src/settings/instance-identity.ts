@@ -1,4 +1,4 @@
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { randomBytes, timingSafeEqual, createHash } from "node:crypto";
 import { writeFileSync, readFileSync, rmSync } from "node:fs";
 import { dirname, join, basename } from "node:path";
 import { getConfigPath } from "../config/loader.js";
@@ -15,15 +15,23 @@ import { getConfigPath } from "../config/loader.js";
  *
  * The asymmetry a fix can stand on: any local user can bind 127.0.0.1, but the
  * config file is 0o600. So the real UI publishes a random nonce *beside the
- * config, at the same 0o600*, and echoes it on /api/status. A listener that
- * cannot read the file cannot produce the nonce.
+ * config, at the same 0o600*, and proves it holds that nonce on demand.
+ *
+ * The nonce is NEVER sent over the wire. The first version of this echoed it
+ * on /api/status, which is unauthenticated in loopback mode — the access token
+ * is only generated for LAN mode. That let any local process fetch the secret,
+ * wait for the real UI to die without a clean shutdown (which leaves the file
+ * behind), then bind the port and replay it: a complete bypass of the control.
+ * Instead the probe sends a fresh challenge and we answer sha256(nonce:challenge),
+ * so a proof is useless to anyone who did not already hold the nonce, and
+ * useless again on the next probe.
  *
  * ponytail: this does NOT defend against an attacker already running as the
- * config's owner — such an attacker can read the nonce, and has the config and
- * keyring anyway. The threat it closes is the different-local-user / sandboxed-
- * process case. Upgrade path if that stops being enough: a peer-credential
- * check on the socket (SO_PEERCRED / LOCAL_PEERCRED), which is unixy and does
- * not port cleanly to Windows.
+ * config's owner — such an attacker can read the nonce file, and has the config
+ * and keyring anyway. The threat it closes is the different-local-user /
+ * sandboxed-process case. Upgrade path if that stops being enough: a
+ * peer-credential check on the socket (SO_PEERCRED / LOCAL_PEERCRED), which is
+ * unixy and does not port cleanly to Windows.
  */
 
 /**
@@ -69,20 +77,46 @@ export function clearInstanceId(): void {
   try { rmSync(instancePath(), { force: true }); } catch { /* nothing to undo */ }
 }
 
+/** A fresh challenge for one probe. */
+export function newChallenge(): string {
+  return randomBytes(32).toString("hex");
+}
+
+function proof(nonce: string, challenge: string): string {
+  return createHash("sha256").update(`${nonce}:${challenge}`).digest("hex");
+}
+
 /**
- * Does `candidate` match the nonce currently on disk? Constant-time.
- * False whenever the file is missing, unreadable, or the wrong shape — the
- * caller then binds its own server, which is the safe default.
+ * Answer a probe's challenge, proving we hold the nonce WITHOUT disclosing it.
+ *
+ * The first version of this echoed the raw nonce on /api/status. That route is
+ * unauthenticated in loopback mode (the access token is only generated for LAN
+ * mode), so any local process could simply fetch the nonce, wait for the real
+ * UI to die without a clean shutdown — leaving the file behind — then bind the
+ * port and replay it. A secret served to whoever asks is not a secret.
  */
-export function instanceIdMatches(candidate: unknown): boolean {
+export function answerChallenge(challenge: unknown): string | null {
+  if (typeof challenge !== "string" || challenge.length === 0 || challenge.length > 128) return null;
+  if (!_current) return null;
+  return proof(_current, challenge);
+}
+
+/**
+ * Does `candidate` prove knowledge of the nonce on disk, for `challenge`?
+ * Constant-time. False whenever the file is missing, unreadable, or the proof
+ * does not match — the caller then binds its own server, the safe default.
+ */
+export function instanceProofMatches(challenge: string, candidate: unknown): boolean {
   if (typeof candidate !== "string" || candidate.length === 0) return false;
-  let expected: string;
+  let nonce: string;
   try {
-    expected = readFileSync(instancePath(), "utf-8").trim();
+    nonce = readFileSync(instancePath(), "utf-8").trim();
   } catch {
     return false;
   }
-  if (expected.length === 0 || candidate.length !== expected.length) return false;
+  if (nonce.length === 0) return false;
+  const expected = proof(nonce, challenge);
+  if (candidate.length !== expected.length) return false;
   try {
     return timingSafeEqual(Buffer.from(candidate, "utf-8"), Buffer.from(expected, "utf-8"));
   } catch {
