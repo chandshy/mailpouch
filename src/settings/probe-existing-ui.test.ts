@@ -33,11 +33,18 @@ async function listener(
     const challenge = u.searchParams.get("challenge") ?? "";
     res.end(typeof payload === "function" ? payload(challenge) : payload);
   });
+  // Track sockets so close() cannot hang on a lingering connection — a test
+  // server that outlives its test slows every later file in the worker.
+  const sockets = new Set<import("node:net").Socket>();
+  server.on("connection", (s) => { sockets.add(s); s.on("close", () => sockets.delete(s)); });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
   const port = (server.address() as AddressInfo).port;
   return {
     port,
-    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    close: () => new Promise<void>((resolve) => {
+      for (const s of sockets) s.destroy();
+      server.close(() => resolve());
+    }),
   };
 }
 

@@ -30,7 +30,16 @@ export async function probeExistingMailpouchUi(port: number): Promise<string | n
       resolve(url);
     };
     const req = http.request(
-      { host: "127.0.0.1", port, path: `/api/status?challenge=${challenge}`, method: "GET", timeout: 750 },
+      {
+        host: "127.0.0.1", port, path: `/api/status?challenge=${challenge}`,
+        method: "GET", timeout: 750,
+        // agent:false — one-shot connection, never pooled. Node 19+ made the
+        // global agent keepAlive by default, so the default would leave a
+        // live socket to whatever answered this probe, including a listener
+        // we just decided NOT to trust, and would keep any server we probed
+        // from closing until its keep-alive timeout expired.
+        agent: false,
+      },
       (res) => {
         let body = "";
         res.setEncoding("utf8");
