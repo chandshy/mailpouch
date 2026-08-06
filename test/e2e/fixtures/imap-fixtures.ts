@@ -151,6 +151,9 @@ interface MailboxSafetyState {
 export interface MailboxSafetyVerification {
   ok: boolean;
   errors: string[];
+  /** Discrepancies in mailboxes this run could not have mutated. Reported, but
+   * never a reason to fail — see `mutationScopePaths`. */
+  drift?: string[];
 }
 
 export interface AppendedSeedIdentity {
@@ -519,13 +522,60 @@ export class ImapFixtures {
     );
   }
 
+  /**
+   * Mailboxes this run could plausibly have mutated, derived from durable
+   * manifest state rather than a hardcoded list so it cannot drift from what
+   * the run actually did.
+   *
+   * The baseline snapshots every selectable mailbox in the account, which is
+   * right for a disposable test account and wrong for a live personal one:
+   * folders the suite never writes to (Spam, unrelated Labels) drift on their
+   * own via Proton's auto-purge and ordinary mail movement, and that drift is
+   * indistinguishable from E2E damage. Each false failure retains a run that
+   * blocks every later run.
+   *
+   * INBOX and All Mail stay in scope: sends land in INBOX, and All Mail is the
+   * virtual union containing everything the run creates.
+   */
+  private mutationScopePaths(): Set<string> {
+    const scope = new Set<string>(["INBOX"]);
+    for (const path of this.allMailPaths) scope.add(path);
+    const manifest = this.ownershipManifest;
+    if (manifest) {
+      for (const proof of manifest.createdMailboxes()) scope.add(proof.path);
+      for (const proof of manifest.pending()) {
+        if ("folder" in proof && typeof proof.folder === "string" && proof.folder) {
+          scope.add(proof.folder);
+        }
+      }
+    }
+    return scope;
+  }
+
+  /** True when `path` is outside everything this run could have mutated. */
+  private isOutsideMutationScope(path: string, scope: Set<string>): boolean {
+    if (scope.has(path)) return false;
+    // Ask isAllMailPath rather than trusting the discovered set: All Mail is
+    // also recognised by name, and a set populated only by a live LIST would
+    // silently demote the virtual union to drift.
+    if (this.isAllMailPath(path)) return false;
+    // A token-shaped path is this run's own namespace even if the manifest lost
+    // the created-mailbox proof — never treat it as somebody else's folder.
+    return !(this.ownershipToken && path.includes(this.ownershipToken));
+  }
+
   private async verifySafetySnapshotUnchecked(
     snapshot: MailboxSafetySnapshot,
   ): Promise<MailboxSafetyVerification> {
-    const errors: string[] = [];
+    // Collected with their mailbox so scope is applied once, at the end. The
+    // checks below push from many branches; deciding per push site is how one
+    // branch quietly lands on the wrong side of the boundary.
+    const found: Array<{ path: string; message: string }> = [];
     const currentPaths = new Set(await this.listMailboxes());
     for (const path of snapshot.mailboxPaths) {
-      if (!currentPaths.has(path)) errors.push(`baseline mailbox was removed or renamed: ${path}`);
+      if (!currentPaths.has(path)) {
+        found.push({ path, message: `baseline mailbox was removed or renamed: ${path}` });
+      }
     }
 
     for (const [path, baseline] of Object.entries(snapshot.messages)) {
@@ -537,21 +587,19 @@ export class ImapFixtures {
         // A deadline abort is process-wide cleanup state, not a mailbox-level
         // verification failure. Never swallow it and continue into more FETCHes.
         this.throwIfCleanupAborted();
-        errors.push(`could not verify baseline mailbox ${path}: ${error instanceof Error ? error.message : String(error)}`);
+        found.push({ path, message: `could not verify baseline mailbox ${path}: ${error instanceof Error ? error.message : String(error)}` });
         continue;
       }
 
       const virtual = this.isAllMailPath(path);
       const baselineUidValidity = snapshot.uidValidity[path];
       if (!baselineUidValidity) {
-        errors.push(`${path}: baseline snapshot has no UIDVALIDITY proof`);
+        found.push({ path, message: `${path}: baseline snapshot has no UIDVALIDITY proof` });
         continue;
       }
       if (!virtual && current.uidValidity !== baselineUidValidity) {
-        errors.push(
-          `${path}: UIDVALIDITY changed from ${baselineUidValidity} to ${current.uidValidity} ` +
-          `(mailbox was deleted or recreated)`,
-        );
+        found.push({ path, message: `${path}: UIDVALIDITY changed from ${baselineUidValidity} to ${current.uidValidity} ` +
+          `(mailbox was deleted or recreated)`, });
         continue;
       }
 
@@ -566,7 +614,7 @@ export class ImapFixtures {
           const count = available.get(key) ?? 0;
           if (count === 0) {
             const identity = message.messageId ? `Message-ID ${message.messageId}` : `UID ${message.uid}`;
-            errors.push(`${path}: baseline virtual ${identity} is missing or its flags changed`);
+            found.push({ path, message: `${path}: baseline virtual ${identity} is missing or its flags changed` });
           } else {
             available.set(key, count - 1);
           }
@@ -578,23 +626,28 @@ export class ImapFixtures {
       for (const message of baseline) {
         const observed = currentByUid.get(message.uid);
         if (!observed) {
-          errors.push(`${path}: baseline UID ${message.uid} is missing`);
+          found.push({ path, message: `${path}: baseline UID ${message.uid} is missing` });
           continue;
         }
         if (observed.messageId !== message.messageId) {
-          errors.push(
-            `${path}: baseline UID ${message.uid} Message-ID changed from ` +
-            `${message.messageId ?? "(missing)"} to ${observed.messageId ?? "(missing)"}`,
-          );
+          found.push({ path, message: `${path}: baseline UID ${message.uid} Message-ID changed from ` +
+            `${message.messageId ?? "(missing)"} to ${observed.messageId ?? "(missing)"}`, });
         }
         if (observed.flags.length !== message.flags.length
           || observed.flags.some((flag, index) => flag !== message.flags[index])) {
-          errors.push(`${path}: baseline UID ${message.uid} flags changed`);
+          found.push({ path, message: `${path}: baseline UID ${message.uid} flags changed` });
         }
       }
     }
     this.throwIfCleanupAborted();
-    return { ok: errors.length === 0, errors };
+    const scope = this.mutationScopePaths();
+    const errors: string[] = [];
+    const drift: string[] = [];
+    for (const entry of found) {
+      if (this.isOutsideMutationScope(entry.path, scope)) drift.push(entry.message);
+      else errors.push(entry.message);
+    }
+    return { ok: errors.length === 0, errors, ...(drift.length > 0 ? { drift } : {}) };
   }
 
   /** APPEND a raw MIME message to `folder`. Returns the assigned UID.
