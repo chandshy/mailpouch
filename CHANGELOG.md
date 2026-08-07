@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.2] — 2026-08-06
+
+### Changed
+
+- **Live-Bridge baseline verification is now scoped to mailboxes the run could have mutated.** The suite snapshots pre-existing mailbox state and verifies it survived, across *every* selectable mailbox in the account. That is correct for the disposable test account it was designed for; against a live personal mailbox it also covers folders the suite never writes to, where Proton's own Spam auto-purge and ordinary mail movement produce discrepancies indistinguishable from E2E damage — each one retaining a run that then blocks every later run, so the release gate fails for reasons unrelated to mailpouch. Scope is derived from durable manifest state (INBOX, All Mail, run-created mailboxes, folders named by pending proofs); discrepancies inside it stay fatal, outside it they are reported as drift. This is a deliberate reduction in coverage: a bug writing outside that scope would no longer be caught by the audit. All Mail remains in scope, so a busy account can still fail — running against a disposable Bridge account is still strongly preferred.
+
 ## [4.0.1] — 2026-08-05
 
 ### Fixed

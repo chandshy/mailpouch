@@ -209,4 +209,41 @@ describe("live Bridge baseline verification", () => {
     expect(verification.ok).toBe(false);
     expect(verification.errors.join(" ")).toMatch(/All Mail.*original@example\.test.*missing/i);
   });
+  it("keeps discrepancies fatal in mailboxes the run could have mutated", async () => {
+    // INBOX is always in scope: sends land there.
+    const h = baselineFixture(ORIGINAL, "INBOX");
+    const snapshot = await h.fixture.captureSafetySnapshot();
+    h.setState({ uidValidity: ORIGINAL.uidValidity, messages: [ORIGINAL.messages[1]!] });
+
+    const verification = await h.fixture.verifySafetySnapshot(snapshot);
+    expect(verification.ok).toBe(false);
+    expect(verification.drift ?? []).toHaveLength(0);
+  });
+
+  it("keeps All Mail fatal — it is the virtual union of everything the run creates", async () => {
+    const h = baselineFixture(ORIGINAL, "All Mail");
+    const snapshot = await h.fixture.captureSafetySnapshot();
+    h.setState({
+      uidValidity: ORIGINAL.uidValidity,
+      messages: [{ uid: 91, messageId: "different@example.test", flags: ["\\Seen"] }, ORIGINAL.messages[1]!],
+    });
+
+    const verification = await h.fixture.verifySafetySnapshot(snapshot);
+    expect(verification.ok).toBe(false);
+    expect(verification.drift ?? []).toHaveLength(0);
+  });
+
+  it("reports drift instead of failing for a mailbox the run never mutated", async () => {
+    // Spam is neither INBOX, nor All Mail, nor created by the run: Proton's own
+    // auto-purge moves it, and that is not evidence the suite did anything.
+    const h = baselineFixture(ORIGINAL, "Spam");
+    const snapshot = await h.fixture.captureSafetySnapshot();
+    h.setState({ uidValidity: ORIGINAL.uidValidity, messages: [ORIGINAL.messages[1]!] });
+
+    const verification = await h.fixture.verifySafetySnapshot(snapshot);
+    expect(verification.ok).toBe(true);
+    expect(verification.errors).toHaveLength(0);
+    // Narrowing must never be silent.
+    expect(verification.drift?.join(" ")).toMatch(/Spam.*missing/i);
+  });
 });

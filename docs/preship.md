@@ -217,6 +217,32 @@ evidence. It uses `GH_TOKEN`/`GITHUB_TOKEN` in the parent when supplied,
 otherwise the token from `gh auth token`; that credential needs permission to
 write commit statuses.
 
+### Baseline verification scope
+
+The Bridge suite snapshots pre-existing mailbox state and verifies it survived.
+Verification is **scoped to mailboxes the run could have mutated**, derived from
+durable manifest state: `INBOX` (sends land there), All Mail (the virtual union
+containing everything the run creates), mailboxes the run positively created,
+and any folder named by a pending-ownership proof.
+
+Discrepancies inside that scope are **fatal**. Outside it they are reported as
+drift and do not fail the run — those mailboxes are never written to, so drift
+there cannot have been caused by the suite.
+
+**This is a deliberate reduction in coverage.** A bug that wrote to a mailbox
+outside the scope would no longer be caught by the baseline audit. It is
+accepted because the alternative was worse in practice: against a live personal
+account, Proton's own Spam auto-purge and ordinary mail movement produced
+baseline failures on folders the suite never touches, each one retaining a run
+that blocked every later run — so the release gate failed for reasons unrelated
+to mailpouch.
+
+Note the scope still includes All Mail, which is the one genuinely unstable
+mailbox on a busy account. **Running against a disposable Bridge account rather
+than a live personal mailbox removes the ambiguity entirely and is strongly
+preferred**; the narrowed scope reduces the failure rate but does not eliminate
+it.
+
 ### Releasing without live Bridge evidence
 
 If no disposable Bridge account is available for a release, the Bridge E2E

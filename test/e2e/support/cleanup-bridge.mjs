@@ -320,6 +320,10 @@ const errors = [];
 const ownershipUidProofs = new Map();
 const allMailPaths = new Set();
 const peerBaselineExemptions = [];
+/** Baseline discrepancies in mailboxes this run could not have mutated. Never
+ * fatal, always reported: silence would make a narrowed scope indistinguishable
+ * from a clean mailbox. */
+const outOfScopeBaselineDrift = [];
 const usedPeerBaselineProofs = new Set();
 let retainedEmptyFolders = [];
 
@@ -793,6 +797,7 @@ try {
     },
   );
   reportPeerBaselineExemptions();
+  reportOutOfScopeBaselineDrift();
   for (const baselineError of baselineErrors) errors.push(baselineError);
 
   if (processGuard.expireIfDue()) {
@@ -905,6 +910,44 @@ function isSelectable(mailbox) {
 function isAllMailMailbox(mailbox) {
   return mailbox?.specialUse?.toLowerCase() === "\\all"
     || /^all mail$/i.test(mailbox?.path?.trim?.() ?? "");
+}
+
+/**
+ * Mailboxes this run could plausibly have mutated, derived from durable
+ * manifest state rather than a hardcoded list so it cannot drift from what the
+ * run actually did.
+ *
+ * The baseline snapshots every selectable mailbox in the account. Against a
+ * disposable test account that is exactly right. Against a live personal
+ * mailbox it also captures folders the suite never writes to — Spam, unrelated
+ * Labels — where Proton's own auto-purge and ordinary mail movement produce
+ * baseline discrepancies that are indistinguishable from E2E damage. Each such
+ * false failure retains a run that blocks every later run, so the gate reliably
+ * fails for reasons that say nothing about mailpouch.
+ *
+ * Discrepancies inside this scope stay fatal. Outside it they are reported as
+ * drift. INBOX and All Mail are always in scope: sends land in INBOX, and All
+ * Mail is the virtual union containing everything the run creates.
+ */
+function mutationScopePaths() {
+  const scope = new Set(["INBOX"]);
+  for (const path of allMailPaths) scope.add(path);
+  for (const proof of manifest.createdMailboxes) scope.add(proof.path);
+  for (const proof of manifest.pending) {
+    if (typeof proof.folder === "string" && proof.folder) scope.add(proof.folder);
+  }
+  return scope;
+}
+
+/** True when `path` is outside everything this run could have mutated. */
+function isOutsideMutationScope(path, scope) {
+  if (scope.has(path)) return false;
+  // Also match All Mail by name: allMailPaths is populated from a live LIST,
+  // and a missed entry would silently demote the virtual union to drift.
+  if (isAllMailMailbox({ path })) return false;
+  // A token-shaped path is this run's own namespace even if the manifest lost
+  // the created-mailbox proof — never treat it as somebody else's folder.
+  return !path.includes(manifest.token);
 }
 
 function rememberAllMailPaths(mailboxes) {
@@ -1895,6 +1938,27 @@ function exemptPeerBaselineDiscrepancy(
   return true;
 }
 
+function reportOutOfScopeBaselineDrift() {
+  if (outOfScopeBaselineDrift.length === 0) return;
+  const byPath = new Map();
+  for (const entry of outOfScopeBaselineDrift) {
+    byPath.set(entry.path, (byPath.get(entry.path) ?? 0) + 1);
+  }
+  const paths = [...byPath.entries()].sort(([a], [b]) => a.localeCompare(b));
+  process.stdout.write(
+    `Baseline drift observed in ${paths.length} mailbox(es) this run never mutated `
+      + "— reported, not treated as E2E damage:\n",
+  );
+  for (const [path, count] of paths) {
+    process.stdout.write(`  ${path}: ${count} discrepancy(ies)\n`);
+  }
+  process.stdout.write(
+    "  These mailboxes are outside the run's mutation scope, so the suite cannot have caused this. "
+      + "On a live personal account, ordinary mail movement and Proton's own auto-purge produce exactly "
+      + "this. Running against a disposable Bridge account removes the ambiguity entirely.\n",
+  );
+}
+
 function reportPeerBaselineExemptions() {
   if (peerBaselineExemptions.length === 0) return;
   const finalizedOwners = [...new Set(peerBaselineExemptions
@@ -1980,15 +2044,30 @@ async function hasAppendMessageIdAtDifferentUid(mailboxPath, expected) {
 }
 
 async function verifyBaseline(baseline) {
+  const rawErrors = [];
   const baselineErrors = [];
   checkDeadline();
   const current = await client.list();
   checkDeadline();
   const currentPaths = new Set(current.map((mailbox) => mailbox.path));
   const currentByPath = new Map(current.map((mailbox) => [mailbox.path, mailbox]));
+  rememberAllMailPaths(current);
+  const scope = mutationScopePaths();
+  // Collect first, classify at the end: the message-level checks below push
+  // strings from many branches, and re-deriving scope at each push site is how
+  // one branch quietly ends up on the wrong side of the boundary.
+  const classify = () => {
+    for (const entry of rawErrors) {
+      if (isOutsideMutationScope(entry.path, scope)) {
+        outOfScopeBaselineDrift.push(entry);
+      } else {
+        baselineErrors.push(entry.message);
+      }
+    }
+  };
   for (const path of baseline.mailboxPaths) {
     checkDeadline();
-    if (!currentPaths.has(path)) baselineErrors.push(`baseline mailbox was removed or renamed: ${path}`);
+    if (!currentPaths.has(path)) rawErrors.push({ path, message: `baseline mailbox was removed or renamed: ${path}` });
   }
   for (const mailbox of baseline.mailboxes) {
     checkDeadline();
@@ -2002,9 +2081,10 @@ async function verifyBaseline(baseline) {
           ? undefined
           : String(client.mailbox.uidValidity);
         if (!virtual && uidValidity !== mailbox.uidValidity) {
-          baselineErrors.push(
-            `${mailbox.path}: UIDVALIDITY changed from ${mailbox.uidValidity} to ${uidValidity ?? "(missing)"}`,
-          );
+          rawErrors.push({
+            path: mailbox.path,
+            message: `${mailbox.path}: UIDVALIDITY changed from ${mailbox.uidValidity} to ${uidValidity ?? "(missing)"}`,
+          });
           continue;
         }
         const observed = new Map();
@@ -2095,9 +2175,10 @@ async function verifyBaseline(baseline) {
                 "virtual message missing or flags changed",
                 { allowAppendOrigin: trulyMissing, livePeerHeader },
               )) {
-                baselineErrors.push(
-                  `${mailbox.path}: baseline virtual ${expected.messageIdHash ? "Message-ID hash" : `UID ${expected.uid}`} is missing or its flags changed`,
-                );
+                rawErrors.push({
+                  path: mailbox.path,
+                  message: `${mailbox.path}: baseline virtual ${expected.messageIdHash ? "Message-ID hash" : `UID ${expected.uid}`} is missing or its flags changed`,
+                });
               }
             } else {
               virtualAvailable.set(key, count - 1);
@@ -2113,7 +2194,7 @@ async function verifyBaseline(baseline) {
               "message missing",
               { allowAppendOrigin: !displaced },
             )) {
-              baselineErrors.push(`${mailbox.path}: baseline UID ${expected.uid} is missing`);
+              rawErrors.push({ path: mailbox.path, message: `${mailbox.path}: baseline UID ${expected.uid} is missing` });
             }
             continue;
           }
@@ -2135,10 +2216,10 @@ async function verifyBaseline(baseline) {
               },
             )) {
               if (messageIdChanged) {
-                baselineErrors.push(`${mailbox.path}: baseline UID ${expected.uid} Message-ID changed`);
+                rawErrors.push({ path: mailbox.path, message: `${mailbox.path}: baseline UID ${expected.uid} Message-ID changed` });
               }
               if (flagsChanged) {
-                baselineErrors.push(`${mailbox.path}: baseline UID ${expected.uid} flags changed`);
+                rawErrors.push({ path: mailbox.path, message: `${mailbox.path}: baseline UID ${expected.uid} flags changed` });
               }
             }
           }
@@ -2146,10 +2227,11 @@ async function verifyBaseline(baseline) {
       } finally { lock.release(); }
     } catch (error) {
       checkDeadline();
-      baselineErrors.push(`${mailbox.path}: baseline verification failed: ${message(error)}`);
+      rawErrors.push({ path: mailbox.path, message: `${mailbox.path}: baseline verification failed: ${message(error)}` });
     }
   }
   checkDeadline();
+  classify();
   return baselineErrors;
 }
 

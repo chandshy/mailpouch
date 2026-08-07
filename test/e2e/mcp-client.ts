@@ -1029,6 +1029,14 @@ export async function startE2E(opts: StartE2EOptions = {}): Promise<E2EHarness> 
           safetySnapshot,
           mode === "bridge" ? BRIDGE_BASELINE_VERIFY_MS : undefined,
         );
+        if (verification.drift?.length) {
+          // Never silent: a narrowed scope must be visible, or it becomes
+          // indistinguishable from a mailbox that simply did not change.
+          process.stderr.write(
+            `Baseline drift outside this run's mutation scope (reported, not E2E damage): `
+              + `${verification.drift.join("; ")}\n`,
+          );
+        }
         if (!verification.ok) cleanupErrors.push(`baseline changed: ${verification.errors.join("; ")}`);
       } catch (verifyError) {
         cleanupErrors.push(`baseline verification failed: ${verifyError instanceof Error ? verifyError.message : String(verifyError)}`);
@@ -1547,6 +1555,12 @@ export async function startE2E(opts: StartE2EOptions = {}): Promise<E2EHarness> 
           safetySnapshot,
           mode === "bridge" ? BRIDGE_BASELINE_VERIFY_MS : undefined,
         );
+        if (verification.drift?.length) {
+          process.stderr.write(
+            `Baseline drift outside this run's mutation scope (reported, not E2E damage): `
+              + `${verification.drift.join("; ")}\n`,
+          );
+        }
         if (!verification.ok) {
           const snapshotFailure = new Error(
             `Bridge E2E changed pre-existing mailbox state: ${verification.errors.join("; ")}`,
