@@ -131,6 +131,11 @@ function json(res: http.ServerResponse, status: number, body: unknown): void {
   res.end(payload);
 }
 
+function decodePathSegment(value: string): string | null {
+  try { return decodeURIComponent(value); }
+  catch { return null; }
+}
+
 /**
  * Rebuild account-scoped services after a registry mutation, then warm only
  * the account that changed. Rebuild is awaited so callers never report a
@@ -2428,7 +2433,7 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
         }
 
         // POST /api/agents/:id/approve — body: { preset, toolOverrides?, conditions?, note? }
-        const approveMatch = /^\/api\/agents\/([A-Za-z0-9_\-]+)\/approve$/.exec(path);
+        const approveMatch = /^\/api\/agents\/([^/]+)\/approve$/.exec(path);
         if (method === "POST" && approveMatch) {
           // UI-012: agent-grant mutations widen privilege just like an escalation
           // approval, so they share the stricter per-IP escalation limiter.
@@ -2436,7 +2441,8 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
             json(res, 429, { error: "Too many agent-grant changes." }); return;
           }
           if (!requireCsrf(req, res)) return;
-          const clientId = approveMatch[1];
+          const clientId = decodePathSegment(approveMatch[1]);
+          if (clientId === null) { json(res, 400, { error: "Invalid clientId encoding." }); return; }
           let body: Record<string, unknown>;
           try { body = JSON.parse(await readBodySafe(req)) as Record<string, unknown>; }
           catch { json(res, 400, { error: "Request body must be valid JSON." }); return; }
@@ -2486,13 +2492,14 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
         }
 
         // POST /api/agents/:id/deny
-        const denyMatch = /^\/api\/agents\/([A-Za-z0-9_\-]+)\/deny$/.exec(path);
+        const denyMatch = /^\/api\/agents\/([^/]+)\/deny$/.exec(path);
         if (method === "POST" && denyMatch) {
           if (!escalationLimiter.check(`${ip}:agent-deny`)) {
             json(res, 429, { error: "Too many agent-grant changes." }); return;
           }
           if (!requireCsrf(req, res)) return;
-          const clientId = denyMatch[1];
+          const clientId = decodePathSegment(denyMatch[1]);
+          if (clientId === null) { json(res, 400, { error: "Invalid clientId encoding." }); return; }
           let body: Record<string, unknown> = {};
           try { body = JSON.parse(await readBodySafe(req)) as Record<string, unknown>; } catch { /* allow empty body */ }
           const grant = grants.deny(clientId, typeof body.note === "string" ? body.note : undefined);
@@ -2502,13 +2509,14 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
         }
 
         // POST /api/agents/:id/revoke
-        const revokeMatch = /^\/api\/agents\/([A-Za-z0-9_\-]+)\/revoke$/.exec(path);
+        const revokeMatch = /^\/api\/agents\/([^/]+)\/revoke$/.exec(path);
         if (method === "POST" && revokeMatch) {
           if (!escalationLimiter.check(`${ip}:agent-revoke`)) {
             json(res, 429, { error: "Too many agent-grant changes." }); return;
           }
           if (!requireCsrf(req, res)) return;
-          const clientId = revokeMatch[1];
+          const clientId = decodePathSegment(revokeMatch[1]);
+          if (clientId === null) { json(res, 400, { error: "Invalid clientId encoding." }); return; }
           // If this grant is backed by a service account, also delete the
           // credential — otherwise revoke isn't durable (startup re-activates
           // the grant from the credential, and a client_credentials login would

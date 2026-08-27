@@ -104,10 +104,10 @@
     "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^26.1.2",
     "@types/nodemailer": "^8.0.1",
-    "@vitest/coverage-v8": "^4.1.10",
+    "@vitest/coverage-v8": "^4.1.11",
     "simple-git-hooks": "^2.13.1",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.11"
   },
   "simple-git-hooks": {
     "pre-push": "npm run preship:fast"
