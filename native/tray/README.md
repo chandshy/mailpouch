@@ -53,14 +53,13 @@ The committed `.node` files in this directory are the prebuilds for
 each target the project supports. Currently:
 
 - `index.linux-x64-gnu.node` ✓ committed
-- `index.linux-arm64-gnu.node` — produced by CI (TODO)
-- `index.darwin-x64.node` — produced by CI (TODO)
-- `index.darwin-arm64.node` — produced by CI (TODO)
-- `index.win32-x64-msvc.node` — produced by CI (TODO)
-- `index.win32-arm64-msvc.node` — produced by CI (TODO)
+- `index.linux-arm64-gnu.node` ✓ committed
+- `index.darwin-x64.node` — pending CI build (TODO)
+- `index.darwin-arm64.node` ✓ committed
+- `index.win32-x64-msvc.node` ✓ committed
+- `index.win32-arm64-msvc.node` ✓ committed
 
-Until CI lands prebuilts for every target, mailpouch on
-non-x64-Linux platforms falls back to the `systray2` backend (see
-`src/utils/tray.ts` — the `_loadNativeTray` failure path). systray2
-works fine on macOS/Windows; the GNOME-specific bug only affects
-Linux desktop users, who are covered by the committed prebuilt.
+When a platform lacks a matching native prebuilt, mailpouch falls back to the
+`systray2` backend (see `src/utils/tray.ts` — the `_loadNativeTray` failure
+path). The currently pending target is darwin-x64; the committed Linux and
+other arm64/x64 targets use the native binding.

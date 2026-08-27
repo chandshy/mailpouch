@@ -92,7 +92,7 @@ other processes and shell history. Run `npm run settings` to open the settings U
 **Field notes:**
 - `password` — Bridge password (from Bridge app), **not** your Proton account password. Credentials are migrated to the OS keychain on first run when available.
 - `smtpToken` — only for direct `smtp.protonmail.ch` submission (paid plans with custom domain). Leave empty for Bridge connections.
-- `bridgeCertPath` — path to the TLS certificate exported from Bridge → Settings → Export TLS certificates. Leave empty to skip cert validation (not recommended).
+- `bridgeCertPath` — path to the TLS certificate exported from Bridge → Settings → Export TLS certificates. For current configurations, an empty or unreadable path fails closed for localhost by default; set `allowInsecureBridge: true` or `MAILPOUCH_INSECURE_BRIDGE=1` only as a deliberate opt-in to disable certificate validation. A legacy version-1 configuration with no certificate and no explicit flag is grandfathered by `loadConfig()` into insecure mode for compatibility; make that choice explicit when saving or updating it.
 - `tlsMode` — `"starttls"` (default, correct for Bridge on ports 1025/1143) or `"ssl"` (implicit TLS, for ports 465/993 if Bridge is configured for SSL mode).
 
 The config file path can be overridden with the `MAILPOUCH_CONFIG` environment variable (must point to a path within the home directory).

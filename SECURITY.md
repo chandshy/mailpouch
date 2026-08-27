@@ -4,8 +4,7 @@
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 3.x.x   | :white_check_mark: |
-| 2.x.x   | :white_check_mark: (security fixes only) |
+| 4.x.x   | :white_check_mark: |
 | 1.x.x   | :x:                |
 
 ## Reporting a Vulnerability
@@ -64,8 +63,7 @@ The server implements an 11-layer defense-in-depth security model:
 
 ### 8. Config File Isolation
 - Atomic writes with mode 0600
-- Preset and tool names validated on load
-- No unknown keys allowed (defense-in-depth)
+- Preset and tool names are validated on load; connection values are merged with defaults and unrecognized connection fields are not used
 
 ### 9. Memory Safety
 - Email cache capped at 500 entries AND 50 MB (dual eviction policy; whichever limit is reached first triggers FIFO eviction)
@@ -101,7 +99,7 @@ When using this MCP server:
 ### Network Security
 - Use **localhost (127.0.0.1)** for Proton Bridge connections
 - Export and configure the **Bridge TLS certificate** for production use
-- The server accepts self-signed certificates for localhost only when no cert is configured
+- Localhost Bridge connections fail closed when no pinned certificate can be loaded for new/current configurations; explicitly enable **Allow insecure Bridge connection** (or `MAILPOUCH_INSECURE_BRIDGE=1`) to disable certificate validation for that launch. A legacy `configVersion: 1` file with no certificate and no explicit `allowInsecureBridge` is grandfathered into insecure mode by the loader for compatibility; an explicit flag or certificate prevents that exception.
 
 ### Access Control
 - Config file at `~/.mailpouch.json` is written with mode 0600
@@ -114,7 +112,7 @@ When using this MCP server:
 ### Data Protection
 - Email data is **cached in memory** only (cleared on restart, capped at 500 entries per fetch)
 - **Scheduled emails** are persisted to `~/.mailpouch-scheduled.json` (mode 0600, atomic writes) so they survive restarts. This file contains email metadata (recipients, subject, body) — protect it accordingly.
-- No persistent storage of email content beyond the scheduled email queue
+- The optional FTS5 index uses `~/.mailpouch-fts.db` (or `MAILPOUCH_FTS_DB`) as its base/legacy path and stores live account indexes under the derived private `<base-name>.accounts/<account-hash>.db` locations. It persists indexed subject and body content; entries remain until removed or the index is rebuilt/cleared. Protect or delete the configured store according to your retention needs.
 - Logs are sanitized (no full email bodies)
 - Audit log contains escalation metadata only (no email content)
 

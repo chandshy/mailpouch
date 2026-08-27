@@ -101,7 +101,10 @@ All addresses on the Proton account share a single IMAP mailbox. All email for a
 ### Split Mode
 Each address gets its own IMAP account with separate credentials and separate mailbox folders. Must be configured per-address in Bridge. Required for Outlook users who need to send from multiple distinct addresses.
 
-The MCP server currently uses a single credential set, which corresponds to combined mode.
+MailPouch supports multiple configured Bridge accounts. Each account has its own credentials and
+IMAP/SMTP service instances, and tools can target a specific account with `account_id`. Within
+each Bridge account, combined mode shares one mailbox across its addresses, while split mode
+provides separate credentials and mailbox folders per address.
 
 ## Supported Client Configurations
 
@@ -134,7 +137,8 @@ The Bridge password (for local IMAP/SMTP) and refresh tokens are stored in the k
 - Bridge must be running for IMAP/SMTP to function; there is no "standalone" IMAP mode
 - Initial sync can take a long time on large mailboxes (Bridge downloads and indexes all messages)
 - Subsequent starts are fast because messages are cached locally in the Gluon SQLite database
-- Bridge polls the Proton API every ~20 seconds for new events (it does NOT implement IMAP IDLE server-push natively — see IMAP docs)
+- Bridge polls the Proton API every ~20 seconds for upstream events; separately, MailPouch keeps
+  an IMAP IDLE watcher per configured account for `INBOX` change notifications and cache invalidation
 - Bridge requires a paid Proton Mail subscription; free accounts cannot use Bridge
 
 ## Supported Bridge Versions

@@ -1,8 +1,8 @@
 # mailpouch
 
-> MCP server that gives AI agents permission-gated, audit-logged access to Proton Mail and generic IMAP accounts — running entirely on the user's machine, nothing routed through third-party servers.
+> MCP server that gives AI agents permission-gated, audit-logged access to Proton Mail and generic IMAP accounts — it connects from the user's machine to local Proton Bridge or to the configured IMAP/SMTP server; selected MCP results go to the MCP host and may be sent to its configured model provider.
 
-mailpouch connects to Proton Bridge over a local TLS socket. Email is decrypted by Bridge on the user's device; the MCP server never persists email to disk and wipes the in-memory cache on shutdown. It works with Claude Desktop, Cline, and any MCP-compatible host over stdio or HTTP.
+mailpouch connects to Proton Bridge over a local TLS socket. Email is decrypted by Bridge on the user's device; normal message caching is in memory and wiped on shutdown, but scheduled outbound messages persist recipients, subjects, and bodies in `~/.mailpouch-scheduled.json`, while the optional FTS5 index persists indexed subject/body content on disk. It works with Claude Desktop, Cline, and any MCP-compatible host over stdio or HTTP.
 
 ## Quick start (AI agents)
 
@@ -53,4 +53,4 @@ Credentials are entered on the user's machine and stored in the OS keychain (or 
 - GitHub: https://github.com/chandshy/mailpouch
 - npm: https://www.npmjs.com/package/mailpouch
 - Install/run: `npx -y mailpouch` (no global install needed), or `npm install -g mailpouch`
-- MCP SDK: 1.29+, Node.js ≥ 20
+- MCP SDK: 1.29+, Node.js ≥ 22
