@@ -35,12 +35,12 @@ MAILPOUCH_E2E_BRIDGE_CONFIG=/path/to/config.json node scripts/attest-bridge-e2e.
 | `license-inv` | Prod-dep license inventory at `LICENSES.json` is up to date | yes on drift |
 | `build` | `tsc` produces a working `dist/` | yes |
 | `unit` | `vitest run` (excludes `test/agent-harness.test.ts`) | yes |
+| `tarball-smoke` | `npm pack` → install in temp dir → `mailpouch --version` boots and prints the right version | yes |
 
 ### preship — adds, after preship:fast
 
 | Step | What it checks | Hard fail? |
 |------|----------------|-----------|
-| `tarball-smoke` | `npm pack` → install in temp dir → `mailpouch --version` boots and prints the right version | yes |
 | `e2e:greenmail` | Phase-1 E2E suite via Greenmail Docker container | yes |
 | `e2e:bridge` | Phase-2 E2E suite via real Proton Bridge | yes (locally); CI sets `PRESHIP_NO_BRIDGE=1` to skip |
 

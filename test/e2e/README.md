@@ -308,15 +308,12 @@ on this error. If it persists, Greenmail is likely overloaded — restart it:
 docker compose -f test/e2e/fixtures/greenmail-compose.yml restart
 ```
 
-**"Settings UI could not bind port 8765"**: harmless. mailpouch tries to
-launch its settings UI on startup; the warning is logged but doesn't fail
-the suite.
-
 **Port 8080 conflict on `docker compose up`**: the compose file no longer
 maps `8080:8080` for this reason. If you fork the file and re-add it,
 make sure no other local service is on 8080.
 
 **Greenmail STARTTLS error in logs**: expected — Greenmail doesn't advertise
 STARTTLS by default and mailpouch forces it for localhost SMTP. The error
-is logged at startup; only outbound-send tests depend on SMTP being
-functional and those are bridge-only.
+is logged at startup. The Greenmail lane enables a test-only plaintext SMTP
+override and verifies `send_email` and `send_test_email` delivery; outbound
+sends are also exercised safely in the live Bridge lane.

@@ -146,14 +146,29 @@ The MCP server (`src/services/simple-imap-service.ts` and `src/services/smtp-ser
 1. If `bridgeCertPath` is a directory, look for `cert.pem` inside it
 2. If `bridgeCertPath` is a file, use it directly
 3. If the file can be read, set `tls.ca = [certContent]` — proper trust without disabling validation
-4. If the file cannot be read (stat error, file not found), log an error and fall back to `rejectUnauthorized: false`
-5. If `bridgeCertPath` is empty/not configured, log a warning and use `rejectUnauthorized: false`
+4. If the file cannot be read (stat error, file not found), fail closed unless
+   `allowInsecureBridge: true` or `MAILPOUCH_INSECURE_BRIDGE=1` explicitly enables the insecure override
+5. If `bridgeCertPath` is empty/not configured, fail closed by default; the same explicit override is
+   required to use `rejectUnauthorized: false`
 
-The `insecureTls` flag on both service instances is set to `true` when operating without certificate validation.
+Legacy compatibility exception: when `configVersion` is absent or less than 2 and the connection
+has neither a certificate path nor an explicit `allowInsecureBridge` value, `loadConfig()` sets
+`allowInsecureBridge: true` to preserve the version-1 behavior. This grandfathering does not apply
+when `allowInsecureBridge` is explicitly present or `bridgeCertPath` is non-empty; an explicitly
+present empty certificate path still qualifies. Current configurations remain fail-closed until the
+operator opts in deliberately. Saving the loaded configuration writes the current schema with the
+insecure choice made explicit.
+
+The `insecureTls` flag on both service instances is set to `true` when that explicit override is
+active (or when the loader has grandfathered a legacy version-1 config) and certificate validation
+is disabled.
 
 ## Fallback: Disabling Certificate Validation
 
-When the Bridge certificate is not configured, the MCP server uses:
+For current configurations, when the Bridge certificate cannot be used, the MCP server uses this
+fallback only when the operator explicitly sets `allowInsecureBridge: true` or
+`MAILPOUCH_INSECURE_BRIDGE=1`. A legacy version-1 config with no certificate and no explicit flag
+is the compatibility exception described above:
 ```javascript
 tls: { rejectUnauthorized: false, minVersion: 'TLSv1.2' }
 ```
@@ -243,7 +258,7 @@ Unlike browsers, Node.js maintains its own certificate bundle (`require('tls').r
 The MCP server's `bridgeCertPath` config option accepts:
 - A path to the `cert.pem` file directly (e.g., `~/.config/protonmail/bridge/cert.pem`)
 - A path to the directory containing `cert.pem` (the MCP server will append `/cert.pem` automatically)
-- Empty string or omitted → falls back to `rejectUnauthorized: false` with a warning
+- Empty string or omitted → current configurations fail closed by default; `allowInsecureBridge: true` or `MAILPOUCH_INSECURE_BRIDGE=1` is required to opt into `rejectUnauthorized: false`. Legacy version-1 configurations with no certificate and no explicit flag are grandfathered into insecure mode by `loadConfig()` for compatibility.
 
 The same certificate is used for both IMAP and SMTP connections.
 

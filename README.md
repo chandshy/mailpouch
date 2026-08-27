@@ -41,7 +41,7 @@ You remain the operator of your Proton account. Running this server against your
 
 Proton Mail encrypts your email end-to-end, which means no third-party API can read it. [Proton Bridge](https://proton.me/mail/bridge) solves this by decrypting email locally. This MCP server connects to Bridge and gives Claude (or any MCP host) structured, permission-gated access to your inbox.
 
-Your emails are decrypted on your own machine by Proton Bridge. This server never persists email content — everything stays in memory and is cleared on restart. You control exactly what the AI can do through a preset permission system with human-gated escalation for anything sensitive.
+Your emails are decrypted on your own machine by Proton Bridge. Message content is normally cached in memory and cleared on restart, but scheduled outbound messages persist recipients, subjects, and bodies in `~/.mailpouch-scheduled.json`. The optional local FTS5 index uses `~/.mailpouch-fts.db` (or `MAILPOUCH_FTS_DB`) as its base/legacy path, then stores live account indexes under the derived private `<base-name>.accounts/<account-hash>.db` locations. Protect or clear those stores as appropriate. You control exactly what the AI can do through a preset permission system with human-gated escalation for anything sensitive.
 
 ---
 
@@ -82,7 +82,7 @@ That's it. The sections below cover everything in depth.
 - **MCP Resources** — individual emails and folders addressable via `email://` and `folder://` URIs.
 - **Scheduled email delivery** — queue emails for future sending; survives server restarts. Plus `remind_if_no_reply` for outbound follow-ups gated on inbox replies.
 - **Optional companion services** — SimpleLogin alias management (16 tools, requires API key) and Proton Pass via pass-cli (4 tools, requires PAT) are omitted from `ListTools` until configured; local FTS5 full-text index remains available when `better-sqlite3` is installed.
-- **TLS-strict by default** — refuses to connect to localhost Bridge without a pinned cert, requires Bridge ≥ `3.22.0`, exponential backoff on SMTP abuse-signal responses.
+- **TLS-strict by default** — refuses to connect to localhost Bridge without a pinned cert, recommends Bridge ≥ `3.22.0` (older detected versions warn but do not block connection), and uses exponential backoff on SMTP abuse-signal responses.
 - **Multi-account** — configure more than one Proton / IMAP account; a running daemon hot-swaps the active account, while standalone settings and failed live rebinds explicitly request a restart. Tools accept an optional `account_id` argument to route a single call to a specific account. See [`src/accounts/`](src/accounts/).
 - **Per-agent grants** — each MCP client (identified by its OAuth `client_id`) is gated by its own approvable grant, with optional folder allowlists, IP pins, per-tool rate caps, expiry, and account binding. Separate from the global preset and the escalation flow. See [`src/agents/`](src/agents/).
 - **Live notifications** — desktop toasts (no extra deps) and outbound webhooks (CloudEvents / Slack / Discord, HMAC-signed, retried) fire on grant-state changes. See [`src/notifications/`](src/notifications/).
@@ -115,7 +115,7 @@ With read-only permissions (the default), Claude can read, search, and analyse y
 |---|---|---|
 | **Node.js** | >= 22.0.0 | Check with `node --version` · [nodejs.org](https://nodejs.org) |
 | **npm** | >= 10.0.0 | Bundled with Node.js |
-| **Proton Bridge** | >= 3.22.0 | Must be running and signed in · [proton.me/mail/bridge](https://proton.me/mail/bridge) |
+| **Proton Bridge** | 3.22.0 recommended minimum | Must be running and signed in; older detected versions warn but do not block connection · [proton.me/mail/bridge](https://proton.me/mail/bridge) |
 | **Proton Mail account** | **Paid plan** | Bridge requires a paid Proton plan (Mail Plus, Unlimited, etc.) |
 | **MCP client** | Latest | Claude Desktop, Cline, or any MCP-compatible host · [claude.ai/download](https://claude.ai/download) |
 
@@ -622,7 +622,7 @@ Canonical code: [`src/notifications/desktop.ts`](src/notifications/desktop.ts), 
 
 ### Bridge version warning on startup
 
-- The server issues an IMAP `ID` request after connect and warns when Bridge is older than **3.22.0** (the minimum supported). Upgrade from the Bridge app → **Check for updates**.
+- The server issues an IMAP `ID` request after connect and warns when Bridge is older than **3.22.0** (the recommended minimum); the version probe is warn-only and does not block connection. Upgrade from the Bridge app → **Check for updates**.
 
 ### Tool list looks short / missing tools
 
@@ -694,7 +694,7 @@ src/
     security.ts               # CSRF, origin validation, TLS
     tui.ts                    # Terminal UI for settings
   transports/
-    http.ts                   # HTTP transport (bearer + optional OAuth)
+    http.ts                   # HTTP transport with required OAuth 2.1 authentication
     oauth-handlers.ts         # /.well-known + /oauth/* (RFC 7591/8414/9728)
     oauth-store.ts            # Client / authorization-code / token store
     rate-limit.ts             # Token-bucket per-caller limiter

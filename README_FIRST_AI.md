@@ -62,8 +62,11 @@ understand context before attempting any action that modifies email state.
 | `send_only` | Reading unlimited; send/forward/schedule 50/hr, `remind_if_no_reply` 100/hr; actions, deletion, folder writes, and bulk ops disabled |
 | `supervised` | All tools enabled; reading unlimited; sending 200/hr, schedule 100/hr, bulk actions 100/hr, deletion 20/hr, folder delete 20/hr, server lifecycle 5/hr |
 | `full` | All tools, no rate limits |
+| `custom` | Per-tool enablement and rate limits; any tool can be enabled or disabled individually |
 
-The current preset is enforced server-side — you cannot bypass it. If a tool
+The current preset is enforced server-side — you cannot bypass it. `custom` is
+also a valid preset for the category surfaces below when the individual tools
+are enabled. If a tool
 returns `"Blocked: ..."`, the human needs to change the preset in the settings
 UI (`http://localhost:8766`) or approve an escalation request.
 
@@ -71,7 +74,7 @@ UI (`http://localhost:8766`) or approve an escalation request.
 
 ## Tool reference
 
-### Reading — always available
+### Reading — always available in built-in presets (or `custom` when enabled)
 
 #### `get_emails`
 Fetch a page of emails from a folder.
@@ -239,7 +242,7 @@ workflows.
 
 ---
 
-### Analytics — always available
+### Analytics — full category in `read_only`, `supervised`, and `full`; `send_only` exposes only `get_contacts`; `custom` when enabled
 
 #### `get_email_stats`
 Fast summary: total emails in cache, unread count, starred count, sent count,
@@ -264,7 +267,7 @@ busiest" analysis.
 
 ---
 
-### System — always available
+### System — full category in `read_only`, `supervised`, and `full`; `send_only` exposes connection status, sync, logs, and `start_bridge`; `custom` when enabled
 
 #### `get_connection_status`
 Check whether SMTP and IMAP are reachable. Returns connection health,
@@ -297,7 +300,7 @@ Returns `{ version: string }`.
 
 ---
 
-### Sending — requires `supervised`, `send_only`, or `full`
+### Sending — requires `supervised`, `send_only`, `full`, or `custom`
 
 #### `send_email`
 Send a new email.
@@ -348,7 +351,7 @@ Send a test email to verify SMTP is working. Returns `{ success, messageId }`.
 
 ---
 
-### Drafts & Scheduling — requires `supervised`, `send_only`, or `full`
+### Drafts & Scheduling — requires `supervised`, `send_only`, `full`, or `custom`
 
 #### `save_draft`
 Save an email as a draft without sending it. Writes to the Drafts folder via
@@ -409,12 +412,13 @@ the email was already sent or the ID is not found).
 Queue a follow-up reminder that fires if no reply arrives within N days.
 
 ```
-emailId      string  UID of the sent email to watch.
-withinDays   number  Days to wait for a reply before triggering. Min 1, max 30.
-reminderNote string  Optional note to surface in the reminder notification.
+email_id     string  Required IMAP UID of the sent email to watch.
+after_days   number  Required days from the message's send date until the reminder fires. Number 1–365.
+folder       string  Optional source folder containing the message (default: Sent).
+note         string  Optional note to surface in the reminder notification.
 ```
 
-Returns `{ success: true, reminderId: "<uuid>" }`. Reminders persist
+Returns `{ id, recipient, subject, fireAt }`. Reminders persist
 across server restarts (JSONL store). Only fires if no reply is detected
 in the inbox.
 
@@ -426,7 +430,7 @@ Returns `{ reminders: [...], count }`.
 Cancel a pending follow-up reminder before it fires.
 
 ```
-reminderId  string  UUID from remind_if_no_reply.
+reminder_id  string  UUID from the `id` returned by `remind_if_no_reply`.
 ```
 
 #### `check_reminders`
@@ -435,7 +439,7 @@ every 60 s). Returns `{ checked, fired, count }`.
 
 ---
 
-### Actions — requires `supervised` or `full`
+### Actions — requires `supervised`, `full`, or `custom`
 
 #### `mark_email_read`
 ```
@@ -447,6 +451,20 @@ isRead   boolean  Default true.
 ```
 emailId    string   UID.
 isStarred  boolean  Default true.
+```
+
+#### `mark_answered`
+```
+emailId       string   UID.
+answered      boolean  Default true; set false to clear the flag.
+sourceFolder  string   Optional source folder for a UID outside INBOX.
+```
+
+#### `mark_forwarded`
+```
+emailId       string   UID.
+forwarded     boolean  Default true; set false to clear the keyword.
+sourceFolder  string   Optional source folder for a UID outside INBOX.
 ```
 
 #### `move_email`
@@ -467,7 +485,9 @@ emailId  string
 #### `move_to_trash`
 Move an email to the Trash folder.
 ```
-emailId  string
+emailId       string
+confirmed     boolean  Required as true unless MCP elicitation supplies approval.
+sourceFolder  string   Optional source folder for a UID outside INBOX.
 ```
 
 #### `move_to_spam`
@@ -542,7 +562,7 @@ Returns `{ success, failed, errors }`.
 
 ---
 
-### Folders — requires `supervised` or `full`
+### Folders — requires `supervised`, `full`, or `custom`
 
 #### `create_folder`
 Create a folder or label. Use `Folders/Name` for custom folders,
@@ -572,9 +592,9 @@ Refresh the folder list from IMAP. Returns `{ success, folderCount }`.
 
 ---
 
-### Deletion — requires `full` (capped at 20/hr in `supervised`)
+### Deletion — available in `supervised` (capped at 20/hr), `full`, or `custom` when enabled
 
-**Deletion moves mail to Trash — it is never permanently deleted. Mail stays recoverable from Trash (Proton purges Trash on its own schedule). An email already in Trash is left in place.** Move-to-Trash is verified-landing, so a no-op from a union mailbox (e.g. All Mail) is reported as a failure rather than a silent success — pass the message's real `sourceFolder`.
+**Deletion moves mail to Trash — it is recoverable there and is not immediately purged. Proton may purge Trash on its own schedule; `empty_trash` permanently purges it. An email already in Trash is left in place.** Move-to-Trash is verified-landing, so a no-op from a union mailbox (e.g. All Mail) is reported as a failure rather than a silent success — pass the message's real `sourceFolder`.
 
 #### `delete_email`
 ```
@@ -588,6 +608,17 @@ emailIds      string[]  Max 200.
 sourceFolder  string    Recommended for non-INBOX UIDs.
 ```
 Returns `{ success, failed, errors }`.
+
+#### `empty_trash`
+Permanently purge every message in Trash. This is irreversible and requires
+explicit confirmation.
+```
+confirmed  boolean  Required as true unless MCP elicitation supplies approval.
+```
+
+`delete_email` and `bulk_delete_emails` move mail to Trash and it remains
+recoverable there (subject to Proton's Trash-retention policy). `empty_trash`
+permanently purges Trash; deleting a folder is also irreversible.
 
 #### Legacy `bulk_delete`
 Direct-call alias for `bulk_delete_emails`, retained for compatibility but not
@@ -690,7 +721,8 @@ item_id  string  ID from pass_list or pass_search.
 ### Bridge & Server Control
 
 #### `start_bridge`
-Launch Proton Mail Bridge if it is not already running. Always available in all presets.
+Launch Proton Mail Bridge if it is not already running. Enabled by default in
+the built-in presets; a `custom` per-tool configuration can disable it.
 Waits up to 15 s for SMTP (port 1025) and IMAP (port 1143) to become reachable before returning.
 
 Returns `{ success: true }` if ports are up, or `{ success: false, reason: "..." }` if Bridge
@@ -776,7 +808,7 @@ account IDs are available.
 
 | Item | Limit |
 |---|---|
-| Email body in tool responses | Truncated at 2 000 chars for list views; full body from `get_email_by_id` |
+| Email body preview in tool responses | Approximately 300 chars in list views; full body from `get_email_by_id` (separate prompt-input paths may use larger truncation limits) |
 | Email cache size | 500 emails max (FIFO eviction) |
 | Bulk operation IDs | Max 200 per call |
 | Emails per page | Max 200 per `get_emails` call |
@@ -832,10 +864,11 @@ on failure. Common patterns:
 3. **Never loop on rate-limited errors.** If you receive a rate-limit error,
    stop and inform the user rather than retrying repeatedly.
 
-4. **Confirm before deleting or stopping the server.** Deletion is permanent. Always confirm with the
-   user before calling `delete_email`, `delete_folder`, `bulk_delete_emails`,
+4. **Confirm before deleting or stopping the server.** `delete_email` and `bulk_delete_emails` move mail to recoverable Trash; `empty_trash` and folder deletion are irreversible. Always confirm with the
+   user before calling `delete_email`, `delete_folder`, `bulk_delete_emails`, `empty_trash`,
    `shutdown_server`, or `restart_server`, even if they asked for it — mistakes
-   are not recoverable and server shutdown terminates your connection.
+   involving `empty_trash` or folder deletion are not recoverable; server shutdown
+   terminates your connection.
 
 5. **Be transparent about escalation.** When calling `request_escalation`,
    give the human a specific, honest reason. After submitting, clearly tell
@@ -845,7 +878,8 @@ on failure. Common patterns:
    task. Use `cursor` to page through results incrementally.
 
 7. **Do not store or reproduce credentials.** You will never see the user's
-   Bridge password or SMTP token — they are stored in the config file and
+   Bridge password or SMTP token — they normally live in the OS keychain, with
+   a protected config fallback when keychain storage is unavailable, and are
    injected by the server. Do not ask the user to provide them in chat.
 
 8. **Prefer `reply_to_email` over `send_email` for replies.** It correctly

@@ -158,15 +158,19 @@ The MCP server resolves the drafts folder path using this priority:
 
 ## IMAP IDLE Support
 
-Proton Bridge does NOT implement native IMAP IDLE server push. The IMAP service uses polling:
-- Bridge polls the Proton API for new events every ~20 seconds
-- Changes (new emails, flag updates, folder moves) appear in IMAP after the next poll cycle
-- The older Bridge codebase (v1.x) had an IDLE handler; the current architecture (Gluon-based) uses polling
+MailPouch starts a dedicated imapflow IDLE watcher for each configured account. The watcher
+selects `INBOX`, listens for IMAP `EXISTS` and `EXPUNGE` events, and invalidates the account's
+cached inbox entries when those notifications arrive. It reconnects with backoff after a
+transient connection drop and stops on an authentication failure.
+
+Bridge still polls the Proton API for upstream events (about every 20 seconds), so that poll
+interval can delay when a Proton-side change becomes visible to the local IMAP server. That
+upstream latency is separate from MailPouch's IMAP IDLE watcher and its cache invalidation.
 
 Practical implication for the MCP server:
-- Do not use imapflow's IDLE capability expecting real-time delivery notifications
-- Sync operations will reflect state as of the last poll (up to ~20 second delay)
-- This is acceptable for an MCP server use-case where explicit sync is triggered on demand
+- IDLE notifications invalidate the local inbox cache, but do not bypass Bridge's upstream sync delay
+- Explicit sync operations still reflect the state currently visible through Bridge's IMAP service
+- The watcher covers each configured account, including accounts that are not active in the UI
 
 ## IMAP SEARCH Capabilities
 
@@ -260,25 +264,24 @@ Emails with labels appear in multiple IMAP folders simultaneously (their primary
 ### 3. Initial Sync Latency
 On first connect after installing Bridge or adding an account, IMAP will return empty or partial mailboxes until sync completes. There is no Bridge API to check sync progress.
 
-### 4. No Body-Text IMAP SEARCH
-Bridge does not index message content for IMAP SEARCH. `BODY` and `TEXT` search criteria return no results or fall back to a linear scan. Full-text search requires fetching and parsing message bodies locally.
+### 4. IDLE and upstream polling
+MailPouch keeps a per-account IMAP IDLE watcher for `INBOX` `EXISTS`/`EXPUNGE` notifications and
+uses them to invalidate its cache. Bridge's upstream Proton-event polling (about every 20 seconds)
+can still delay when a remote change reaches IMAP.
 
-### 5. IDLE Not Implemented (Polling Only)
-Bridge does not push IMAP IDLE notifications. Any IDLE subscription silently degrades to polling. The ~20 second poll interval means new messages may not appear immediately.
-
-### 6. Connection Drops on Bridge Restart
+### 5. Connection Drops on Bridge Restart
 If Bridge is restarted while an IMAP connection is open, the TCP connection drops. imapflow will fire an `error` event and the `isConnected` flag will become stale. The MCP server handles this with `ensureConnection()` and `reconnect()`, but there is a window where operations fail before reconnection succeeds.
 
-### 7. Folder Path Case Sensitivity
+### 6. Folder Path Case Sensitivity
 IMAP folder paths on Bridge are case-sensitive. `Sent` and `sent` are different paths. The MCP server uses exact paths as returned by the server's `LIST` command.
 
-### 8. Combined Mode Hides Per-Address Segregation
+### 7. Combined Mode Hides Per-Address Segregation
 In combined mode, all addresses share one IMAP mailbox. There is no way via standard IMAP to filter by which address a message was delivered to — all messages for all addresses appear together.
 
-### 9. Labels Lost on Move to Trash
+### 8. Labels Lost on Move to Trash
 When an email is moved to Trash via Bridge/IMAP, all its Proton labels are removed. This is by design (matching Proton web behavior) but may surprise users who move emails to Trash and then restore them — the labels will not be restored.
 
-### 10. Cannot MOVE Out of the "All Mail" Union (COPY Instead)
+### 9. Cannot MOVE Out of the "All Mail" Union (COPY Instead)
 `All Mail` (`\All`) is a union view of every message, not a real location, and has no "remove" operation. A MOVE whose source is `All Mail` is accepted but silently does nothing (or errors into a system folder). To file an All-Mail-only (archived) message into a folder, **COPY** it to the `Folders/<name>` mailbox (which applies the exclusive folder label) and verify it landed. See "The 'All Mail' union" section above. Deleting mail is likewise a move-to-Trash, never an EXPUNGE from the union.
 
 ## Sources

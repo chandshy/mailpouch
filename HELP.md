@@ -42,7 +42,7 @@ Prefer the command line? `npx -y mailpouch setup --username you@proton.me --pass
 
 ### CLI commands
 
-Run any of these as `npx -y mailpouch <command>` — the `npx -y` form works even when the global `mailpouch` bin isn't on your `PATH`, and these commands **print and exit** (they never start a server):
+Run any of these as `npx -y mailpouch <command>` — the `npx -y` form works even when the global `mailpouch` bin isn't on your `PATH`. The help, setup, doctor, status, and agent operations **print and exit**; `daemon` remains running as the shared HTTP server:
 
 | Command | What it does |
 |---|---|
@@ -50,7 +50,7 @@ Run any of these as `npx -y mailpouch <command>` — the `npx -y` form works eve
 | `mailpouch status [--json]` | Is mailpouch running (PID, ports), connection state, approved-agent counts, Bridge reachability — read-only |
 | `mailpouch doctor [--json]` | Diagnose the install/connection and print the next step (exit 0 when ready) |
 | `mailpouch setup …` | Configure Bridge credentials non-interactively |
-| `mailpouch agent <issue\|list\|revoke>` | Manage headless service accounts |
+| `mailpouch agent <issue\|list\|revoke\|prune>` | Manage headless service accounts; `prune` accepts `--days N` (default 90) and `--dry-run` |
 | `mailpouch daemon [--host H] [--port P]` | Run the shared HTTP daemon (forces HTTP transport) |
 
 Running `mailpouch` with **no command** starts the MCP server on stdio — that's what an MCP client (e.g. Claude Desktop) spawns; you don't run it by hand. An unrecognized command prints an error and exits rather than starting a server.
@@ -164,7 +164,7 @@ codes; both require `{ confirmed: true }` on every call.
 
 Open **Settings → Setup tab** → toggle **Desktop notifications for agent permission requests**.
 
-When enabled (default), mailpouch fires a native OS notification whenever an agent submits a permission escalation request. The notification title is the agent's client ID; the body summarises the requested preset.
+When an unrecognized agent connection creates a pending grant, mailpouch normally surfaces a native on-screen **Approve/Deny** dialog. If the dialog is disabled or the host is detected as headless/unavailable before launch, mailpouch opens the browser approval window and, when desktop notifications are enabled (default), fires a native OS notification. If a dialog was launched but fails or times out, mailpouch falls back to the browser approval window without a desktop toast. Grant-state notifications use a fixed per-state title (for example, `mailpouch — agent awaiting approval`) and the agent's client name as the body; they do not include the requested preset. This is separate from `request_permission_escalation`: escalation requests are recorded for approval in the Agents tab or terminal and do not themselves trigger this desktop notification.
 
 Platforms: `osascript` (macOS), `notify-send` (Linux), `powershell.exe` (Windows). No extra dependencies.
 
@@ -275,7 +275,7 @@ These tools work on locally-cached data and are always available in Read-Only an
 
 Open **Settings → Agents tab**.
 
-When an agent first connects via HTTP transport, it appears here as a pending approval. You can:
+When an unrecognized interactive agent first connects via HTTP or local stdio transport, it appears here as a pending approval. Pre-approved service accounts issued with `mailpouch agent issue` are active immediately and do not appear as pending. You can:
 
 - **Approve** with a preset (read_only / supervised / full)
 - Set an **expiry** (default 24h; max 7d)
@@ -286,7 +286,7 @@ When an agent first connects via HTTP transport, it appears here as a pending ap
 
 **Revoke** at any time — takes effect on the next tool call.
 
-Agents connecting over stdio always use the global preset; grants only apply to HTTP transport clients.
+Agents connecting over HTTP and local stdio are gated by grants by default. Set `gateLocalAgents: false` (or `MAILPOUCH_TRUST_LOCAL=1`) to restore the legacy behavior in which local stdio agents use only the global preset without a local grant gate.
 
 ---
 
@@ -327,12 +327,14 @@ By default mailpouch uses stdio (for Claude Desktop). To expose it over HTTP for
 
 ```json
 {
-  "remoteMode": "http",
-  "remoteHost": "0.0.0.0",
-  "remotePort": 8788,
-  "remoteOauthEnabled": true,
-  "remoteTlsCertPath": "/path/to/cert.pem",
-  "remoteTlsKeyPath": "/path/to/key.pem"
+  "connection": {
+    "remoteMode": true,
+    "remoteHost": "0.0.0.0",
+    "remotePort": 8788,
+    "remoteOauthEnabled": true,
+    "remoteTlsCertPath": "/path/to/cert.pem",
+    "remoteTlsKeyPath": "/path/to/key.pem"
+  }
 }
 ```
 
@@ -371,7 +373,7 @@ Everything shares the one connection — nothing fights over the mailbox.
 
 While the shared mailpouch is running, the "Connect an app" chooser only offers the shared option (the per-computer one is turned off, because it would conflict). Adding or replacing a headless login takes effect right away — no restart. Revoking one removes its login for good; to bring it back, issue a new one.
 
-See [README.md — Remote HTTP Mode](README.md#remote-http-mode) for the full guide.
+See [README.md — Remote HTTP Mode](README.md#remote--http-transport) for the full guide.
 
 ---
 

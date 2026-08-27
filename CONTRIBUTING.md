@@ -7,7 +7,7 @@ Thank you for your interest in contributing to mailpouch! This document provides
 ### Prerequisites
 
 - Node.js 22.0.0 or higher
-- npm 9.0.0 or higher
+- npm 10.0.0 or higher
 - Proton Mail account with Proton Bridge installed
 - Git
 
@@ -102,7 +102,7 @@ feat: add email filtering by date range
 
 ```
 src/
-├── index.ts                    # Unified daemon: MCP server (76 tools, Resources, Prompts) + settings HTTP server + system tray
+├── index.ts                    # Unified daemon: MCP server (up to 86 tools: 83 canonical + 3 meta-tools, Resources, Prompts) + settings HTTP server + system tray
 ├── settings-main.ts            # Standalone settings-UI CLI entry point — hosts the persistent tray icon via mailpouch-settings
 ├── accounts/
 │   ├── registry.ts             # Multi-account CRUD + per-account keychain routing

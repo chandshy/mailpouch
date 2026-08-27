@@ -29,14 +29,17 @@ The script refuses to run against a dirty checkout, posts a `pending` status, ru
 local Proton Bridge E2E, then posts `success`/`failure` for `HEAD`. It scrubs
 `GH_TOKEN`/`NPM_TOKEN`/`SSH_AUTH_SOCK` and friends from the child environment first.
 
-> **The Bridge E2E is destructive.** Its teardown erases mailbox state. `MAILPOUCH_E2E_BRIDGE_CONFIG`
-> **must** point at a disposable Proton account — never a real mailbox. There is currently no
-> disposable account provisioned on this machine; the `~/.mailpouch-e2e-*.json` files are
-> leftover harness configs derived from the live account, **not** safe targets.
+> **The current Bridge E2E is ownership-scoped and non-wiping.** It snapshots the existing
+> mailbox folders, message identities, and flags before starting the MCP process. Test-created
+> probes carry an exact run marker; teardown permanently deletes only messages proved to belong
+> to that run, never pre-existing mail, and does not delete mailboxes. Teardown then verifies the
+> original baseline is unchanged. The run still appends self-addressed probes to the configured
+> account, so a disposable Proton account remains the recommended target.
 >
-> This is not theoretical: the v3.2.0 attestation run (2026-07-14) was pointed at the live
-> mailbox and left 13 `mpE2E-*` scratch mailboxes behind, which were still there on
-> 2026-07-30 and had to be cleaned up by hand.
+> The v3.2.0 attestation run (2026-07-14), before this ownership-scoped harness, was pointed at
+> the live mailbox and left 13 `mpE2E-*` scratch mailboxes behind; they were still there on
+> 2026-07-30 and had to be cleaned up by hand. That incident is historical and does not describe
+> the current suite's teardown behavior.
 
 Note this is a **local, manual** step — there is no `bridge-e2e` workflow. A commit therefore
 has *no* Bridge status until someone runs the script against that exact SHA. "Missing status"
