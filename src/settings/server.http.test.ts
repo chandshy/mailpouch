@@ -265,6 +265,28 @@ describe("UI-011: approve endpoint validates conditions/toolOverrides", () => {
     }
   });
 
+  it("approves a URL-encoded local client ID containing a colon", async () => {
+    const grants = new AgentGrantStore(join(tmp, "local-grants.json"));
+    const audit = new AgentAuditLog({ path: join(tmp, "local-audit.jsonl") });
+    registerAgentServices(grants, audit);
+    const clientId = "stdio:local-client";
+    grants.createPending({ clientId, clientName: "Local client" });
+
+    const srv = createSettingsServer({ port: 8765, lan: false, accessToken: null, scheme: "http" });
+    const { port, close } = await listen(srv);
+    try {
+      const token = await csrfFrom(port);
+      const res = await request(port, "POST", `/api/agents/${encodeURIComponent(clientId)}/approve`, {
+        headers: { "x-csrf-token": token, origin: `http://127.0.0.1:${port}`, "content-type": "application/json" },
+        body: JSON.stringify({ preset: "read_only" }),
+      });
+      expect(res.status).toBe(200);
+      expect(grants.get(clientId)?.status).toBe("active");
+    } finally {
+      close();
+    }
+  });
+
   it("preserves a valid per-tool cap when issuing a service account", async () => {
     const grants = new AgentGrantStore(join(tmp, "service-grants.json"));
     const audit = new AgentAuditLog({ path: join(tmp, "service-audit.jsonl") });
