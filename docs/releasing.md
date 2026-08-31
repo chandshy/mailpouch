@@ -81,9 +81,9 @@ releases — which is exactly what happened before v3.2.1 (`npm whoami` → `401
 **Configured 2026-07-30** for `chandshy/mailpouch` → `publish.yml`, allowed actions
 *npm publish* + *npm stage publish*, package public.
 
-**Remaining hardening**, once a release has published over OIDC: delete the now-unused
-`NPM_TOKEN` repo secret, and enable *"Require two-factor authentication and disallow tokens"*
-on the package so a leaked classic token can never publish.
+The obsolete `NPM_TOKEN` repository secret was removed and its absence was reverified on
+2026-08-31. **Remaining account-level hardening:** enable *"Require two-factor authentication
+and disallow tokens"* on the package so a leaked classic token can never publish.
 
 ### One-time setup on npmjs.com
 
@@ -114,9 +114,9 @@ On <https://www.npmjs.com/package/mailpouch> → **Settings** → **Trusted Publ
   attestations without `--provenance`.
 - **One trusted publisher per package**, so the workflow filename is effectively pinned. If
   `publish.yml` is ever renamed, update the npm setting in the same change or releases break.
-- **Hardening once it works:** in package settings enable *"Require two-factor authentication
-  and disallow tokens"*. That kills classic-token publishing while leaving OIDC working, so a
-  leaked token can never publish. Do this only after one successful OIDC release.
+- **Remaining account-level hardening:** in package settings enable *"Require two-factor
+  authentication and disallow tokens"*. That kills classic-token publishing while leaving OIDC
+  working, so a leaked token can never publish. The repository no longer stores an `NPM_TOKEN`.
 - The **GitHub Packages** job (`publish-gpr`) is unaffected — it authenticates to
   `npm.pkg.github.com` with the built-in `GITHUB_TOKEN`.
 

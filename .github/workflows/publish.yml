@@ -111,11 +111,10 @@ jobs:
         registry-url: 'https://registry.npmjs.org'
         cache: 'npm'
 
-    # BUILD-011: `npm ci` runs every transitive's preinstall/install/postinstall
-    # script with `id-token: write` and `NPM_TOKEN` in scope. A single
-    # compromised transitive (next event-stream) could exfiltrate the publish
-    # token via a `postinstall` exec. `--ignore-scripts` blocks the entire
-    # lifecycle, then we rebuild ONLY the natives mailpouch actually depends on.
+    # BUILD-011: this job can request an OIDC credential, and install-time
+    # scripts can also tamper with the bytes later published. `--ignore-scripts`
+    # blocks the entire dependency lifecycle, then we rebuild ONLY the natives
+    # mailpouch actually depends on.
     # If you add another native dep (e.g. `bcrypt`, `keytar`), it must be added
     # to the `npm rebuild` line here, or its native binary won't be built.
     - name: Install dependencies
@@ -190,11 +189,10 @@ jobs:
         registry-url: 'https://npm.pkg.github.com'
         cache: 'npm'
 
-    # BUILD-011: `npm ci` runs every transitive's preinstall/install/postinstall
-    # script with `id-token: write` and `NPM_TOKEN` in scope. A single
-    # compromised transitive (next event-stream) could exfiltrate the publish
-    # token via a `postinstall` exec. `--ignore-scripts` blocks the entire
-    # lifecycle, then we rebuild ONLY the natives mailpouch actually depends on.
+    # BUILD-011: install-time scripts can tamper with the bytes later published.
+    # `--ignore-scripts` blocks the dependency lifecycle; the built-in GitHub
+    # Packages token remains scoped only to the publish step below. We then
+    # rebuild ONLY the natives mailpouch actually depends on.
     # If you add another native dep (e.g. `bcrypt`, `keytar`), it must be added
     # to the `npm rebuild` line here, or its native binary won't be built.
     - name: Install dependencies

@@ -146,5 +146,6 @@ jobs:
 # TODO: separate publish job that triggers on a v* tag, downloads all
 # artifacts, splits each into a @mailpouch/tray-native-<arch> package,
 # and `npm publish`es them with `optionalDependencies` linkage from
-# the main package. Pattern is napi-rs standard; needs an NPM_TOKEN
-# secret on the repo before it can run.
+# the main package. Pattern is napi-rs standard; configure each package
+# as an npm trusted publisher for this workflow rather than adding a
+# long-lived repository token.
