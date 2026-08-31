@@ -82,10 +82,13 @@ releases — which is exactly what happened before v3.2.1 (`npm whoami` → `401
 *npm publish* + *npm stage publish*, package public.
 
 The obsolete `NPM_TOKEN` repository secret was removed and its absence was reverified on
-2026-08-31. **Remaining account-level hardening:** enable *"Require two-factor authentication
-and disallow tokens"* on the package so a leaked classic token can never publish.
+2026-08-31. Maintainers do not sign in to npm or run `npm publish` locally: publishing starts
+from the GitHub release/tag workflow, which obtains short-lived OIDC credentials.
 
-### One-time setup on npmjs.com
+### Trusted-publisher registration (already completed)
+
+This is account administration, not a release step. The current registration is documented
+here only so it can be repaired if the repository or workflow name changes.
 
 On <https://www.npmjs.com/package/mailpouch> → **Settings** → **Trusted Publisher** → choose
 **GitHub Actions**, then enter:
@@ -114,9 +117,9 @@ On <https://www.npmjs.com/package/mailpouch> → **Settings** → **Trusted Publ
   attestations without `--provenance`.
 - **One trusted publisher per package**, so the workflow filename is effectively pinned. If
   `publish.yml` is ever renamed, update the npm setting in the same change or releases break.
-- **Remaining account-level hardening:** in package settings enable *"Require two-factor
-  authentication and disallow tokens"*. That kills classic-token publishing while leaving OIDC
-  working, so a leaked token can never publish. The repository no longer stores an `NPM_TOKEN`.
+- **No manual npm credentials:** release operators push the verified tag/package to GitHub;
+  `publish.yml` is the only npm deployment path. Package-account controls are not release
+  credentials and are not checked through a maintainer npm login.
 - The **GitHub Packages** job (`publish-gpr`) is unaffected — it authenticates to
   `npm.pkg.github.com` with the built-in `GITHUB_TOKEN`.
 
