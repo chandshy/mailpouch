@@ -33,7 +33,7 @@ import { fileURLToPath } from "url";
 import { expect } from "vitest";
 import { buildPermissions } from "../../src/config/loader.js";
 import { localAgentId } from "../../src/agents/caller-context.js";
-import type { AccountSpecShape } from "../../src/config/schema.js";
+import type { AccountSpecShape, PermissionPreset } from "../../src/config/schema.js";
 import { CredentialEncryption } from "../../src/crypto/credential-encryption.js";
 import {
   __setKeyringForTests,
@@ -88,7 +88,7 @@ import {
   BRIDGE_STANDALONE_PARENT_MARGIN_MS,
   bridgeStandaloneProcessBudgetMs,
 } from "./support/time-budgets.mjs";
-import { GREENMAIL_IMAP_PORT, GREENMAIL_SMTP_PORT, TEST_USER } from "./support/docker.js";
+import { GREENMAIL_HOST, GREENMAIL_IMAP_PORT, GREENMAIL_SMTP_PORT, TEST_USER } from "./support/docker.js";
 import type { SeedEmail } from "./support/mime-builder.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -200,6 +200,8 @@ export interface StartE2EOptions {
   /** Greenmail-only scoped mode. Bridge is always non-destructive regardless
    *  of this option; explicitly passing false for Bridge is rejected. */
   safe?: boolean;
+  /** Global and per-agent preset for this isolated child. */
+  preset?: PermissionPreset;
 }
 
 /** MCP client name the harness connects under. Local-agent gating derives the
@@ -214,7 +216,7 @@ const HARNESS_CLIENT_NAME = "e2e-harness";
  * MAILPOUCH_AGENTS. This exercises the gate (grant must be active) rather than
  * bypassing it.
  */
-function writeApprovedAgentGrant(): string {
+function writeApprovedAgentGrant(preset: PermissionPreset): string {
   const path = join(HOME, `.mailpouch-e2e-agents-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
   const now = new Date().toISOString();
   const store = {
@@ -224,7 +226,7 @@ function writeApprovedAgentGrant(): string {
         clientId: localAgentId(HARNESS_CLIENT_NAME),
         clientName: HARNESS_CLIENT_NAME,
         status: "active",
-        preset: "full",
+        preset,
         createdAt: now,
         approvedAt: now,
         totalCalls: 0,
@@ -243,14 +245,15 @@ function writeApprovedAgentGrant(): string {
 function writeGreenmailConfig(
   user: { email: string; username: string; password: string },
   credentialToken: string,
+  preset: PermissionPreset,
 ): string {
   const path = join(HOME, `.mailpouch-e2e-greenmail-${credentialToken}.json`);
   const config = {
     configVersion: 3,
     connection: {
-      smtpHost: "127.0.0.1",
+      smtpHost: GREENMAIL_HOST,
       smtpPort: GREENMAIL_SMTP_PORT,
-      imapHost: "127.0.0.1",
+      imapHost: GREENMAIL_HOST,
       imapPort: GREENMAIL_IMAP_PORT,
       username: user.username,
       password: user.password,
@@ -265,7 +268,7 @@ function writeGreenmailConfig(
     // buildPermissions("full") populates the per-tool enabled flags. Writing
     // just { preset: "full" } loses to the loader's default deep-merge which
     // initializes per-tool flags from read_only, blocking every mutation.
-    permissions: buildPermissions("full"),
+    permissions: buildPermissions(preset),
     credentialStorage: "config",
     // AccountManager has its own registry hydration path. Quarantine is the
     // executable switch that routes this exact token profile back to its
@@ -490,6 +493,7 @@ async function readBridgeSource(configPath: string): Promise<{
 export function buildBridgeChildConfig(
   source: BridgeSourceConfig,
   bridge: BridgeConnectionConfig,
+  preset: PermissionPreset = "full",
 ): BridgeSourceConfig {
   const raw = structuredClone(source);
   const connection = { ...(raw.connection ?? {}) } as Record<string, unknown>;
@@ -517,7 +521,7 @@ export function buildBridgeChildConfig(
   // operator profile's day-to-day permission preset. The detached child and
   // its pre-approved local grant are private to this run; live-mail mutation
   // authority still comes only from guardBridgeCall's exact ownership proofs.
-  raw.permissions = buildPermissions("full");
+  raw.permissions = buildPermissions(preset);
   raw.keychainMailboxCredentialsQuarantined = true;
   raw.keychainAuxiliaryCredentialsQuarantined = {
     passAccessToken: true,
@@ -691,6 +695,7 @@ export async function startE2E(opts: StartE2EOptions = {}): Promise<E2EHarness> 
   // only configuration, never a mode switch; this prevents both false-green
   // Bridge runs and local runs accidentally inheriting live-mail mode.
   const mode = resolveE2EBackend(opts.mode);
+  const preset = opts.preset ?? "full";
   if (mode === "bridge" && opts.safe === false) {
     throw new Error("Bridge E2E refused: safe:false is not supported; live Bridge is always ownership-scoped.");
   }
@@ -758,9 +763,9 @@ export async function startE2E(opts: StartE2EOptions = {}): Promise<E2EHarness> 
   // override or opt-in path.
   let allowWipe: boolean;
   if (mode === "greenmail") {
-    configPath = writeGreenmailConfig(greenmailUser, credentialToken);
+    configPath = writeGreenmailConfig(greenmailUser, credentialToken, preset);
     isTempConfig = true;
-    imapHost = "127.0.0.1";
+    imapHost = GREENMAIL_HOST;
     imapPort = GREENMAIL_IMAP_PORT;
     imapUser = greenmailUser.username;
     imapPass = greenmailUser.password;
@@ -789,7 +794,7 @@ export async function startE2E(opts: StartE2EOptions = {}): Promise<E2EHarness> 
       );
     }
     const bridge = source.connection;
-    const raw = buildBridgeChildConfig(source.raw, bridge);
+    const raw = buildBridgeChildConfig(source.raw, bridge, preset);
     configPath = join(HOME, `.mailpouch-e2e-bridge-${ownershipToken!}.json`);
     bridgeSetupJournal = createBridgeSetupJournal({
       scopeRoot: bridgeAuthorityScope!.scopeRoot,
@@ -957,7 +962,7 @@ export async function startE2E(opts: StartE2EOptions = {}): Promise<E2EHarness> 
       imap.setOwnershipToken(scratch.token);
     }
 
-    agentsPath = writeApprovedAgentGrant();
+    agentsPath = writeApprovedAgentGrant(preset);
     const childEnv = buildE2EChildEnv(
       process.env,
       mode,
@@ -1373,7 +1378,7 @@ export async function startE2E(opts: StartE2EOptions = {}): Promise<E2EHarness> 
   };
 
   const isPermissionBlocked = (r: CallResult | RawOutcome): boolean => {
-    const text = "content" in r ? r.content[0]?.text ?? "" : "message" in r ? r.message : "";
+    const text = ("content" in r ? r.content[0]?.text ?? "" : "message" in r ? r.message : "").toLowerCase();
     return (
       ("isError" in r && r.isError === true && (text.includes("disabled in server settings") || text.includes("blocked"))) ||
       ("ok" in r && !r.ok && text.includes("disabled in server settings"))

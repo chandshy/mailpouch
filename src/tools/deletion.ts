@@ -6,7 +6,7 @@
  */
 
 import { optionalSourceFolder, requireNumericEmailId, requireNumericEmailIds } from "../utils/helpers.js";
-import type { ToolDef, ToolHandler, ToolModule } from "./types.js";
+import type { ToolDef, ToolHandler } from "./types.js";
 
 const SOURCE_FOLDER_SCHEMA = {
   type: "string",
@@ -123,6 +123,3 @@ export const handlers: Record<string, ToolHandler> = {
     return ok({ success: true, deleted }, `Permanently deleted ${deleted} message(s) from Trash.`);
   },
 };
-
-const mod: ToolModule = { defs, handlers };
-export default mod;

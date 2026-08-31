@@ -45,7 +45,7 @@ async function waitForBobMessages(expected: number, timeoutMs = 5000): Promise<A
   let lastSeen: Array<{ uid: number; subject: string; to: string[]; cc: string[]; body: string; rawSource: string }> = [];
   while (Date.now() < deadline) {
     const client = new ImapFlow({
-      host: "127.0.0.1",
+      host: docker.GREENMAIL_HOST,
       port: docker.GREENMAIL_IMAP_PORT,
       secure: false,
       auth: { user: TEST_USER_BOB.username, pass: TEST_USER_BOB.password },
@@ -92,7 +92,7 @@ async function waitForBobMessages(expected: number, timeoutMs = 5000): Promise<A
 /** Wipe bob's mailbox so each test starts from zero. */
 async function wipeBobInbox(): Promise<void> {
   const client = new ImapFlow({
-    host: "127.0.0.1",
+    host: docker.GREENMAIL_HOST,
     port: docker.GREENMAIL_IMAP_PORT,
     secure: false,
     auth: { user: TEST_USER_BOB.username, pass: TEST_USER_BOB.password },

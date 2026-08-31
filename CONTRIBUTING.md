@@ -39,6 +39,10 @@ Thank you for your interest in contributing to mailpouch! This document provides
 
 ## Development Workflow
 
+Maintainers and coding agents working from a source checkout can use the
+[continuous improvement loop](docs/improvement-loop.md). Its runner is
+intentionally not included in the published npm package.
+
 ### Making Changes
 
 1. Create a new branch for your feature/fix:

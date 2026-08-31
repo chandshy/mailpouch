@@ -1195,11 +1195,7 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
       }
 
       // ── GET /api/status ───────────────────────────────────────────────────
-      // `hasConfig` lets `mailpouch status` and the port-occupant log check
-      // tell a mailpouch settings UI from a stray listener. It is a forgeable
-      // boolean and NOT an identity claim — nothing security-relevant may be
-      // derived from this response. mailpouch no longer adopts another
-      // process's settings URL, so there is nothing here worth spoofing.
+      // `hasConfig` lets `mailpouch status` report whether setup is complete.
       // The rest is the live snapshot `mailpouch status` surfaces; present
       // only when the running instance supplied a status provider.
       if (method === "GET" && path === "/api/status") {

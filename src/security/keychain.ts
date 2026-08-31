@@ -312,14 +312,12 @@ export async function migrateFromConfig(
 ): Promise<boolean> {
   const password = config.connection.password;
   const smtpToken = config.connection.smtpToken;
-  const remoteBearer = config.connection.remoteBearerToken;
-  const remoteOauthAdmin = config.connection.remoteOauthAdminPassword;
   const passPat = config.connection.passAccessToken;
   const simpleloginKey = config.connection.simpleloginApiKey;
 
   // Nothing to migrate if every secret is already blank
   if (
-    !password && !smtpToken && !remoteBearer && !remoteOauthAdmin
+    !password && !smtpToken
     && !passPat && !simpleloginKey
   ) return false;
 
@@ -334,16 +332,6 @@ export async function migrateFromConfig(
     if (saved.passwordStored) config.connection.password = "";
     if (saved.smtpTokenStored) config.connection.smtpToken = "";
     migrated = saved.passwordStored || saved.smtpTokenStored;
-  }
-
-  // Store OAuth secrets (new) — same pattern, separate keychain entries.
-  if (remoteBearer || remoteOauthAdmin) {
-    const saved = await saveRemoteSecrets(remoteBearer ?? "", remoteOauthAdmin ?? "");
-    if (saved) {
-      config.connection.remoteBearerToken = "";
-      config.connection.remoteOauthAdminPassword = "";
-      migrated = true;
-    }
   }
 
   // CRED-001: Pass PAT + SimpleLogin API key. Were previously left in
@@ -361,8 +349,6 @@ export async function migrateFromConfig(
     const hasPlaintextFallback = !!(
       config.connection.password
       || config.connection.smtpToken
-      || config.connection.remoteBearerToken
-      || config.connection.remoteOauthAdminPassword
       || config.connection.passAccessToken
       || config.connection.simpleloginApiKey
     );

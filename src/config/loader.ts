@@ -31,6 +31,8 @@ import {
   saveCredentials as saveKeychainCredentials,
   loadAuxiliaryCredentials as loadKeychainAuxCredentials,
   saveAuxiliaryCredentials as saveKeychainAuxCredentials,
+  loadRemoteSecrets,
+  deleteRemoteSecrets,
   migrateFromConfig,
 } from "../security/keychain.js";
 import { CredentialEncryption } from "../crypto/credential-encryption.js";
@@ -1123,7 +1125,7 @@ export async function loadAuxiliaryCredentialsFromKeychain(): Promise<{
  * Priority: keychain > encrypted-file. Idempotent — safe to call on every startup.
  */
 export async function migrateCredentials(): Promise<boolean> {
-  const tags: { migrated?: boolean } = {};
+  const tags: { migrated?: boolean; deprecatedRemoteScrubbed?: boolean } = {};
   return tracer.span('config.migrateCredentials', tags, async () => {
   // CRED-015: take the config write lock for the whole read-modify-write so a
   // concurrent loadCredentialsFromKeychain() can't observe the in-flight,
@@ -1138,6 +1140,33 @@ export async function migrateCredentials(): Promise<boolean> {
   // reference until saveConfig() invalidates it, so racing readers within the
   // lock window never see `password=""` + a missing encrypted blob.
   const config = structuredClone(loaded);
+
+  // The shared bearer and OAuth admin password are no longer accepted. This
+  // compatibility release removes stored values while retaining the schema
+  // fields so older config files still parse cleanly.
+  const scrubbedDeprecatedConfig = !!(
+    config.connection.remoteBearerToken || config.connection.remoteOauthAdminPassword
+  );
+  if (scrubbedDeprecatedConfig) {
+    config.connection.remoteBearerToken = "";
+    config.connection.remoteOauthAdminPassword = "";
+  }
+  const deprecatedKeychainSecrets = await loadRemoteSecrets();
+  const scrubbedDeprecatedKeychain = deprecatedKeychainSecrets
+    ? await deleteRemoteSecrets()
+    : false;
+  tags.deprecatedRemoteScrubbed = scrubbedDeprecatedConfig || scrubbedDeprecatedKeychain;
+  if (deprecatedKeychainSecrets && !scrubbedDeprecatedKeychain) {
+    logger.warn(
+      "Deprecated remote authentication secrets remain in the OS keychain because deletion could not be verified.",
+      "Config",
+    );
+  } else if (tags.deprecatedRemoteScrubbed) {
+    logger.warn(
+      "Removed deprecated remoteBearerToken/remoteOauthAdminPassword credentials; remote access now uses per-agent OAuth.",
+      "Config",
+    );
+  }
 
   // Plaintext-creds path: hoist to keychain (preferred) or encrypted-file.
   const hasPlaintext = !!(config.connection.password || config.connection.smtpToken);
@@ -1173,12 +1202,14 @@ export async function migrateCredentials(): Promise<boolean> {
     } catch {
       // Decryption failed (e.g. host moved without preserving v1 key inputs).
       // Don't crash; leave the v1 blob as-is so the next save path can rotate.
+      if (scrubbedDeprecatedConfig) saveConfig(config);
       tags.migrated = false;
       return false;
     }
   }
 
   if (!hasPlaintext || alreadyEncrypted) {
+    if (scrubbedDeprecatedConfig) saveConfig(config);
     tags.migrated = false;
     return false;
   }

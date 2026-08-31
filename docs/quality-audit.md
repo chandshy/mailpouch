@@ -1,5 +1,9 @@
 # Quality Audit Ledger
 
+> Archived review ledger. For routine lookup use the compact
+> [historical audit index](audit-history.md); current source and tests are
+> authoritative.
+
 Per-function code-review scores for the Bridge-capability program (plan
 `crispy-wibbling-dusk`). Each function is scored 1–10 on five dimensions —
 **job-as-designed** (correct vs Proton Bridge semantics), **simplicity**,

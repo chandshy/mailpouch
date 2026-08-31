@@ -13,7 +13,7 @@ import {
   validateLabelName,
   validateTargetFolder,
 } from "../utils/helpers.js";
-import type { ToolDef, ToolHandler, ToolModule } from "./types.js";
+import type { ToolDef, ToolHandler } from "./types.js";
 
 const ACTION_RESULT_SCHEMA = {
   type: "object",
@@ -564,6 +564,3 @@ export const handlers: Record<string, ToolHandler> = {
     return bulkOk(brlResults);
   },
 };
-
-const mod: ToolModule = { defs, handlers };
-export default mod;

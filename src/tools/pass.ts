@@ -4,7 +4,7 @@
 
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { PassCliUnavailableError } from "../services/pass-service.js";
-import type { ToolDef, ToolHandler, ToolModule } from "./types.js";
+import type { ToolDef, ToolHandler } from "./types.js";
 
 export const defs: ToolDef[] = [
   {
@@ -178,6 +178,3 @@ export const handlers: Record<string, ToolHandler> = {
     }
   },
 };
-
-const mod: ToolModule = { defs, handlers };
-export default mod;

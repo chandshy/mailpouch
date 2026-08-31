@@ -4,7 +4,7 @@
  */
 
 import { logger } from "../utils/logger.js";
-import type { ToolDef, ToolHandler, ToolModule } from "./types.js";
+import type { ToolDef, ToolHandler } from "./types.js";
 
 const ACTION_RESULT_SCHEMA = {
   type: "object",
@@ -90,6 +90,3 @@ export const handlers: Record<string, ToolHandler> = {
     return ok({ success: true }, "Restart initiated. The server is shutting down; your client will reconnect automatically.");
   },
 };
-
-const mod: ToolModule = { defs, handlers };
-export default mod;

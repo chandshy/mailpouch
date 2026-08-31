@@ -20,7 +20,6 @@ import { homedir } from "os";
 import { createConnection } from "net";
 import { spawn } from "child_process";
 import { startSettingsServer } from "./settings/server.js";
-import { portOccupantLooksLikeMailpouch } from "./settings/port-occupant.js";
 import { openBrowser } from "./settings/tui.js";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -2670,12 +2669,8 @@ async function _startSettingsServerDaemon(): Promise<void> {
   // cost four rounds of security fixes and still left a check-once-trust-
   // forever gap. Two settings UIs is untidy, not unsafe.
   //
-  // The occupant check survives only to pick a log level, below.
-  const occupantLooksLikeMailpouch = await portOccupantLooksLikeMailpouch(basePort);
-
-  // Bind the configured port; if it's held by a FOREIGN process (not a
-  // reusable mailpouch UI — the probe above already ruled that out), retrying
-  // the same port forever is pointless, so fall back to the next ports. The
+  // Bind the configured port; if it's held by another process, retrying the
+  // same port forever is pointless, so fall back to the next ports. The
   // configured port still gets a couple of quick retries first to cover the
   // transient "a mailpouch is restarting on it" window.
   const PORT_FALLBACK_SPAN = 10;     // try basePort … basePort+10
@@ -2705,14 +2700,6 @@ async function _startSettingsServerDaemon(): Promise<void> {
         _settingsUnavailableReason = undefined;
         if (offset === 0) {
           logger.info(`Settings UI started at ${_settingsUrl}`, "MCPServer");
-        } else if (occupantLooksLikeMailpouch) {
-          // The expected "standalone mailpouch-settings daemon plus stdio MCP"
-          // setup. Nothing is wrong, so don't warn about it — this is the one
-          // benefit the old URL-adoption path actually delivered.
-          logger.info(
-            `Settings UI started at ${_settingsUrl} (port ${basePort} is held by another mailpouch settings UI).`,
-            "MCPServer",
-          );
         } else {
           logger.warn(
             `Settings UI: configured port ${basePort} was occupied by another process — bound to ${port} instead. ` +

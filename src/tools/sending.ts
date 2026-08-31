@@ -10,7 +10,7 @@ import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { isValidEmail, optionalFolderHint, validateAttachments, sanitizeAttachments, requireNumericEmailId } from "../utils/helpers.js";
 import { logger } from "../utils/logger.js";
 import { escapeHtml } from "../services/smtp-service.js";
-import type { ToolDef, ToolHandler, ToolModule } from "./types.js";
+import type { ToolDef, ToolHandler } from "./types.js";
 
 const ACTION_RESULT_SCHEMA = {
   type: "object",
@@ -377,6 +377,3 @@ export const handlers: Record<string, ToolHandler> = {
     return actionOk(result.messageId);
   },
 };
-
-const mod: ToolModule = { defs, handlers };
-export default mod;

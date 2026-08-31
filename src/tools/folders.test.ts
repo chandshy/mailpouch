@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import mod from "./folders.js";
+import * as mod from "./folders.js";
 import type { ToolCallContext, ToolResult } from "./types.js";
 import type { EmailFolder } from "../types/index.js";
 

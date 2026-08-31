@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import mod from "./drafts.js";
+import * as mod from "./drafts.js";
 import type { ToolCallContext, ToolResult } from "./types.js";
 
 function makeCtx(over: Partial<ToolCallContext>): ToolCallContext {

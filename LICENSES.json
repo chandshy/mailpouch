@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-08-27",
-  "rootPackage": "mailpouch@4.0.2",
+  "generatedAt": "2026-08-31",
+  "rootPackage": "mailpouch@4.0.3",
   "deps": [
     {
       "name": "@hono/node-server",

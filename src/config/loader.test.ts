@@ -4,6 +4,7 @@ import { homedir } from "os";
 import { buildPermissions, defaultConfig, getConfigPath, configExists, loadConfig, saveConfig, loadCredentialsFromConfigFile, loadCredentialsFromKeychain, loadAuxiliaryCredentialsFromKeychain, saveConfigWithCredentials, migrateCredentials } from "./loader.js";
 import { ALL_TOOLS, TOOL_CATEGORIES, DEFAULT_RESPONSE_LIMITS } from "./schema.js";
 import { CredentialEncryption } from "../crypto/credential-encryption.js";
+import { logger } from "../utils/logger.js";
 
 // ─── fs mocking for loadConfig / saveConfig / configExists ─────────────────────
 vi.mock("fs", async (importOriginal) => {
@@ -35,10 +36,12 @@ vi.mock("../security/keychain.js", () => ({
   saveCredentials: vi.fn(),
   loadAuxiliaryCredentials: vi.fn(),
   saveAuxiliaryCredentials: vi.fn(),
+  loadRemoteSecrets: vi.fn(),
+  deleteRemoteSecrets: vi.fn(),
   migrateFromConfig: vi.fn(),
 }));
 
-import { loadCredentials as mockLoadKeychainCredentials, saveCredentials as mockSaveKeychainCredentials, loadAuxiliaryCredentials as mockLoadAuxiliaryCredentials, saveAuxiliaryCredentials as mockSaveKeychainAuxCredentials, migrateFromConfig as mockMigrateFromConfig } from "../security/keychain.js";
+import { loadCredentials as mockLoadKeychainCredentials, saveCredentials as mockSaveKeychainCredentials, loadAuxiliaryCredentials as mockLoadAuxiliaryCredentials, saveAuxiliaryCredentials as mockSaveKeychainAuxCredentials, loadRemoteSecrets as mockLoadRemoteSecrets, deleteRemoteSecrets as mockDeleteRemoteSecrets, migrateFromConfig as mockMigrateFromConfig } from "../security/keychain.js";
 
 // Import mocked fs functions for use in tests
 import { existsSync, readFileSync, writeFileSync, renameSync } from "fs";
@@ -952,11 +955,14 @@ describe("saveConfigWithCredentials", () => {
 
 describe("migrateCredentials", () => {
   const mockedMigrate = vi.mocked(mockMigrateFromConfig);
+  const mockedLoadRemote = vi.mocked(mockLoadRemoteSecrets);
+  const mockedDeleteRemote = vi.mocked(mockDeleteRemoteSecrets);
   const mockedExistsSync = vi.mocked(existsSync);
   const mockedReadFileSync = vi.mocked(readFileSync);
 
   beforeEach(() => {
     vi.resetAllMocks();
+    mockedLoadRemote.mockResolvedValue(null);
   });
 
   it("returns false when no config file exists", async () => {
@@ -978,6 +984,62 @@ describe("migrateCredentials", () => {
     const result = await migrateCredentials();
     expect(result).toBe(true);
     expect(mockedMigrate).toHaveBeenCalledTimes(1);
+  });
+
+  it("scrubs deprecated remote credentials from config and keychain", async () => {
+    mockedExistsSync.mockReturnValue(true);
+    mockedReadFileSync.mockReturnValue(JSON.stringify({
+      configVersion: 1,
+      connection: {
+        smtpHost: "localhost", smtpPort: 1025, imapHost: "localhost", imapPort: 1143,
+        username: "u", password: "", smtpToken: "",
+        remoteBearerToken: "legacy-bearer",
+        remoteOauthAdminPassword: "legacy-admin",
+        bridgeCertPath: "", debug: false,
+      },
+      permissions: { preset: "full", tools: {} },
+    }) as unknown as Buffer);
+    mockedLoadRemote.mockResolvedValue({
+      remoteBearerToken: "keychain-bearer",
+      remoteOauthAdminPassword: "keychain-admin",
+    });
+    mockedDeleteRemote.mockResolvedValue(true);
+
+    expect(await migrateCredentials()).toBe(false);
+    expect(mockedDeleteRemote).toHaveBeenCalledTimes(1);
+    const configWrite = vi.mocked(writeFileSync).mock.calls.find(([target]) => typeof target === "string")!;
+    const persisted = JSON.parse(configWrite[1] as string);
+    expect(persisted.connection.remoteBearerToken).toBe("");
+    expect(persisted.connection.remoteOauthAdminPassword).toBe("");
+  });
+
+  it("does not claim keychain deletion when deprecated secret cleanup fails", async () => {
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+    mockedExistsSync.mockReturnValue(true);
+    mockedReadFileSync.mockReturnValue(JSON.stringify({
+      configVersion: 1,
+      connection: {
+        smtpHost: "localhost", smtpPort: 1025, imapHost: "localhost", imapPort: 1143,
+        username: "u", password: "", smtpToken: "",
+        remoteBearerToken: "config-bearer", bridgeCertPath: "", debug: false,
+      },
+      permissions: { preset: "full", tools: {} },
+    }) as unknown as Buffer);
+    mockedLoadRemote.mockResolvedValue({
+      remoteBearerToken: "keychain-bearer",
+      remoteOauthAdminPassword: "",
+    });
+    mockedDeleteRemote.mockResolvedValue(false);
+
+    expect(await migrateCredentials()).toBe(false);
+    expect(mockedDeleteRemote).toHaveBeenCalledTimes(1);
+    const configWrite = vi.mocked(writeFileSync).mock.calls.find(([target]) => typeof target === "string")!;
+    const persisted = JSON.parse(configWrite[1] as string);
+    expect(persisted.connection.remoteBearerToken).toBe("");
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("deletion could not be verified"),
+      "Config",
+    );
   });
 
   // ── CRED-011 — v1→v2 re-encrypt is atomic across both credential fields ──

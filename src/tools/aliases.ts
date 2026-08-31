@@ -8,7 +8,7 @@
  */
 
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
-import type { ToolDef, ToolHandler, ToolModule } from "./types.js";
+import type { ToolDef, ToolHandler } from "./types.js";
 import { clampOptionalInt, requireNonEmptyString } from "../utils/helpers.js";
 
 const ACTION_RESULT_SCHEMA = {
@@ -606,6 +606,3 @@ export const handlers: Record<string, ToolHandler> = {
     return ok(options as unknown as Record<string, unknown>);
   },
 };
-
-const mod: ToolModule = { defs, handlers };
-export default mod;

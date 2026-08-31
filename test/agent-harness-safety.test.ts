@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const source = readFileSync(new URL("./agent-harness.test.ts", import.meta.url), "utf8");
+const permissionMatrix = readFileSync(new URL("./e2e/scenarios/permissions.e2e.test.ts", import.meta.url), "utf8");
 
 function section(start: string, end: string): string {
   const startAt = source.indexOf(start);
@@ -38,11 +39,11 @@ describe("agent harness live-mail safety", () => {
     expect(destructive).not.toContain('folder: "INBOX"');
   });
 
-  it("keeps the legacy enabled-mutation matrix skipped until it has owned fixtures", () => {
-    expect(source).toContain(
-      'describe.skip("permission gate — preset security matrix (requires owned fixtures)"',
-    );
-    expect(source).not.toContain('raw("create_folder"');
-    expect(source).not.toContain('raw("delete_folder"');
+  it("runs the preset matrix only through ownership-scoped fixtures", () => {
+    expect(source).not.toContain("permission gate — preset security matrix");
+    expect(permissionMatrix).toContain("startE2E({ safe: true, preset })");
+    expect(permissionMatrix).toContain('appendVisibleSeed("INBOX", owned)');
+    expect(permissionMatrix).not.toContain('callRaw("create_folder"');
+    expect(permissionMatrix).not.toContain('callRaw("delete_folder"');
   });
 });

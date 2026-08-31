@@ -4,7 +4,7 @@ export default defineConfig({
   test: {
     globals: true,
     environment: 'node',
-    setupFiles: ['./src/test-setup.ts'],
+    setupFiles: ['./test/setup.ts'],
     // E2E suite is run by vitest.config.e2e.ts via npm run test:e2e:* —
     // exclude from the default unit-test run so `npm test` stays fast and
     // doesn't require Docker / Bridge.

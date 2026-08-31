@@ -161,10 +161,3 @@ export interface ToolCallContext {
 }
 
 export type ToolHandler = (ctx: ToolCallContext) => Promise<ToolResult>;
-
-export interface ToolModule {
-  /** Tool definitions exposed through ListTools. */
-  defs: ToolDef[];
-  /** Handlers keyed by tool name — dispatcher looks up by request.params.name. */
-  handlers: Record<string, ToolHandler>;
-}

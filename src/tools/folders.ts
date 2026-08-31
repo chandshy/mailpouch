@@ -5,7 +5,7 @@
 
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { validateRequiredTargetFolder } from "../utils/helpers.js";
-import type { ToolDef, ToolHandler, ToolModule } from "./types.js";
+import type { ToolDef, ToolHandler } from "./types.js";
 
 const ACTION_RESULT_SCHEMA = {
   type: "object",
@@ -162,6 +162,3 @@ export const handlers: Record<string, ToolHandler> = {
     return actionOk();
   },
 };
-
-const mod: ToolModule = { defs, handlers };
-export default mod;

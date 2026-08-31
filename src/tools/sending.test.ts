@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import mod from "./sending.js";
+import * as mod from "./sending.js";
 import type { ToolCallContext, ToolResult } from "./types.js";
 import type { EmailMessage } from "../types/index.js";
 

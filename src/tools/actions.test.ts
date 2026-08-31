@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import mod from "./actions.js";
+import * as mod from "./actions.js";
 import { ALL_TOOLS } from "../config/schema.js";
 import type { ToolCallContext, ToolResult } from "./types.js";
 

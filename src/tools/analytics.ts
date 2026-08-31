@@ -5,7 +5,7 @@
 
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import type { ContactSortBy } from "../services/analytics-service.js";
-import type { ToolDef, ToolHandler, ToolModule } from "./types.js";
+import type { ToolDef, ToolHandler } from "./types.js";
 import { clampOptionalInt } from "../utils/helpers.js";
 
 export const defs: ToolDef[] = [
@@ -251,6 +251,3 @@ export const handlers: Record<string, ToolHandler> = {
     return ok({ trends });
   },
 };
-
-const mod: ToolModule = { defs, handlers };
-export default mod;

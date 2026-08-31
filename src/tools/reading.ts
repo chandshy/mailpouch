@@ -37,7 +37,7 @@ const _ftsRebuilding = new Set<string>();
 import type { EmailMessage, EmailFolder } from "../types/index.js";
 import { logger } from "../utils/logger.js";
 import { isFolderNotFoundError } from "../utils/error-classify.js";
-import type { ToolCallContext, ToolDef, ToolHandler, ToolModule } from "./types.js";
+import type { ToolCallContext, ToolDef, ToolHandler } from "./types.js";
 
 const EMAIL_SUMMARY_SCHEMA = {
   type: "object",
@@ -1033,6 +1033,3 @@ export const handlers: Record<string, ToolHandler> = {
     return ok({ meeting: meeting ?? null });
   },
 };
-
-const mod: ToolModule = { defs, handlers };
-export default mod;

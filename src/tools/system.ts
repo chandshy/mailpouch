@@ -10,7 +10,7 @@ import nodePath from "path";
 import { validateTargetFolder, clampOptionalInt } from "../utils/helpers.js";
 import { logger } from "../utils/logger.js";
 import { isFolderNotFoundError } from "../utils/error-classify.js";
-import type { ToolDef, ToolHandler, ToolModule } from "./types.js";
+import type { ToolDef, ToolHandler } from "./types.js";
 
 const ACTION_RESULT_SCHEMA = {
   type: "object",
@@ -282,6 +282,3 @@ export const handlers: Record<string, ToolHandler> = {
     return ok({ version });
   },
 };
-
-const mod: ToolModule = { defs, handlers };
-export default mod;

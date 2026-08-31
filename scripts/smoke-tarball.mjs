@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 // Pack the package as it would be published, install it into a clean temp
-// directory, execute every published bin with `--version`, and exercise the
-// published improvement-loop scripts. Catches:
+// directory, and execute every published bin with `--version`. Catches:
 //   - missing `bin` entry / wrong shebang / wrong mode
 //   - files omitted from `files` (e.g. `dist/index.js` not shipped)
 //   - ESM/CJS mismatch that boots locally but fails on a fresh install
@@ -9,7 +8,7 @@
 // Exit 0 — installed bins and package scripts work from the tarball.
 // Exit 1 — packing, installation, an installed entrypoint, or a script fails.
 
-import { mkdtemp, rm, readFile, copyFile } from "node:fs/promises";
+import { mkdtemp, rm, readFile } from "node:fs/promises";
 import { existsSync, openSync, closeSync, readFileSync, rmSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
@@ -152,43 +151,6 @@ try {
     }
   }
 
-  // The improvement commands are published in package.json, so verify the
-  // runner is present and usable from the installed package rather than only
-  // from the source checkout. The generated state stays inside installDir and
-  // is removed by the existing finally block.
-  const installedPackageDir = join(installDir, "node_modules", pkg.name);
-  const initLoopRes = await runNpm(["run", "--silent", "improve", "--", "init"], {
-    cwd: installedPackageDir,
-    timeout: 15_000,
-  });
-  if (initLoopRes.error || initLoopRes.status !== 0) {
-    throw new Error(
-      `installed npm run improve -- init failed (exit ${initLoopRes.status}, signal ${initLoopRes.signal ?? "none"}): ${initLoopRes.error?.message || initLoopRes.stderr || initLoopRes.stdout}`
-    );
-  }
-  const loopSnapshot = join(installedPackageDir, ".improvement-loop", "snapshot.json");
-  if (!existsSync(loopSnapshot)) {
-    throw new Error(`Installed improvement loop did not create its snapshot: ${loopSnapshot}`);
-  }
-
-  const loopStatusRes = await runNpm(
-    ["run", "--silent", "improve:status", "--", "--json"],
-    { cwd: installedPackageDir, timeout: 15_000 },
-  );
-  if (loopStatusRes.error || loopStatusRes.status !== 0) {
-    throw new Error(
-      `installed npm run improve:status failed (exit ${loopStatusRes.status}, signal ${loopStatusRes.signal ?? "none"}): ${loopStatusRes.error?.message || loopStatusRes.stderr || loopStatusRes.stdout}`
-    );
-  }
-  try {
-    const status = JSON.parse(loopStatusRes.stdout);
-    if (!status || typeof status !== "object" || !status.counts || typeof status.counts.queued !== "number") {
-      throw new Error("status output is missing numeric backlog counts");
-    }
-  } catch (error) {
-    throw new Error(`installed improve:status returned invalid JSON: ${error.message}`);
-  }
-
   // 4. Verify packed files include the native-tray JS shim (BUILD-006). The
   //    --version path short-circuits before tray load, so we can't rely on
   //    "it booted" to prove the tray shim shipped. Probe the tar listing
@@ -204,8 +166,6 @@ try {
     "package/dist/index.js",
     "package/dist/settings-main.js",
     "package/dist/utils/tray.js",
-    "package/scripts/improvement-loop.mjs",
-    "package/scripts/lib/cross-platform-spawn.mjs",
   ];
   const packedFiles = new Set(
     (Array.isArray(packReport?.files) ? packReport.files : [])
@@ -216,6 +176,16 @@ try {
   if (missing.length > 0) {
     throw new Error(
       `tarball-smoke FAILED: required files missing from tarball: ${missing.join(", ")}`
+    );
+  }
+
+  const leakedMaintainerFiles = [
+    "package/scripts/improvement-loop.mjs",
+    "package/scripts/lib/cross-platform-spawn.mjs",
+  ].filter((p) => packedFiles.has(p));
+  if (leakedMaintainerFiles.length > 0) {
+    throw new Error(
+      `tarball-smoke FAILED: repository-only files present in tarball: ${leakedMaintainerFiles.join(", ")}`
     );
   }
 

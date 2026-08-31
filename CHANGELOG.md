@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.3] — 2026-08-31
+
+### Fixed
+
+- Connected Agents → Extend / modify now loads the active grant's preset, expiry, folder/IP restrictions, tool overrides, and note. Saving an unchanged grant no longer replaces no-expiry access with a one-hour default or drops restrictions the modal does not expose.
+- The executable agent permission matrix now covers every preset through the ownership-scoped Greenmail harness, including allowed state changes and confirmation-only destructive calls.
+
+### Changed
+
+- Removed test-only handler mirrors, unused helper/tool-module wrappers, the log-only settings-port probe, redundant systray declarations, and stale production build output. The maintainer improvement loop remains in source checkouts but is no longer shipped in the npm package. Agent and operator documentation now treats runtime MCP schemas as the canonical tool reference.
+- Fleet Gitea is the primary repository and has a container-isolated preship/security workflow. GitHub remains the deployment mirror. Greenmail E2E accepts an explicit service hostname so self-hosted CI does not need host execution privileges.
+- Added a source-pinned SimpleLogin and Proton Pass compatibility study. It records the current integration gaps and keeps implementation or reverse engineering behind a separate approval gate.
+
+### Security
+
+- Startup migration now permanently removes deprecated `remoteBearerToken` and `remoteOauthAdminPassword` values from both configuration and OS-keychain storage. Remote HTTP access remains OAuth-only; the compatibility schema fields stay accepted for this release and will be removed in the next major.
+- npm publishing remains OIDC-only with signed provenance; the obsolete GitHub `NPM_TOKEN` repository secret was removed.
+
 ## [4.0.2] — 2026-08-06
 
 ### Changed

@@ -417,8 +417,8 @@ describe('Keychain (positive-path with stub @napi-rs/keyring) — TEST-005', () 
     await clear();
   });
 
-  it('migrateFromConfig migrates all six fields and blanks each one on disk', async () => {
-    const { migrateFromConfig, loadCredentials, loadRemoteSecrets, loadAuxiliaryCredentials } =
+  it('migrateFromConfig migrates the four active credential fields', async () => {
+    const { migrateFromConfig, loadCredentials, loadAuxiliaryCredentials } =
       await import('./keychain.js');
     const cfg = {
       configVersion: 1,
@@ -430,8 +430,6 @@ describe('Keychain (positive-path with stub @napi-rs/keyring) — TEST-005', () 
         username: 'user@proton.me',
         password: 'bridge-pwd',
         smtpToken: 'smtp-tok',
-        remoteBearerToken: 'bearer-tok',
-        remoteOauthAdminPassword: 'oauth-pwd',
         passAccessToken: 'pat-tok',
         simpleloginApiKey: 'sl-tok',
         bridgeCertPath: '',
@@ -442,19 +440,16 @@ describe('Keychain (positive-path with stub @napi-rs/keyring) — TEST-005', () 
     const saveFn = vi.fn();
     const result = await migrateFromConfig(cfg, saveFn);
     expect(result).toBe(true);
-    // All six fields blanked on disk.
+    // All active fields blanked on disk.
     expect(cfg.connection.password).toBe('');
     expect(cfg.connection.smtpToken).toBe('');
-    expect(cfg.connection.remoteBearerToken).toBe('');
-    expect(cfg.connection.remoteOauthAdminPassword).toBe('');
     expect(cfg.connection.passAccessToken).toBe('');
     expect(cfg.connection.simpleloginApiKey).toBe('');
     // credentialStorage promoted to keychain and persisted.
     expect((cfg as any).credentialStorage).toBe('keychain');
     expect(saveFn).toHaveBeenCalledTimes(1);
-    // All six secrets readable from the keychain stub.
+    // All active secrets readable from the keychain stub.
     expect(await loadCredentials()).toEqual({ password: 'bridge-pwd', smtpToken: 'smtp-tok' });
-    expect(await loadRemoteSecrets()).toEqual({ remoteBearerToken: 'bearer-tok', remoteOauthAdminPassword: 'oauth-pwd' });
     expect(await loadAuxiliaryCredentials()).toEqual({ passAccessToken: 'pat-tok', simpleloginApiKey: 'sl-tok' });
     await clear();
   });

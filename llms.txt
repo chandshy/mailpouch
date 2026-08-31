@@ -27,7 +27,7 @@ Credentials are entered on the user's machine and stored in the OS keychain (or 
 ## Documentation
 
 - [README.md](README.md): Full human-facing documentation — installation, configuration, permission presets, security model, and the canonical tool inventory.
-- [README_FIRST_AI.md](README_FIRST_AI.md): AI agent guide — read this before calling any tools. Covers tool reference, parameter specs, limits, error handling, operating guidelines, and the escalation flow.
+- [README_FIRST_AI.md](README_FIRST_AI.md): AI agent guide — read this before calling tools. Covers runtime discovery, limits, error handling, operating guidelines, and escalation.
 - [SECURITY.md](SECURITY.md): Security model, responsible disclosure policy.
 - [CONTRIBUTING.md](CONTRIBUTING.md): Development setup and contribution guidelines.
 - [docs/smtp-imap-config-reference.md](docs/smtp-imap-config-reference.md): SMTP/IMAP configuration reference.

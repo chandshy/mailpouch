@@ -35,28 +35,28 @@ output in an audit artifact, backlog item, completion summary, or history.
 
 ```bash
 # Create the durable layout (or migrate a v1 loop once).
-npm run improve -- init
-npm run improve -- status
+node scripts/improvement-loop.mjs init
+node scripts/improvement-loop.mjs status
 
 # Place an independently reviewed JSON artifact under .improvement-loop/audits/.
 # Importing argv checks requires an explicit acknowledgement of the trust boundary.
-npm run improve -- import .improvement-loop/audits/2026-07-11-audit.json --approve-commands
-npm run improve -- re-audit \
+node scripts/improvement-loop.mjs import .improvement-loop/audits/2026-07-11-audit.json --approve-commands
+node scripts/improvement-loop.mjs re-audit \
   --audit .improvement-loop/audits/2026-07-11-audit.json \
   --summary "Independent security, lifecycle, and test audits completed."
 
 # Exactly one queued item may be active.
-npm run improve -- begin ISSUE-001
+node scripts/improvement-loop.mjs begin ISSUE-001
 
 # Write the focused regression, implement, then run every declared check.
-npm run improve -- validate ISSUE-001
-npm run improve -- complete ISSUE-001 --summary "Regression and required gates passed."
+node scripts/improvement-loop.mjs validate ISSUE-001
+node scripts/improvement-loop.mjs complete ISSUE-001 --summary "Regression and required gates passed."
 
 # Completion requires a new hashed audit before another item starts.
-npm run improve -- re-audit \
+node scripts/improvement-loop.mjs re-audit \
   --audit .improvement-loop/audits/2026-07-12-follow-up.json \
   --summary "Follow-up audit completed; newly confirmed findings imported."
-npm run improve -- status
+node scripts/improvement-loop.mjs status
 ```
 
 `status` is a brief report of the active item, next queued item, counts, current
@@ -64,7 +64,7 @@ validation, latest audit, and latest validation result. The JSON form is useful
 for a scheduled status reporter:
 
 ```bash
-npm run improve:status -- --json
+node scripts/improvement-loop.mjs status --json
 ```
 
 ## Audit and command trust boundary

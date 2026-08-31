@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildShellHtml } from "./shell.js";
+import { buildGrantApprovalBody, buildShellHtml, grantModalState } from "./shell.js";
 import { buildSetupHtml } from "./tabs/setup.js";
 
 describe("account activation UI", () => {
@@ -52,5 +52,32 @@ describe("reset cleanup UI", () => {
     const html = buildShellHtml("csrf-test-token", 8765);
 
     expect(html.match(/configResetGeneration: cfg\?\.configResetGeneration \?\? 0/g)?.length).toBeGreaterThanOrEqual(7);
+  });
+});
+
+describe("agent grant edit UI", () => {
+  it("round-trips an unchanged active grant without widening or truncating it", () => {
+    const grant = {
+      preset: "custom" as const,
+      conditions: {
+        expiresAt: "2026-12-15T17:42:37.123Z",
+        folderAllowlist: ["INBOX", "Folders/Finance"],
+        ipPins: ["127.0.0.1", "192.168.1.50"],
+        maxCallsPerHourByTool: { get_emails: 17 },
+        accountId: "primary",
+        accountIdentity: "mailbox-fingerprint",
+      },
+      toolOverrides: {
+        delete_email: false,
+        bulk_delete_emails: true,
+        send_email: false,
+        reply_to_email: false,
+        forward_email: false,
+        get_emails: true,
+      },
+      note: "  preserve this note exactly  ",
+    };
+
+    expect(buildGrantApprovalBody(grant, grantModalState(grant))).toEqual(grant);
   });
 });

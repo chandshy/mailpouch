@@ -3,10 +3,106 @@ import nodePath from "path";
 import { fileURLToPath } from "url";
 import { readFileSync } from "fs";
 import { ALL_TOOLS, TOOL_CATEGORIES } from "../config/schema.js";
+import type { PermissionPreset, ToolName } from "../config/schema.js";
+import type { GrantConditions } from "../agents/types.js";
 import { buildStyles } from "./styles.js";
 
 const _moduleDir = nodePath.dirname(fileURLToPath(import.meta.url));
 const _pkgJsonPath = nodePath.resolve(_moduleDir, "../../package.json");
+
+interface GrantForModal {
+  preset: PermissionPreset;
+  conditions?: GrantConditions;
+  toolOverrides?: Partial<Record<ToolName, boolean>>;
+  note?: string;
+}
+
+interface OverrideGroupState {
+  checked: boolean;
+  indeterminate: boolean;
+}
+
+export interface GrantModalState {
+  preset: PermissionPreset;
+  duration: "1h" | "24h" | "7d" | "never" | "custom";
+  customExpiry: string;
+  folders: string;
+  ipPins: string;
+  note: string;
+  denyDelete: OverrideGroupState;
+  denySend: OverrideGroupState;
+}
+
+export function grantModalState(currentGrant: GrantForModal | null): GrantModalState {
+  const conditions = currentGrant?.conditions;
+  const overrides = currentGrant?.toolOverrides;
+  const group = (tools: ToolName[]): OverrideGroupState => {
+    const denied = tools.filter(tool => overrides?.[tool] === false).length;
+    return { checked: denied === tools.length, indeterminate: denied > 0 && denied < tools.length };
+  };
+  const expiry = conditions?.expiresAt;
+  const expiryDate = expiry ? new Date(expiry) : null;
+  return {
+    preset: currentGrant?.preset ?? "supervised",
+    duration: currentGrant ? (expiry ? "custom" : "never") : "1h",
+    customExpiry: expiryDate
+      ? new Date(expiryDate.getTime() - expiryDate.getTimezoneOffset() * 60_000).toISOString().slice(0, 16)
+      : "",
+    folders: (conditions?.folderAllowlist ?? []).join(", "),
+    ipPins: (conditions?.ipPins ?? []).join(", "),
+    note: currentGrant?.note ?? "",
+    denyDelete: group(["delete_email", "bulk_delete_emails"]),
+    denySend: group(["send_email", "reply_to_email", "forward_email"]),
+  };
+}
+
+export function buildGrantApprovalBody(
+  currentGrant: GrantForModal | null,
+  form: GrantModalState,
+  now = Date.now(),
+): { preset: PermissionPreset; conditions?: GrantConditions; toolOverrides?: Partial<Record<ToolName, boolean>>; note?: string } {
+  let expiresAt: string | undefined;
+  if (form.duration === "1h") expiresAt = new Date(now + 60 * 60_000).toISOString();
+  else if (form.duration === "24h") expiresAt = new Date(now + 24 * 60 * 60_000).toISOString();
+  else if (form.duration === "7d") expiresAt = new Date(now + 7 * 24 * 60 * 60_000).toISOString();
+  else if (form.duration === "custom" && form.customExpiry) {
+    const originalExpiry = currentGrant?.conditions?.expiresAt;
+    expiresAt = originalExpiry && form.customExpiry === grantModalState(currentGrant).customExpiry
+      ? originalExpiry
+      : new Date(form.customExpiry).toISOString();
+  }
+
+  const folderAllowlist = form.folders.split(",").map(value => value.trim()).filter(Boolean);
+  const ipPins = form.ipPins.split(",").map(value => value.trim()).filter(Boolean);
+  const conditions: GrantConditions = { ...(currentGrant?.conditions ?? {}) };
+  delete conditions.expiresAt;
+  delete conditions.folderAllowlist;
+  delete conditions.ipPins;
+  if (expiresAt) conditions.expiresAt = expiresAt;
+  if (folderAllowlist.length) conditions.folderAllowlist = folderAllowlist;
+  if (ipPins.length) conditions.ipPins = ipPins;
+
+  const toolOverrides = { ...(currentGrant?.toolOverrides ?? {}) };
+  const original = grantModalState(currentGrant);
+  const applyGroup = (next: OverrideGroupState, previous: OverrideGroupState, tools: ToolName[]): void => {
+    if (next.checked === previous.checked && next.indeterminate === previous.indeterminate) return;
+    if (next.indeterminate) return;
+    for (const tool of tools) {
+      if (next.checked) toolOverrides[tool] = false;
+      else delete toolOverrides[tool];
+    }
+  };
+  applyGroup(form.denyDelete, original.denyDelete, ["delete_email", "bulk_delete_emails"]);
+  applyGroup(form.denySend, original.denySend, ["send_email", "reply_to_email", "forward_email"]);
+
+  const note = form.note === (currentGrant?.note ?? "") ? currentGrant?.note : (form.note.trim() || undefined);
+  return {
+    preset: form.preset,
+    conditions: Object.keys(conditions).length ? conditions : undefined,
+    toolOverrides: Object.keys(toolOverrides).length ? toolOverrides : undefined,
+    note,
+  };
+}
 
 export function buildShellHtml(csrfToken: string, runningPort = 8766, cspNonce = ""): string {
   const toolsJson = JSON.stringify(ALL_TOOLS);
@@ -103,6 +199,9 @@ ${buildStyles(cspNonce)}
 
 <script nonce="${cspNonce}">
 (function() {
+  ${grantModalState.toString()}
+  ${buildGrantApprovalBody.toString()}
+
   // ── Constants ─────────────────────────────────────────────────────────────
   const ALL_TOOLS  = ${toolsJson};
   const CATEGORIES = ${categoriesJson};
@@ -249,7 +348,7 @@ ${buildStyles(cspNonce)}
       case 'approveGrant':              return approveGrant(el.dataset.id, el.dataset.preset);
       case 'denyGrant':                 return denyGrant(el.dataset.id);
       case 'revokeGrant':               return revokeGrant(el.dataset.id);
-      case 'openGrantModal':            return openGrantModal(el.dataset.id, el.dataset.name, el.dataset.conds ? JSON.parse(el.dataset.conds) : null);
+      case 'openGrantModal':            return openGrantModal(el.dataset.id, el.dataset.name, el.dataset.grant ? JSON.parse(el.dataset.grant) : null);
       case 'closeGrantModal':           return closeGrantModal();
       case 'submitGrantModal':          return submitGrantModal();
       case 'openServiceAccountModal':   return openServiceAccountModal();
@@ -662,7 +761,12 @@ ${buildStyles(cspNonce)}
         : '';
       const cidEsc  = esc(g.clientId);
       const nameEsc = esc(g.clientName);
-      const condsJson = esc(JSON.stringify(g.conditions || null));
+      const grantJson = esc(JSON.stringify({
+        preset: g.preset,
+        conditions: g.conditions || null,
+        toolOverrides: g.toolOverrides || null,
+        note: g.note || '',
+      }));
       // Service accounts (client_credentials) are credential-backed and
       // pre-approved; their revoke must also delete the credential, so it routes
       // to the service-account endpoint rather than the grant-only revoke.
@@ -673,10 +777,10 @@ ${buildStyles(cspNonce)}
         : g.status === 'pending'
         ? '<button class="btn btn-primary" data-action="approveGrant" data-id="' + cidEsc + '" data-preset="read_only">Approve read-only</button>' +
           '<button class="btn btn-primary" data-action="approveGrant" data-id="' + cidEsc + '" data-preset="supervised">Approve supervised</button>' +
-          '<button class="btn btn-ghost"   data-action="openGrantModal" data-id="' + cidEsc + '" data-name="' + nameEsc + '" data-conds="null">Customize…</button>' +
+          '<button class="btn btn-ghost"   data-action="openGrantModal" data-id="' + cidEsc + '" data-name="' + nameEsc + '" data-grant="null">Customize…</button>' +
           '<button class="btn btn-ghost"   data-action="denyGrant" data-id="' + cidEsc + '">Deny</button>'
         : g.status === 'active'
-        ? '<button class="btn btn-ghost"   data-action="openGrantModal" data-id="' + cidEsc + '" data-name="' + nameEsc + '" data-conds="' + condsJson + '">Extend / modify…</button>' +
+        ? '<button class="btn btn-ghost"   data-action="openGrantModal" data-id="' + cidEsc + '" data-name="' + nameEsc + '" data-grant="' + grantJson + '">Extend / modify…</button>' +
           '<button class="btn btn-ghost"   data-action="revokeGrant" data-id="' + cidEsc + '">Revoke</button>'
         : '';
       const saTag = g.isServiceAccount ? ' <span style="color:#888;font-size:11px">· 🔑 service account</span>' : '';
@@ -2402,64 +2506,60 @@ ${buildStyles(cspNonce)}
 
   // ── Grant modal (merged from second IIFE) ─────────────────────────────────
   let currentClientId = null;
+  let currentGrant = null;
 
-  function openGrantModal(clientId, clientName, currentConditions) {
+  function openGrantModal(clientId, clientName, grant) {
     currentClientId = clientId;
+    currentGrant = grant;
+    const state = grantModalState(grant);
+    document.getElementById('gm-title').textContent = grant ? 'Modify agent access' : 'Approve with conditions';
+    document.getElementById('gm-submit').textContent = grant ? 'Save changes' : 'Save and approve';
     document.getElementById('gm-subtitle').textContent = clientName + ' (' + clientId + ')';
-    document.getElementById('gm-preset').value = 'supervised';
-    document.getElementById('gm-folders').value = '';
-    document.getElementById('gm-ip').value = '';
-    document.getElementById('gm-note').value = '';
-    document.getElementById('gm-deny-delete').checked = false;
-    document.getElementById('gm-deny-send').checked = false;
-    (document.querySelector('input[name="gm-dur"][value="1h"]') || {}).checked = true;
-    if (currentConditions && currentConditions.folderAllowlist) {
-      document.getElementById('gm-folders').value = (currentConditions.folderAllowlist || []).join(', ');
-    }
-    if (currentConditions && currentConditions.ipPins) {
-      document.getElementById('gm-ip').value = (currentConditions.ipPins || []).join(', ');
-    }
+    document.getElementById('gm-preset').value = state.preset;
+    document.getElementById('gm-folders').value = state.folders;
+    document.getElementById('gm-ip').value = state.ipPins;
+    document.getElementById('gm-note').value = state.note;
+
+    const setOverrideGroup = (id, group) => {
+      const box = document.getElementById(id);
+      box.checked = group.checked;
+      box.indeterminate = group.indeterminate;
+    };
+    setOverrideGroup('gm-deny-delete', state.denyDelete);
+    setOverrideGroup('gm-deny-send', state.denySend);
+
+    document.querySelectorAll('input[name="gm-dur"]').forEach(el => { el.checked = false; });
+    (document.querySelector('input[name="gm-dur"][value="' + state.duration + '"]') || {}).checked = true;
+    const customExpiry = document.getElementById('gm-custom-expiry');
+    customExpiry.style.display = state.customExpiry ? '' : 'none';
+    customExpiry.value = state.customExpiry;
     document.getElementById('grant-modal-backdrop').style.display = 'block';
   }
 
   function closeGrantModal() {
     document.getElementById('grant-modal-backdrop').style.display = 'none';
     currentClientId = null;
+    currentGrant = null;
   }
 
   async function submitGrantModal() {
     if (!currentClientId) return;
     const preset = document.getElementById('gm-preset').value;
     const dur = (document.querySelector('input[name="gm-dur"]:checked') || {}).value || 'never';
-    let expiresAt;
-    if (dur === '1h')   expiresAt = new Date(Date.now() + 60*60*1000).toISOString();
-    else if (dur === '24h') expiresAt = new Date(Date.now() + 24*60*60*1000).toISOString();
-    else if (dur === '7d')  expiresAt = new Date(Date.now() + 7*24*60*60*1000).toISOString();
-    else if (dur === 'custom') {
-      const v = document.getElementById('gm-custom-expiry').value;
-      if (v) expiresAt = new Date(v).toISOString();
-    }
-    const foldersRaw = document.getElementById('gm-folders').value.trim();
-    const folderAllowlist = foldersRaw ? foldersRaw.split(',').map(s => s.trim()).filter(Boolean) : undefined;
-    const ipRaw = document.getElementById('gm-ip').value.trim();
-    const ipPins = ipRaw ? ipRaw.split(',').map(s => s.trim()).filter(Boolean) : undefined;
-    const toolOverrides = {};
-    if (document.getElementById('gm-deny-delete').checked) {
-      toolOverrides.delete_email = false;
-      toolOverrides.bulk_delete_emails = false;
-    }
-    if (document.getElementById('gm-deny-send').checked) {
-      toolOverrides.send_email = false;
-      toolOverrides.reply_to_email = false;
-      toolOverrides.forward_email = false;
-    }
-    const note = document.getElementById('gm-note').value.trim() || undefined;
-    const body = {
-      preset,
-      conditions: (expiresAt || folderAllowlist || ipPins) ? { expiresAt, folderAllowlist, ipPins } : undefined,
-      toolOverrides: Object.keys(toolOverrides).length > 0 ? toolOverrides : undefined,
-      note,
+    const readOverrideGroup = id => {
+      const box = document.getElementById(id);
+      return { checked: box.checked, indeterminate: box.indeterminate };
     };
+    const body = buildGrantApprovalBody(currentGrant, {
+      preset,
+      duration: dur,
+      customExpiry: document.getElementById('gm-custom-expiry').value,
+      folders: document.getElementById('gm-folders').value,
+      ipPins: document.getElementById('gm-ip').value,
+      note: document.getElementById('gm-note').value,
+      denyDelete: readOverrideGroup('gm-deny-delete'),
+      denySend: readOverrideGroup('gm-deny-send'),
+    });
     const r = await fetch('/api/agents/' + encodeURIComponent(currentClientId) + '/approve', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF },
@@ -2536,7 +2636,7 @@ ${buildStyles(cspNonce)}
 <!-- ══ APPROVE-WITH-CONDITIONS MODAL (Agents tab) ═════════════════════════ -->
 <div id="grant-modal-backdrop" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:100">
   <div id="grant-modal" style="max-width:520px;margin:8vh auto;background:var(--surface);border-radius:var(--radius);padding:22px;color:var(--text);font-family:system-ui,sans-serif">
-    <div style="font-size:16px;font-weight:700;margin-bottom:6px">Approve with conditions</div>
+    <div id="gm-title" style="font-size:16px;font-weight:700;margin-bottom:6px">Approve with conditions</div>
     <div style="font-size:12px;color:var(--muted);margin-bottom:16px" id="gm-subtitle"></div>
     <div class="field" style="margin-bottom:12px">
       <label style="font-size:12px;color:var(--text2)">Preset</label>
@@ -2579,7 +2679,7 @@ ${buildStyles(cspNonce)}
     </div>
     <div style="display:flex;justify-content:flex-end;gap:8px">
       <button class="btn btn-ghost" data-action="closeGrantModal">Cancel</button>
-      <button class="btn btn-primary" data-action="submitGrantModal">Save and approve</button>
+      <button class="btn btn-primary" id="gm-submit" data-action="submitGrantModal">Save and approve</button>
     </div>
   </div>
 </div>

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import mod from "./deletion.js";
+import * as mod from "./deletion.js";
 import { DESTRUCTIVE_TOOLS } from "../config/schema.js";
 import type { ToolCallContext, ToolResult } from "./types.js";
 

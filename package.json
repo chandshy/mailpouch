@@ -1,6 +1,6 @@
 {
   "name": "mailpouch",
-  "version": "4.0.2",
+  "version": "4.0.3",
   "description": "mailpouch — lean, permission-gated MCP access to Proton Mail via Proton Bridge, with up to 86 tools, resources, and prompts.",
   "type": "module",
   "main": "dist/index.js",
@@ -9,7 +9,7 @@
     "mailpouch-settings": "dist/settings-main.js"
   },
   "scripts": {
-    "build": "tsc && node scripts/fix-bin-modes.mjs",
+    "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc && node scripts/fix-bin-modes.mjs",
     "settings": "node dist/settings-main.js",
     "build:clean": "npm run clean && npm run build",
     "dev": "tsc --watch",
@@ -29,8 +29,6 @@
     "check:licenses": "node scripts/check-licenses.mjs",
     "check:tarball": "node scripts/smoke-tarball.mjs",
     "check:bulk:live": "node scripts/check-bulk-live.mjs",
-    "improve": "node scripts/improvement-loop.mjs",
-    "improve:status": "node scripts/improvement-loop.mjs status",
     "preship:fast": "node scripts/preship.mjs fast",
     "preship": "node scripts/preship.mjs",
     "preship:release": "node scripts/preship.mjs release",
@@ -129,9 +127,7 @@
     "native/tray/index.js",
     "native/tray/index.d.ts",
     "native/tray/*.node",
-    "scripts/install-hooks.mjs",
-    "scripts/improvement-loop.mjs",
-    "scripts/lib/cross-platform-spawn.mjs"
+    "scripts/install-hooks.mjs"
   ],
   "overrides": {
     "hono": ">=4.12.34",

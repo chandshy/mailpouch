@@ -2,7 +2,6 @@
  * Helper utilities for mailpouch
  */
 
-import { randomUUID } from "crypto";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { logger } from "./logger.js";
 import type { EmailAttachment } from "../types/index.js";
@@ -196,44 +195,6 @@ export function extractEmailAddress(emailString: string): string {
 export function extractName(emailString: string): string | undefined {
   const match = emailString.match(/^([^<]+)</);
   return match ? match[1].trim() : undefined;
-}
-
-/**
- * Sleep/delay function
- */
-export function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/**
- * Retry function with exponential backoff
- */
-export async function retry<T>(
-  fn: () => Promise<T>,
-  maxRetries: number = 3,
-  delayMs: number = 1000
-): Promise<T> {
-  let lastError: unknown;
-
-  for (let i = 0; i < maxRetries; i++) {
-    try {
-      return await fn();
-    } catch (error: unknown) {
-      lastError = error;
-      if (i < maxRetries - 1) {
-        await sleep(delayMs * Math.pow(2, i));
-      }
-    }
-  }
-
-  throw lastError;
-}
-
-/**
- * Generate unique ID using cryptographically secure randomness
- */
-export function generateId(): string {
-  return randomUUID();
 }
 
 /**

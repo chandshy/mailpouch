@@ -16,7 +16,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const COMPOSE_FILE = join(__dirname, "..", "fixtures", "greenmail-compose.yml");
 const CONTAINER = "mailpouch-e2e-greenmail";
 
-const GREENMAIL_HOST = "127.0.0.1";
+export const GREENMAIL_HOST = process.env.MAILPOUCH_E2E_GREENMAIL_HOST || "127.0.0.1";
 export const GREENMAIL_IMAP_PORT = 3143;
 export const GREENMAIL_SMTP_PORT = 3025;
 
