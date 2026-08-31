@@ -209,6 +209,62 @@ describe("live Bridge baseline verification", () => {
     expect(verification.ok).toBe(false);
     expect(verification.errors.join(" ")).toMatch(/All Mail.*original@example\.test.*missing/i);
   });
+
+  it("accepts All Mail churn only when an unchanged concrete projection proves survival", async () => {
+    const fixture = new ImapFixtures({
+      host: "127.0.0.1",
+      port: 1143,
+      user: "unused",
+      pass: "unused",
+    });
+    const states: Record<string, MockMailboxState> = {
+      "All Mail": structuredClone(ORIGINAL),
+      Archive: structuredClone(ORIGINAL),
+    };
+    vi.spyOn(fixture, "listMailboxes").mockResolvedValue(["All Mail", "Archive"]);
+    vi.spyOn(fixture, "listCleanupMailboxes").mockResolvedValue(["All Mail", "Archive"]);
+    vi.spyOn(
+      fixture as unknown as SnapshotFixtureInternals,
+      "snapshotMailboxState",
+    ).mockImplementation(async (path) => structuredClone(states[path]!));
+    const snapshot = await fixture.captureSafetySnapshot();
+    states["All Mail"] = {
+      uidValidity: "different-virtual-generation",
+      messages: [ORIGINAL.messages[1]!],
+    };
+
+    const verification = await fixture.verifySafetySnapshot(snapshot);
+    expect(verification.ok).toBe(true);
+    expect(verification.errors).toHaveLength(0);
+    expect(verification.drift?.join(" ")).toMatch(/All Mail.*original@example\.test.*missing/i);
+  });
+
+  it("correlates All Mail churn with the same out-of-scope concrete drift", async () => {
+    const fixture = new ImapFixtures({
+      host: "127.0.0.1",
+      port: 1143,
+      user: "unused",
+      pass: "unused",
+    });
+    const states: Record<string, MockMailboxState> = {
+      "All Mail": structuredClone(ORIGINAL),
+      Spam: structuredClone(ORIGINAL),
+    };
+    vi.spyOn(fixture, "listMailboxes").mockResolvedValue(["All Mail", "Spam"]);
+    vi.spyOn(fixture, "listCleanupMailboxes").mockResolvedValue(["All Mail", "Spam"]);
+    vi.spyOn(
+      fixture as unknown as SnapshotFixtureInternals,
+      "snapshotMailboxState",
+    ).mockImplementation(async (path) => structuredClone(states[path]!));
+    const snapshot = await fixture.captureSafetySnapshot();
+    states["All Mail"] = { ...states["All Mail"]!, messages: [ORIGINAL.messages[1]!] };
+    states.Spam = { ...states.Spam!, messages: [ORIGINAL.messages[1]!] };
+
+    const verification = await fixture.verifySafetySnapshot(snapshot);
+    expect(verification.ok).toBe(true);
+    expect(verification.errors).toHaveLength(0);
+    expect(verification.drift?.join(" ")).toMatch(/All Mail.*Spam.*missing/i);
+  });
   it("keeps discrepancies fatal in mailboxes the run could have mutated", async () => {
     // INBOX is always in scope: sends land there.
     const h = baselineFixture(ORIGINAL, "INBOX");

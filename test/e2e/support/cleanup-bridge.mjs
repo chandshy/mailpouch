@@ -324,6 +324,9 @@ const peerBaselineExemptions = [];
  * fatal, always reported: silence would make a narrowed scope indistinguishable
  * from a clean mailbox. */
 const outOfScopeBaselineDrift = [];
+/** All Mail discrepancies independently accounted for by concrete mailbox
+ * evidence for the same stable Message-ID and flags. */
+const provenVirtualProjectionDrift = [];
 const usedPeerBaselineProofs = new Set();
 let retainedEmptyFolders = [];
 
@@ -797,6 +800,7 @@ try {
     },
   );
   reportPeerBaselineExemptions();
+  reportProvenVirtualProjectionDrift();
   reportOutOfScopeBaselineDrift();
   for (const baselineError of baselineErrors) errors.push(baselineError);
 
@@ -1959,6 +1963,14 @@ function reportOutOfScopeBaselineDrift() {
   );
 }
 
+function reportProvenVirtualProjectionDrift() {
+  if (provenVirtualProjectionDrift.length === 0) return;
+  process.stdout.write(
+    `Ignored ${provenVirtualProjectionDrift.length} All Mail projection discrepancy(ies) `
+      + "because concrete mailbox evidence independently accounted for the same stable Message-ID and flags.\n",
+  );
+}
+
 function reportPeerBaselineExemptions() {
   if (peerBaselineExemptions.length === 0) return;
   const finalizedOwners = [...new Set(peerBaselineExemptions
@@ -2045,6 +2057,9 @@ async function hasAppendMessageIdAtDifferentUid(mailboxPath, expected) {
 
 async function verifyBaseline(baseline) {
   const rawErrors = [];
+  const virtualMismatches = [];
+  const concreteMismatches = [];
+  const concreteKeys = new Set();
   const baselineErrors = [];
   checkDeadline();
   const current = await client.list();
@@ -2175,8 +2190,9 @@ async function verifyBaseline(baseline) {
                 "virtual message missing or flags changed",
                 { allowAppendOrigin: trulyMissing, livePeerHeader },
               )) {
-                rawErrors.push({
+                virtualMismatches.push({
                   path: mailbox.path,
+                  key,
                   message: `${mailbox.path}: baseline virtual ${expected.messageIdHash ? "Message-ID hash" : `UID ${expected.uid}`} is missing or its flags changed`,
                 });
               }
@@ -2194,12 +2210,19 @@ async function verifyBaseline(baseline) {
               "message missing",
               { allowAppendOrigin: !displaced },
             )) {
+              const key = `${expected.messageIdHash ? `mid:${expected.messageIdHash}` : `uid:${expected.uid}`}|flags:${expected.flags.join(",")}`;
               rawErrors.push({ path: mailbox.path, message: `${mailbox.path}: baseline UID ${expected.uid} is missing` });
+              concreteMismatches.push({ path: mailbox.path, key });
             }
             continue;
           }
           const messageIdChanged = actual.messageIdHash !== expected.messageIdHash;
           const flagsChanged = JSON.stringify(actual.flags) !== JSON.stringify(expected.flags);
+          if (!messageIdChanged && !flagsChanged) {
+            concreteKeys.add(
+              `${expected.messageIdHash ? `mid:${expected.messageIdHash}` : `uid:${expected.uid}`}|flags:${expected.flags.join(",")}`,
+            );
+          }
           if (messageIdChanged || flagsChanged) {
             const detail = [
               ...(messageIdChanged ? ["Message-ID changed"] : []),
@@ -2215,6 +2238,8 @@ async function verifyBaseline(baseline) {
                   : undefined,
               },
             )) {
+              const key = `${expected.messageIdHash ? `mid:${expected.messageIdHash}` : `uid:${expected.uid}`}|flags:${expected.flags.join(",")}`;
+              concreteMismatches.push({ path: mailbox.path, key });
               if (messageIdChanged) {
                 rawErrors.push({ path: mailbox.path, message: `${mailbox.path}: baseline UID ${expected.uid} Message-ID changed` });
               }
@@ -2231,6 +2256,17 @@ async function verifyBaseline(baseline) {
     }
   }
   checkDeadline();
+  const externalConcreteMismatchKeys = new Set(
+    concreteMismatches
+      .filter(({ path }) => isOutsideMutationScope(path, scope))
+      .map(({ key }) => key),
+  );
+  for (const mismatch of virtualMismatches) {
+    if (concreteKeys.has(mismatch.key) || externalConcreteMismatchKeys.has(mismatch.key)) {
+      provenVirtualProjectionDrift.push(mismatch);
+    }
+    else rawErrors.push(mismatch);
+  }
   classify();
   return baselineErrors;
 }

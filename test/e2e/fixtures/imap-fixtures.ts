@@ -571,6 +571,9 @@ export class ImapFixtures {
     // checks below push from many branches; deciding per push site is how one
     // branch quietly lands on the wrong side of the boundary.
     const found: Array<{ path: string; message: string }> = [];
+    const virtualMismatches: Array<{ path: string; message: string; key: string }> = [];
+    const concreteMismatches: Array<{ path: string; key: string }> = [];
+    const concreteKeys = new Set<string>();
     const currentPaths = new Set(await this.listMailboxes());
     for (const path of snapshot.mailboxPaths) {
       if (!currentPaths.has(path)) {
@@ -614,7 +617,11 @@ export class ImapFixtures {
           const count = available.get(key) ?? 0;
           if (count === 0) {
             const identity = message.messageId ? `Message-ID ${message.messageId}` : `UID ${message.uid}`;
-            found.push({ path, message: `${path}: baseline virtual ${identity} is missing or its flags changed` });
+            virtualMismatches.push({
+              path,
+              key,
+              message: `${path}: baseline virtual ${identity} is missing or its flags changed`,
+            });
           } else {
             available.set(key, count - 1);
           }
@@ -627,22 +634,41 @@ export class ImapFixtures {
         const observed = currentByUid.get(message.uid);
         if (!observed) {
           found.push({ path, message: `${path}: baseline UID ${message.uid} is missing` });
+          concreteMismatches.push({ path, key: stableVirtualMessageKey(message) });
           continue;
         }
-        if (observed.messageId !== message.messageId) {
+        const messageIdChanged = observed.messageId !== message.messageId;
+        if (messageIdChanged) {
           found.push({ path, message: `${path}: baseline UID ${message.uid} Message-ID changed from ` +
             `${message.messageId ?? "(missing)"} to ${observed.messageId ?? "(missing)"}`, });
         }
-        if (observed.flags.length !== message.flags.length
-          || observed.flags.some((flag, index) => flag !== message.flags[index])) {
+        const flagsChanged = observed.flags.length !== message.flags.length
+          || observed.flags.some((flag, index) => flag !== message.flags[index]);
+        if (flagsChanged) {
           found.push({ path, message: `${path}: baseline UID ${message.uid} flags changed` });
         }
+        if (messageIdChanged || flagsChanged) {
+          concreteMismatches.push({ path, key: stableVirtualMessageKey(message) });
+        }
+        if (!messageIdChanged && !flagsChanged) concreteKeys.add(stableVirtualMessageKey(message));
       }
     }
     this.throwIfCleanupAborted();
     const scope = this.mutationScopePaths();
+    const externalConcreteMismatchKeys = new Set(
+      concreteMismatches
+        .filter(({ path }) => this.isOutsideMutationScope(path, scope))
+        .map(({ key }) => key),
+    );
+    const provenVirtualDrift: string[] = [];
+    for (const mismatch of virtualMismatches) {
+      if (concreteKeys.has(mismatch.key) || externalConcreteMismatchKeys.has(mismatch.key)) {
+        provenVirtualDrift.push(mismatch.message);
+      }
+      else found.push(mismatch);
+    }
     const errors: string[] = [];
-    const drift: string[] = [];
+    const drift = provenVirtualDrift;
     for (const entry of found) {
       if (this.isOutsideMutationScope(entry.path, scope)) drift.push(entry.message);
       else errors.push(entry.message);
