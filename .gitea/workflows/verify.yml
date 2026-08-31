@@ -27,6 +27,7 @@ jobs:
     services:
       greenmail:
         image: greenmail/standalone:2.1.4
+        options: --network-alias greenmail
         env:
           GREENMAIL_OPTS: >-
             -Dgreenmail.setup.test.smtp
