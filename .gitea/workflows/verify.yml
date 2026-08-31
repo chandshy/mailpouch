@@ -11,8 +11,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: fleet-verify-${{ gitea.ref }}
-  cancel-in-progress: true
+  group: fleet-verify-greenmail
+  cancel-in-progress: false
 
 jobs:
   preship:
@@ -34,4 +34,8 @@ jobs:
       - run: rm node_modules/better-sqlite3/prebuilds/linux-x64.node
       - run: npm rebuild better-sqlite3
       - run: npm run preship:fast
+      - name: Reset shared GreenMail
+        run: |
+          node -e "fetch('http://mailpouch-greenmail:8080/api/service/reset',{method:'POST'}).then(async r=>{if(!r.ok)throw new Error('GreenMail reset failed: '+r.status);console.log(await r.text())})"
+          node scripts/wait-for-port.mjs mailpouch-greenmail 3143 30
       - run: npm run test:e2e:local:keep
