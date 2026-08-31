@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { PermissionPreset } from "../../../src/config/schema.js";
-import { startE2E, type E2EHarness } from "../mcp-client.js";
+import { bridgeConfigAvailable, startE2E, type E2EHarness } from "../mcp-client.js";
 import { PROMO_CREDIT_KARMA } from "../fixtures/seed-data.js";
+import { BRIDGE_HOOK_TIMEOUT_MS } from "../support/time-budgets.mjs";
 
 type Probe = readonly [name: string, args: Record<string, unknown>];
 
@@ -67,15 +68,33 @@ describe("permission preset matrix — ownership-scoped", () => {
     it(`${preset} advertises and enforces only its permitted surface`, async () => {
       const h = await startE2E({ safe: true, preset });
       try {
+        const liveBridge = bridgeConfigAvailable();
         const sendAllowed = preset !== "read_only";
         const stateAllowed = preset === "supervised" || preset === "full";
         const destructiveAllowed = preset === "supervised" || preset === "full";
 
         expect(h.isPermissionBlocked(await h.callRaw("get_connection_status"))).toBe(false);
-        if (!sendAllowed) await expectBlocked(h, SEND, preset);
+        if (!sendAllowed) {
+          await expectBlocked(h, liveBridge ? [["list_scheduled_emails", {}]] : SEND, preset);
+        }
         else expect(h.isPermissionBlocked(await h.callRaw("list_scheduled_emails"))).toBe(false);
-        if (!stateAllowed) await expectBlocked(h, STATE, preset);
-        if (!destructiveAllowed) await expectBlocked(h, FULL, preset);
+        if (liveBridge && (!stateAllowed || !destructiveAllowed)) {
+          const { uid } = await h.appendVisibleSeed("INBOX", {
+            ...PROMO_CREDIT_KARMA,
+            subject: `${h.runToken} blocked permission-${preset}`,
+          });
+          if (!stateAllowed) await expectBlocked(h, [["mark_email_read", {
+            emailId: String(uid),
+            sourceFolder: "INBOX",
+          }]], preset);
+          if (!destructiveAllowed) await expectBlocked(h, [["delete_email", {
+            emailId: String(uid),
+            sourceFolder: "INBOX",
+          }]], preset);
+        } else {
+          if (!stateAllowed) await expectBlocked(h, STATE, preset);
+          if (!destructiveAllowed) await expectBlocked(h, FULL, preset);
+        }
 
         if (stateAllowed) {
           const owned = { ...PROMO_CREDIT_KARMA, subject: `${h.runToken} permission-${preset}` };
@@ -99,6 +118,6 @@ describe("permission preset matrix — ownership-scoped", () => {
       } finally {
         await h.close();
       }
-    });
+    }, BRIDGE_HOOK_TIMEOUT_MS);
   }
 });
