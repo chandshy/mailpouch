@@ -40,6 +40,10 @@ local Proton Bridge E2E, then posts `success`/`failure` for `HEAD`. It scrubs
 > the live mailbox and left 13 `mpE2E-*` scratch mailboxes behind; they were still there on
 > 2026-07-30 and had to be cleaned up by hand. That incident is historical and does not describe
 > the current suite's teardown behavior.
+>
+> A read-only audit on 2026-08-31 found 49 later `mpE2E-*` artifacts (40 cleanup-rescue folders
+> and 9 labels), all empty. They are intentionally reconciled as manual cleanup rather than
+> deleted by the harness; live cleanup never issues mailbox DELETE.
 
 Note this is a **local, manual** step — there is no `bridge-e2e` workflow. A commit therefore
 has *no* Bridge status until someone runs the script against that exact SHA. "Missing status"

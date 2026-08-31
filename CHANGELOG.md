@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed test-only handler mirrors, unused helper/tool-module wrappers, the log-only settings-port probe, redundant systray declarations, and stale production build output. The maintainer improvement loop remains in source checkouts but is no longer shipped in the npm package. Agent and operator documentation now treats runtime MCP schemas as the canonical tool reference.
 - Fleet Gitea is the primary repository and has a container-isolated preship/security workflow. GitHub remains the deployment mirror. Greenmail E2E accepts an explicit service hostname so self-hosted CI does not need host execution privileges.
 - Added a source-pinned SimpleLogin and Proton Pass compatibility study. It records the current integration gaps and keeps implementation or reverse engineering behind a separate approval gate.
+- Reconciled 49 empty `mpE2E-*` folders/labels retained by earlier live Bridge safety runs. No messages remain; the harness still refuses mailbox deletion and reports those empty artifacts for explicit manual cleanup.
 
 ### Security
 
