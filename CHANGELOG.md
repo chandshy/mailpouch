@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fleet Gitea is the primary repository and has a container-isolated preship/security workflow. GitHub remains the deployment mirror. Greenmail E2E accepts an explicit service hostname so self-hosted CI does not need host execution privileges.
 - Added a source-pinned SimpleLogin and Proton Pass compatibility study. It records the current integration gaps and keeps implementation or reverse engineering behind a separate approval gate.
 - Reconciled 49 empty `mpE2E-*` folders/labels retained by earlier live Bridge safety runs. No messages remain; the harness still refuses mailbox deletion and reports those empty artifacts for explicit manual cleanup.
+- Gave the stale-Bridge reconciliation regression a loaded-runner deadline instead of treating a 100 ms scheduler pause as a cleanup failure on Windows/Node 24.
 
 ### Security
 

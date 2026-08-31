@@ -397,7 +397,10 @@ describe("scratch guard — non-destructive ownership contract", () => {
       { staleMutationPasses: 1 },
     );
     const report = await new ScratchSession(fake.imap, TOKEN_A).cleanup({
-      settleAfterPurgeMs: 100,
+      // This asserts the semantic reconciliation result, not a 100ms timing
+      // contract. Loaded Windows runners can pause long enough to exhaust the
+      // short deadline before two fresh-session scans complete.
+      settleAfterPurgeMs: 5_000,
     });
     expect(report.ok).toBe(true);
     expect(report.errors).toEqual([]);
@@ -408,7 +411,7 @@ describe("scratch guard — non-destructive ownership contract", () => {
     expect(fake.deleted).toEqual([]);
     expect(fake.folders.get(scratch)).toEqual([]);
     expect(fake.cleanupRefreshes()).toBeGreaterThanOrEqual(2);
-  });
+  }, 20_000);
 
   it("starts each owned source mutation from a fresh cleanup session", async () => {
     const fake = fakeImap({
