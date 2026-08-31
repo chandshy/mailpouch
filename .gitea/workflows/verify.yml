@@ -40,6 +40,7 @@ jobs:
           node-version: "22.x"
           cache: npm
       - run: npm ci
-      - run: npm rebuild better-sqlite3 --build-from-source
+      - run: rm node_modules/better-sqlite3/prebuilds/linux-x64.node
+      - run: npm rebuild better-sqlite3
       - run: npm run preship:fast
       - run: npm run test:e2e:local:keep
