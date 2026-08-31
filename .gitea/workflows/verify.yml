@@ -23,11 +23,13 @@ jobs:
       PRESHIP_NO_BRIDGE: "1"
       MAILPOUCH_INSECURE_BRIDGE: "1"
       MAILPOUCH_E2E_GREENMAIL_EXTERNAL: "1"
-      MAILPOUCH_E2E_GREENMAIL_HOST: greenmail
+      MAILPOUCH_E2E_GREENMAIL_HOST: "172.17.0.1"
     services:
       greenmail:
         image: greenmail/standalone:2.1.4
-        options: --network-alias greenmail
+        ports:
+          - 3025:3025
+          - 3143:3143
         env:
           GREENMAIL_OPTS: >-
             -Dgreenmail.setup.test.smtp
