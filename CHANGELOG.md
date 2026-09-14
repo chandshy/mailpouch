@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Cleared all open Dependabot advisories: `nodemailer` 9.1.1 (recipient-domain validation bypasses, addressparser quadratic DoS, `resolveContent()` file/URL-access bypass), `mailparser` 3.9.26 (drops its vulnerable nested `nodemailer`), and lockfile/override floors for `fast-uri` 4.1.4 (SSRF / host confusion), `hono` 4.13.7, and `qs` 6.16.0 (DoS / array-limit bypass).
 
+### Fixed
+
+- `test/improvement-loop.test.ts` no longer corrupts the checkout when run from the pre-push hook: its temp-repo `git` calls and runner spawns now drop inherited `GIT_*` variables, which previously redirected `git init`/`config`/`commit` into the real repository (setting `core.bare=true`, a test author identity, and a stray commit).
+
 ## [4.0.3] — 2026-08-31
 
 ### Fixed

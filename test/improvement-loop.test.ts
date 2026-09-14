@@ -15,6 +15,13 @@ import { afterEach, describe, expect, it } from "vitest";
 const runner = resolve(process.cwd(), "scripts/improvement-loop.mjs");
 const temporaryRoots: string[] = [];
 
+// Git hooks export GIT_DIR/GIT_INDEX_FILE/etc. Inherited, they redirect the
+// temp-repo git calls below (and the runner's own git probes) into the repo
+// running the hook: `git init` flips core.bare, `config` and `commit` land there.
+function childEnv(): NodeJS.ProcessEnv {
+  return Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")));
+}
+
 function createRoot(): string {
   const root = mkdtempSync(join(tmpdir(), "mailpouch-improvement-loop-"));
   temporaryRoots.push(root);
@@ -22,14 +29,14 @@ function createRoot(): string {
 }
 
 function run(root: string, ...args: string[]) {
-  const result = spawnSync(process.execPath, [runner, "--root", root, ...args], { encoding: "utf8" });
+  const result = spawnSync(process.execPath, [runner, "--root", root, ...args], { encoding: "utf8", env: childEnv() });
   if (result.error) throw result.error;
   return result;
 }
 
 function runAsync(root: string, ...args: string[]): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolveRun, rejectRun) => {
-    const child = spawn(process.execPath, [runner, "--root", root, ...args], { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(process.execPath, [runner, "--root", root, ...args], { env: childEnv(), stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", chunk => { stdout += String(chunk); });
@@ -40,7 +47,7 @@ function runAsync(root: string, ...args: string[]): Promise<{ code: number | nul
 }
 
 function runGit(root: string, ...args: string[]) {
-  const result = spawnSync("git", args, { cwd: root, encoding: "utf8" });
+  const result = spawnSync("git", args, { cwd: root, encoding: "utf8", env: childEnv() });
   if (result.error) throw result.error;
   expect(result.status).toBe(0);
 }
@@ -337,6 +344,24 @@ describe("improvement-loop runner", () => {
     const status = run(root, "status");
     expect(status.status).not.toBe(0);
     expect(`${status.stdout}\n${status.stderr}`).toContain("has changed");
+  });
+
+  it("keeps temp-repo git calls out of a hook's inherited GIT_DIR", () => {
+    const root = createRoot();
+    const decoy = createRoot();
+    const saved = { GIT_DIR: process.env.GIT_DIR, GIT_INDEX_FILE: process.env.GIT_INDEX_FILE };
+    process.env.GIT_DIR = join(decoy, "hook.git");
+    process.env.GIT_INDEX_FILE = join(decoy, "hook.index");
+    try {
+      runGit(root, "init");
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+    expect(existsSync(join(root, ".git"))).toBe(true);
+    expect(existsSync(join(decoy, "hook.git"))).toBe(false);
   });
 
   it("excludes tracked loop metadata from the workspace freshness fingerprint", () => {
