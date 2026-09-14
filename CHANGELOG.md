@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Cleared all open Dependabot advisories: `nodemailer` 9.1.1 (recipient-domain validation bypasses, addressparser quadratic DoS, `resolveContent()` file/URL-access bypass), `mailparser` 3.9.26 (drops its vulnerable nested `nodemailer`), and lockfile/override floors for `fast-uri` 4.1.4 (SSRF / host confusion), `hono` 4.13.7, and `qs` 6.16.0 (DoS / array-limit bypass).
+
 ## [4.0.3] — 2026-08-31
 
 ### Fixed

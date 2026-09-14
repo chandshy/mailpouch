@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-08-31",
+  "generatedAt": "2026-09-14",
   "rootPackage": "mailpouch@4.0.3",
   "deps": [
     {
@@ -40,6 +40,11 @@
     {
       "name": "@zone-eu/mailsplit",
       "version": "5.4.15",
+      "license": "(MIT OR EUPL-1.1+)"
+    },
+    {
+      "name": "@zone-eu/mailsplit",
+      "version": "5.4.16",
       "license": "(MIT OR EUPL-1.1+)"
     },
     {
@@ -178,6 +183,11 @@
       "license": "MIT"
     },
     {
+      "name": "encoding-japanese",
+      "version": "2.3.0",
+      "license": "MIT"
+    },
+    {
       "name": "entities",
       "version": "4.5.0",
       "license": "BSD-2-Clause"
@@ -199,7 +209,7 @@
     },
     {
       "name": "es-object-atoms",
-      "version": "1.1.1",
+      "version": "1.1.2",
       "license": "MIT"
     },
     {
@@ -239,7 +249,7 @@
     },
     {
       "name": "fast-uri",
-      "version": "4.1.2",
+      "version": "4.1.4",
       "license": "BSD-3-Clause"
     },
     {
@@ -294,7 +304,7 @@
     },
     {
       "name": "hasown",
-      "version": "2.0.2",
+      "version": "2.0.4",
       "license": "MIT"
     },
     {
@@ -304,7 +314,7 @@
     },
     {
       "name": "hono",
-      "version": "4.13.0",
+      "version": "4.13.7",
       "license": "MIT"
     },
     {
@@ -393,6 +403,11 @@
       "license": "MIT"
     },
     {
+      "name": "libmime",
+      "version": "5.4.3",
+      "license": "MIT"
+    },
+    {
       "name": "libqp",
       "version": "2.1.1",
       "license": "MIT"
@@ -404,7 +419,7 @@
     },
     {
       "name": "mailparser",
-      "version": "3.9.17",
+      "version": "3.9.26",
       "license": "MIT"
     },
     {
@@ -449,7 +464,12 @@
     },
     {
       "name": "nodemailer",
-      "version": "9.0.6",
+      "version": "10.0.9",
+      "license": "MIT-0"
+    },
+    {
+      "name": "nodemailer",
+      "version": "9.1.1",
       "license": "MIT-0"
     },
     {
@@ -539,7 +559,7 @@
     },
     {
       "name": "qs",
-      "version": "6.15.2",
+      "version": "6.16.0",
       "license": "BSD-3-Clause"
     },
     {
@@ -614,12 +634,12 @@
     },
     {
       "name": "side-channel",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "license": "MIT"
     },
     {
       "name": "side-channel-list",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "license": "MIT"
     },
     {
