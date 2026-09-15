@@ -85,6 +85,17 @@ function requireImapOk(result: unknown, command: string): void {
   if (result === false) throw new Error(`IMAP ${command} was rejected by the server`);
 }
 
+/**
+ * Without the MOVE capability imapflow emulates MOVE as COPY followed by an
+ * unconditional \\Deleted + EXPUNGE of the source — even when the COPY failed —
+ * which would permanently delete mail that never reached its destination.
+ */
+function requireMoveCapability(capabilities: Map<string, unknown> | undefined): void {
+  if (!capabilities?.has('MOVE')) {
+    throw new Error('IMAP server does not advertise MOVE; refusing to emulate it with COPY + EXPUNGE');
+  }
+}
+
 export class SimpleIMAPService {
   private client: ImapFlow | null = null;
   private isConnected: boolean = false;
@@ -1978,6 +1989,7 @@ export class SimpleIMAPService {
         movedMid = (await this.fetchMessageIdsForUids([emailId])).get(emailId);
 
         const moveResult = await runMailboxMutation(this, () => {
+          requireMoveCapability(this.client!.capabilities);
           assertE2EUidPlusCapability(this.client!.capabilities);
           assertE2EMailboxIdentity(folder, [emailId], this.client!.mailbox);
           return this.client!.messageMove(emailId, targetFolder, { uid: true });
@@ -2382,6 +2394,7 @@ export class SimpleIMAPService {
         await this.chunkedBatchOp({
           present,
           beforeMutation: () => {
+            requireMoveCapability(this.client!.capabilities);
             assertE2EUidPlusCapability(this.client!.capabilities);
             assertE2EMailboxIdentity(folder, ids, this.client!.mailbox);
           },

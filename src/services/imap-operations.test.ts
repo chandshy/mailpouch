@@ -347,7 +347,7 @@ function makeClient(overrides: Record<string, unknown> = {}): Record<string, unk
 
   const client: Record<string, unknown> = {
     [STATE_KEY]: state,
-    capabilities: new Map([["UIDPLUS", true]]),
+    capabilities: new Map<string, boolean>([["UIDPLUS", true], ["MOVE", true]]),
     getMailboxLock,
     messageFlagsAdd,
     messageFlagsRemove,
@@ -3161,6 +3161,22 @@ describe("SimpleIMAPService live Bridge E2E mailbox identity fence", () => {
     await expect(runLive(proof("17", ["42"]), () => operation(svc)))
       .rejects.toThrow(/UIDPLUS/i);
     expect(client[wire] as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["move", (svc: SimpleIMAPService) => svc.moveEmail("42", target, source)],
+    ["bulk move", (svc: SimpleIMAPService) => svc.bulkMoveEmails(["42"], target, source)],
+    ["delete to Trash", (svc: SimpleIMAPService) => svc.deleteEmail("42", source)],
+  ])("refuses %s when MOVE is not advertised (imapflow would COPY + unconditional EXPUNGE)", async (_name, operation) => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc, { capabilities: new Map([["UIDPLUS", true]]) });
+    seedUids(client, source, [42]);
+    vi.spyOn(svc as any, "resolveTrashPath").mockResolvedValue("Trash");
+
+    const outcome = await operation(svc).then((r) => r, (e: Error) => e);
+    if (!(outcome instanceof Error)) expect(outcome).toMatchObject({ success: 0 });
+    expect(client.messageMove).not.toHaveBeenCalled();
+    expect(client.messageDelete).not.toHaveBeenCalled();
   });
 
   it.each([
