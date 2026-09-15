@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `test/improvement-loop.test.ts` no longer corrupts the checkout when run from the pre-push hook: its temp-repo `git` calls and runner spawns now drop inherited `GIT_*` variables, which previously redirected `git init`/`config`/`commit` into the real repository (setting `core.bare=true`, a test author identity, and a stray commit).
 
+### Security
+
+- Windows native approval dialog and toasts: PowerShell treats the Unicode quotes U+2018–U+201B as single-quote delimiters, but only ASCII `'` was escaped, so a crafted agent `client_name` could break out of the script literal. All delimiters are now doubled by one shared escaper (the two notifier copies are merged).
+- Linux zenity approval dialog passes `--no-markup`, so markup characters in an agent name can no longer blank or garble the prompt.
+
 ## [4.0.3] — 2026-08-31
 
 ### Fixed
