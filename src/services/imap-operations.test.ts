@@ -1420,13 +1420,11 @@ describe("SimpleIMAPService.getEmailById (early-exit)", () => {
     expect(result!.id).toBe("200");
   });
 
-  it("returns null when not connected and cache is empty", async () => {
+  it("throws when not connected and cache is empty (IMAP-012: not 'not found')", async () => {
     const svc = new SimpleIMAPService();
-    // isConnected=false, client=null by default
+    vi.spyOn(svc as any, "reconnect").mockRejectedValue(new Error("ECONNREFUSED"));
 
-    const result = await svc.getEmailById("404");
-
-    expect(result).toBeNull();
+    await expect(svc.getEmailById("404")).rejects.toThrow(/IMAP connection unavailable/);
   });
 });
 
@@ -1907,10 +1905,10 @@ describe("SimpleIMAPService getCacheEntry TTL (lines 216-217)", () => {
     (svc as any).emailCache.set("INBOX:77", { email, cachedAt: Date.now() - 10 * 60 * 1000 });
     (svc as any).cacheByteEstimate = 100;
 
-    // getEmailById calls findCacheEntryByUid internally; with an expired entry and
-    // isConnected=false it should return null (cache miss after TTL eviction)
-    const result = await svc.getEmailById("77");
-    expect(result).toBeNull();
+    // getEmailById calls findCacheEntryByUid internally; an expired entry is a
+    // cache miss, which (disconnected) now surfaces the connection error.
+    vi.spyOn(svc as any, "reconnect").mockRejectedValue(new Error("ECONNREFUSED"));
+    await expect(svc.getEmailById("77")).rejects.toThrow(/IMAP connection unavailable/);
     // Cache entry should have been evicted
     expect((svc as any).emailCache.has("INBOX:77")).toBe(false);
   });

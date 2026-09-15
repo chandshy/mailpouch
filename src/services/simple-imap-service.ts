@@ -827,6 +827,17 @@ export class SimpleIMAPService {
   /**
    * Ensure connection is active, reconnect if needed
    */
+  /** ensureConnection for read paths, mapped to IMAPNotConnectedError (IMAP-012). */
+  private async requireReadConnection(what: string): Promise<void> {
+    try {
+      await this.ensureConnection();
+    } catch (error) {
+      logger.warn(`IMAP not connected: cannot ${what}`, 'IMAPService', error);
+      throw new IMAPNotConnectedError(`Cannot ${what}: IMAP connection unavailable`);
+    }
+    if (!this.client) throw new IMAPNotConnectedError(`Cannot ${what}: IMAP client not available`);
+  }
+
   private async ensureConnection(): Promise<void> {
     // Known login failure → fail fast with operator-actionable guidance and do
     // NOT re-attempt (another bad-password login just re-trips Bridge's "too
@@ -1191,10 +1202,9 @@ export class SimpleIMAPService {
       return cachedEntry;
     }
 
-    if (!this.client || !this.isConnected) {
-      logger.warn('IMAP not connected', 'IMAPService');
-      return null;
-    }
+    // IMAP-012: null means "not found" to every caller, so a lost connection
+    // must surface as an error rather than masquerade as a missing message.
+    await this.requireReadConnection(`fetch email ${emailId}`);
 
     try {
       // If a folder hint is provided, only look there; otherwise scan all
@@ -1210,13 +1220,13 @@ export class SimpleIMAPService {
           );
 
       for (const folder of foldersToSearch) {
-        const lock = await this.client.getMailboxLock(folder.path);
+        const lock = await this.client!.getMailboxLock(folder.path);
 
         try {
           // GAP 7.4: check for UIDVALIDITY changes after opening the mailbox
           this.checkAndUpdateUidValidity(folder.path);
 
-          for await (const message of this.client.fetch(emailId, {
+          for await (const message of this.client!.fetch(emailId, {
             envelope: true,
             bodyStructure: true,
             flags: true,
@@ -1571,13 +1581,13 @@ export class SimpleIMAPService {
    * when the cache entry has had its attachment content stripped (GAP 7.5).
    */
   private async fetchEmailFullSource(emailId: string, folderHint?: string): Promise<EmailMessage | null> {
-    if (!this.client || !this.isConnected) return null;
+    await this.requireReadConnection(`download attachments for email ${emailId}`);
     try {
       const foldersToSearch = folderHint ? [{ path: folderHint }] : await this.getFolders();
       for (const folder of foldersToSearch) {
-        const lock = await this.client.getMailboxLock(folder.path);
+        const lock = await this.client!.getMailboxLock(folder.path);
         try {
-          for await (const message of this.client.fetch(emailId, {
+          for await (const message of this.client!.fetch(emailId, {
             uid: true,
             flags: true,
             source: true,
@@ -1615,6 +1625,7 @@ export class SimpleIMAPService {
       }
     } catch (error) {
       logger.error('Failed to fetch full email source for attachment download', 'IMAPService', error);
+      throw error;
     }
     return null;
   }

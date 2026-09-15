@@ -66,11 +66,10 @@ describe("SimpleIMAPService.getEmailById (fetch loop)", () => {
     expect(result!.id).toBe("1");
   });
 
-  it("returns null when not connected and cache miss", async () => {
+  it("throws IMAPNotConnectedError (not null = 'not found') when disconnected on a cache miss", async () => {
     const svc = new SimpleIMAPService();
-    // isConnected=false by default
-    const result = await svc.getEmailById("999");
-    expect(result).toBeNull();
+    vi.spyOn(svc as any, "reconnect").mockRejectedValue(new Error("ECONNREFUSED"));
+    await expect(svc.getEmailById("999")).rejects.toThrow(/IMAP connection unavailable/);
   });
 
   it("fetches and parses email via async iterator when not cached", async () => {
