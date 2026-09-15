@@ -405,13 +405,18 @@ agentNotifications.subscribe((ev) => {
         title: "mailpouch — approve agent?",
         message: `Agent "${grant.clientName}" (${where}) is requesting access to your mailbox.\n\nApprove this connection?`,
       }).then((choice) => {
+        // The dialog can sit open for minutes; if the grant was decided in the
+        // Settings UI meanwhile (denied, or approved with restrictions), a late
+        // click must not overwrite that decision.
         if (choice === "approve") {
           const preset = loadConfig()?.permissions?.preset ?? "read_only";
-          agentGrants.approve({ clientId: grant.clientId, preset });
-          logger.info(`Agent "${grant.clientName}" approved at the on-screen prompt (preset ${preset})`, "MCPServer");
+          if (agentGrants.approve({ clientId: grant.clientId, preset, onlyIfPending: true })) {
+            logger.info(`Agent "${grant.clientName}" approved at the on-screen prompt (preset ${preset})`, "MCPServer");
+          }
         } else if (choice === "deny") {
-          agentGrants.deny(grant.clientId, "Denied at the on-screen prompt");
-          logger.info(`Agent "${grant.clientName}" denied at the on-screen prompt`, "MCPServer");
+          if (agentGrants.deny(grant.clientId, "Denied at the on-screen prompt", { onlyIfPending: true })) {
+            logger.info(`Agent "${grant.clientName}" denied at the on-screen prompt`, "MCPServer");
+          }
         } else {
           _autoOpenApprovalWindow(); // no dialog tool / timed out → browser fallback
         }

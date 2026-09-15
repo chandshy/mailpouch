@@ -49,6 +49,24 @@ describe("AgentGrantStore", () => {
     }
   });
 
+  it("onlyIfPending approve/deny leave an already-decided grant untouched", () => {
+    const s = new AgentGrantStore(path);
+    try {
+      s.createPending({ clientId: "pmc_1", clientName: "A" });
+      s.approve({ clientId: "pmc_1", preset: "read_only", conditions: { folderAllowlist: ["INBOX"] } });
+      expect(s.approve({ clientId: "pmc_1", preset: "full", onlyIfPending: true })).toBeNull();
+      expect(s.deny("pmc_1", "late", { onlyIfPending: true })).toBeNull();
+      expect(s.get("pmc_1")).toMatchObject({ status: "active", preset: "read_only", conditions: { folderAllowlist: ["INBOX"] } });
+
+      s.createPending({ clientId: "pmc_2", clientName: "B" });
+      s.deny("pmc_2");
+      expect(s.approve({ clientId: "pmc_2", preset: "full", onlyIfPending: true })).toBeNull();
+      expect(s.get("pmc_2")?.status).toBe("revoked");
+    } finally {
+      s.close();
+    }
+  });
+
   it("does not resurrect grants after the grants file is deleted", () => {
     const s = new AgentGrantStore(path);
     try {

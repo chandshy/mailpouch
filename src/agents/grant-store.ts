@@ -66,6 +66,8 @@ export interface ApproveArgs {
   toolOverrides?: Partial<Record<ToolName, boolean>>;
   conditions?: GrantConditions;
   note?: string;
+  /** Apply only while the grant is still pending (a decision made elsewhere wins). */
+  onlyIfPending?: boolean;
 }
 
 export interface AgentGrantStoreOptions {
@@ -295,7 +297,7 @@ export class AgentGrantStore {
   approve(args: ApproveArgs): AgentGrant | null {
     return this.mutate(() => {
       const g = this.grants.get(args.clientId);
-      if (!g) return null;
+      if (!g || (args.onlyIfPending && g.status !== "pending")) return null;
       g.status = "active";
       g.preset = args.preset;
       g.toolOverrides = args.toolOverrides;
@@ -309,10 +311,10 @@ export class AgentGrantStore {
     });
   }
 
-  deny(clientId: string, note?: string): AgentGrant | null {
+  deny(clientId: string, note?: string, opts: { onlyIfPending?: boolean } = {}): AgentGrant | null {
     return this.mutate(() => {
       const g = this.grants.get(clientId);
-      if (!g) return null;
+      if (!g || (opts.onlyIfPending && g.status !== "pending")) return null;
       const wasPending = g.status === "pending";
       g.status = "revoked";
       g.revokedAt = new Date().toISOString();

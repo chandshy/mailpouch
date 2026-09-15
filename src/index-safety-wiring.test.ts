@@ -31,6 +31,11 @@ describe("production safety wiring", () => {
     expect(source).not.toMatch(/globalPreset,\n\s*\}, \{ snapshot: grantSnapshot \}\)/);
   });
 
+  it("the native approval dialog only decides grants that are still pending", () => {
+    expect(source).toMatch(/agentGrants\.approve\(\{ clientId: grant\.clientId, preset, onlyIfPending: true \}\)/);
+    expect(source).toMatch(/agentGrants\.deny\(grant\.clientId, "Denied at the on-screen prompt", \{ onlyIfPending: true \}\)/);
+  });
+
   it("binds the request-local mailbox identity around the real tool handler invocation", () => {
     expect(source).toMatch(
       /withE2EMailboxIdentity\(\s*args as Record<string, unknown>,\s*\(\) => handler\(ctx\),\s*\)/,
