@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { join } from "path";
 import { homedir } from "os";
-import { buildPermissions, defaultConfig, getConfigPath, configExists, loadConfig, saveConfig, loadCredentialsFromConfigFile, loadCredentialsFromKeychain, loadAuxiliaryCredentialsFromKeychain, saveConfigWithCredentials, migrateCredentials } from "./loader.js";
+import { buildPermissions, defaultConfig, getConfigPath, configExists, loadConfig, loadConfigForWrite, saveConfig, loadCredentialsFromConfigFile, loadCredentialsFromKeychain, loadAuxiliaryCredentialsFromKeychain, saveConfigWithCredentials, migrateCredentials } from "./loader.js";
 import { ALL_TOOLS, TOOL_CATEGORIES, DEFAULT_RESPONSE_LIMITS } from "./schema.js";
 import { CredentialEncryption } from "../crypto/credential-encryption.js";
 import { logger } from "../utils/logger.js";
@@ -465,6 +465,31 @@ describe("loadConfig", () => {
     mockedReadFileSync.mockReturnValue(cfgjson as unknown as Buffer);
     const cfg = loadConfig();
     expect(cfg!.settingsPort).toBe(8766);
+  });
+
+  it("loadConfigForWrite refuses to base a save on an existing unreadable config", () => {
+    mockedExistsSync.mockReturnValue(true);
+    mockedReadFileSync.mockReturnValue("{ trailing comma, }" as unknown as Buffer);
+    expect(() => loadConfigForWrite()).toThrow(/refusing to overwrite/);
+  });
+
+  it("loadConfigForWrite starts from defaults when no config file exists", () => {
+    mockedExistsSync.mockReturnValue(false);
+    expect(loadConfigForWrite().permissions.preset).toBe(defaultConfig().permissions.preset);
+  });
+
+  it("preserves surfaceSecurityNotifications and toolTier across load", () => {
+    mockedExistsSync.mockReturnValue(true);
+    mockedReadFileSync.mockReturnValue(JSON.stringify({
+      configVersion: 2,
+      connection: {},
+      permissions: { preset: "full", tools: {} },
+      surfaceSecurityNotifications: true,
+      toolTier: "core",
+    }) as unknown as Buffer);
+    const cfg = loadConfig();
+    expect(cfg!.surfaceSecurityNotifications).toBe(true);
+    expect(cfg!.toolTier).toBe("core");
   });
 
   it("preserves a valid configResetGeneration across a disk load", () => {
