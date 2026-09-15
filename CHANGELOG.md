@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `test/improvement-loop.test.ts` no longer corrupts the checkout when run from the pre-push hook: its temp-repo `git` calls and runner spawns now drop inherited `GIT_*` variables, which previously redirected `git init`/`config`/`commit` into the real repository (setting `core.bare=true`, a test author identity, and a stray commit).
 
+### Security
+
+- A client-chosen tool name that matches an `Object.prototype` key (e.g. `constructor`) resolved to a built-in in the dispatch tables and was invoked before any agent-grant or permission gate, echoing the call context — including the loaded config and mailbox credentials — back to an unapproved caller. Handler and alias tables are now prototype-free and unregistered tool names are rejected before any gate runs.
+
 ## [4.0.3] — 2026-08-31
 
 ### Fixed

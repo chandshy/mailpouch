@@ -31,6 +31,13 @@ describe("production safety wiring", () => {
     expect(source).not.toMatch(/globalPreset,\n\s*\}, \{ snapshot: grantSnapshot \}\)/);
   });
 
+  it("rejects unregistered tool names before the escalation pre-gate", () => {
+    const reject = source.indexOf("if (!Object.hasOwn(_escalationHandlers, name) && !Object.hasOwn(_toolHandlers, name))");
+    const escalation = source.indexOf("if (_escalationHandlers[name])");
+    expect(reject).toBeGreaterThan(-1);
+    expect(reject).toBeLessThan(escalation);
+  });
+
   it("binds the request-local mailbox identity around the real tool handler invocation", () => {
     expect(source).toMatch(
       /withE2EMailboxIdentity\(\s*args as Record<string, unknown>,\s*\(\) => handler\(ctx\),\s*\)/,

@@ -500,9 +500,9 @@ export const DESTRUCTIVE_TOOLS: ReadonlySet<string> = new Set<string>([
  * Keys are aliases; values are the canonical name. Stays small — only add
  * an entry when two tool names truly share a handler.
  */
-export const TOOL_ALIASES: Readonly<Record<string, string>> = Object.freeze({
-  bulk_delete: "bulk_delete_emails",
-});
+export const TOOL_ALIASES: Readonly<Record<string, string>> = Object.freeze(
+  Object.assign(Object.create(null) as Record<string, string>, { bulk_delete: "bulk_delete_emails" }),
+);
 
 /** Resolve a tool name through TOOL_ALIASES; returns the canonical name. */
 export function canonicalToolName(name: string): string {
