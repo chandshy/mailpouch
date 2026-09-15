@@ -13,7 +13,8 @@ import {
   DESTRUCTIVE_TOOLS,
   MOVE_TOOLS_WITH_DESTRUCTIVE_TARGET,
 } from "../config/schema.js";
-import { allToolDefs, advertisedToolDefs } from "./registry.js";
+import { allToolDefs, advertisedToolDefs, allHandlers, escalationHandlers } from "./registry.js";
+import { canonicalToolName } from "../config/schema.js";
 
 interface SchemaShape {
   type?: string;
@@ -96,4 +97,17 @@ describe("advertisedToolDefs — optional companions", () => {
     expect(names).toContain("pass_list");
     expect(names).toHaveLength(86);
   });
+});
+
+describe("tool-name lookup tables", () => {
+  // Tool names are client-chosen: a prototype key must not resolve to a
+  // callable (Object would echo the call context — config included — back).
+  it.each(["constructor", "toString", "hasOwnProperty", "__proto__", "valueOf"])(
+    "%s resolves to no handler, escalation handler, or alias",
+    (name) => {
+      expect(allHandlers()[name]).toBeUndefined();
+      expect(escalationHandlers()[name]).toBeUndefined();
+      expect(canonicalToolName(name)).toBe(name);
+    },
+  );
 });
