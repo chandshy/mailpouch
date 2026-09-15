@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `test/improvement-loop.test.ts` no longer corrupts the checkout when run from the pre-push hook: its temp-repo `git` calls and runner spawns now drop inherited `GIT_*` variables, which previously redirected `git init`/`config`/`commit` into the real repository (setting `core.bare=true`, a test author identity, and a stray commit).
 
+### Fixed
+
+- IMAP flag changes, `remove_label`, bulk flag/unlabel and `empty_trash` no longer report success when the server rejects the STORE or EXPUNGE (imapflow resolves `false` instead of throwing); rejected bulk chunks now fall back per message and count real failures.
+- Moves (including delete-to-Trash) are refused on a server that does not advertise MOVE, where imapflow's emulation would permanently expunge the source even if the copy failed. Proton Bridge advertises MOVE, so normal behavior is unchanged.
+
 ## [4.0.3] — 2026-08-31
 
 ### Fixed
