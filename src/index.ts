@@ -945,7 +945,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
   // unreachable Bridge, or an unapproved grant can still learn exactly what is
   // wrong and the single next action. Read-only; never grants or mutates.
   if (name === "setup_status") {
-    const diagCaller = currentCaller() ?? _stdioCaller ?? undefined;
+    const diagCaller = currentCaller() ?? localCaller();
     // This is display-only diagnostic context, not an authorization decision;
     // retain the lightweight live-map lookup so a partially-written external
     // grants file does not hide useful setup guidance.
@@ -967,7 +967,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     // record so the approval card can surface it. Stdio (no OAuth client)
     // becomes the literal string "stdio" — distinguishable from a real
     // client id so the UI can flag which approval flow this is.
-    const earlyCaller = currentCaller() ?? _stdioCaller ?? undefined;
+    const earlyCaller = currentCaller() ?? localCaller();
     const escalationCaller = earlyCaller
       ? { clientId: earlyCaller.clientId, clientName: earlyCaller.clientName }
       : { clientId: "stdio", clientName: undefined };
@@ -1038,12 +1038,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
   // ── Agent-grant gate ──────────────────────────────────────────────────────
   // Runs BEFORE the global permission gate. The caller is the HTTP request's
   // OAuth identity (AsyncLocalStorage) when present, else the LOCAL stdio
-  // client's identity resolved at the handshake (_stdioCaller) when local
+  // client's identity (localCaller) when local
   // gating is on. So every agent — local or remote — is routed through the
   // per-agent grant: an unapproved one is blocked "pending user approval".
-  // When local gating is disabled, _stdioCaller is null and stdio bypasses
-  // (legacy auto-trust).
-  const caller = currentCaller() ?? _stdioCaller ?? undefined;
+  // When local gating is disabled, localCaller() is undefined and stdio
+  // bypasses (legacy auto-trust).
+  const caller = currentCaller() ?? localCaller();
   const callStartedAt = Date.now();
   // Flipped true in the catch so the finally success path is skipped.
   let auditFailureRecorded = false;
@@ -1486,7 +1486,7 @@ function requireReadSurfaceAccess(
   const services = accountManager.getActive();
   const activeAccountId = services.spec.id;
   const accountIdentity = accountManager.identityForAccount(activeAccountId);
-  const caller = currentCaller() ?? _stdioCaller ?? undefined;
+  const caller = currentCaller() ?? localCaller();
   if (!caller) return { accountId: activeAccountId, accountIdentity, services };
 
   const grantSnapshot = grantManager.getAuthorizationSnapshot(caller.clientId);
@@ -2135,35 +2135,48 @@ registerHandlers(server);
 // handshake and stash it module-side. The tool gate falls back to this when
 // there's no HTTP caller — routing the local agent through the same
 // register → approve → access flow as remote agents.
-let _stdioCaller: CallerContext | null = null;
-
 /** True when local (stdio) agents must register + be approved (default true). */
 function localAgentsGated(): boolean {
   if (process.env.MAILPOUCH_TRUST_LOCAL === "1") return false;
   return (loadConfig()?.gateLocalAgents ?? true) !== false;
 }
 
-// Capture the local client's identity at the MCP handshake, register a pending
-// grant (which surfaces the approval notice), and arm the gate. No-op when
-// local gating is disabled (legacy auto-trust) — _stdioCaller stays null, so
-// the gate keeps bypassing stdio.
-server.oninitialized = () => {
+/**
+ * The local stdio client's identity while local gating is on (undefined when
+ * gating is off — legacy auto-trust). Resolved per call rather than only at the
+ * handshake, so:
+ *  - a pending grant that expired (5-min TTL) or was deleted is registered
+ *    again instead of leaving the client blocked with no approval prompt;
+ *  - a client that skipped `notifications/initialized`, or whose registration
+ *    failed, still carries an identity — with no grant the gate denies it,
+ *    rather than seeing no caller and skipping the gate.
+ */
+function localCaller(): CallerContext | undefined {
+  if (!localAgentsGated()) return undefined;
+  const name = server.getClientVersion()?.name || "(unnamed local client)";
+  const clientId = localAgentId(name);
   try {
-    if (!localAgentsGated()) return;
-    const info = server.getClientVersion(); // { name, version? } | undefined
-    const name = info?.name || "(unnamed local client)";
-    const clientId = localAgentId(name);
-    if (!agentGrants.get(clientId)) {
-      agentGrants.createPending({ clientId, clientName: name });
-    }
-    agentGrants.recordConnection(clientId, {
+    if (!agentGrants.get(clientId)) agentGrants.createPending({ clientId, clientName: name });
+  } catch (err: unknown) {
+    logger.warn("Failed to register local stdio agent", "MCPServer", err);
+  }
+  return { clientId, clientName: name };
+}
+
+// Register at the MCP handshake too, so the approval notice appears on connect
+// rather than on the first tool call.
+server.oninitialized = () => {
+  const caller = localCaller();
+  if (!caller) return;
+  const info = server.getClientVersion();
+  try {
+    agentGrants.recordConnection(caller.clientId, {
       mcpClientName: info?.name,
       mcpClientVersion: info?.version,
       transport: "stdio",
     });
-    _stdioCaller = { clientId, clientName: name };
   } catch (err: unknown) {
-    logger.debug("Failed to register local stdio agent", "MCPServer", err);
+    logger.debug("Failed to record local stdio connection", "MCPServer", err);
   }
 };
 

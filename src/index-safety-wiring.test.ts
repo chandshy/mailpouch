@@ -31,6 +31,17 @@ describe("production safety wiring", () => {
     expect(source).not.toMatch(/globalPreset,\n\s*\}, \{ snapshot: grantSnapshot \}\)/);
   });
 
+  it("resolves the local stdio caller per call so gates never see 'no caller' while local gating is on", () => {
+    // No handshake-only cached caller: a skipped notifications/initialized or a
+    // failed registration must not leave the gate with an undefined caller.
+    expect(source).not.toMatch(/_stdioCaller/);
+    expect(source.match(/currentCaller\(\) \?\? localCaller\(\)/g)).toHaveLength(4);
+    const body = source.slice(source.indexOf("function localCaller()"), source.indexOf("server.oninitialized"));
+    expect(body).toMatch(/if \(!agentGrants\.get\(clientId\)\) agentGrants\.createPending/);
+    // Registration failure must still return the identity (gate then denies: no grant).
+    expect(body).toMatch(/\}\s*catch \(err: unknown\) \{[\s\S]*?\}\s*return \{ clientId, clientName: name \};/);
+  });
+
   it("the native approval dialog only decides grants that are still pending", () => {
     expect(source).toMatch(/agentGrants\.approve\(\{ clientId: grant\.clientId, preset, onlyIfPending: true \}\)/);
     expect(source).toMatch(/agentGrants\.deny\(grant\.clientId, "Denied at the on-screen prompt", \{ onlyIfPending: true \}\)/);
