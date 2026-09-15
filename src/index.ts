@@ -1487,7 +1487,14 @@ function requireReadSurfaceAccess(
   const activeAccountId = services.spec.id;
   const accountIdentity = accountManager.identityForAccount(activeAccountId);
   const caller = currentCaller() ?? localCaller();
-  if (!caller) return { accountId: activeAccountId, accountIdentity, services };
+  if (!caller) {
+    // Trusted local mode has no per-agent grant, but the global preset still
+    // applies — the tool dispatcher enforces it for every caller, and a
+    // resource/prompt must not read what the equivalent tool may not.
+    const trustedPermission = permissions.check(tool);
+    if (!trustedPermission.allowed) throw new McpError(ErrorCode.InvalidRequest, `Blocked: ${trustedPermission.reason}`);
+    return { accountId: activeAccountId, accountIdentity, services };
+  }
 
   const grantSnapshot = grantManager.getAuthorizationSnapshot(caller.clientId);
 

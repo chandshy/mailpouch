@@ -42,6 +42,12 @@ describe("production safety wiring", () => {
     expect(body).toMatch(/\}\s*catch \(err: unknown\) \{[\s\S]*?\}\s*return \{ clientId, clientName: name \};/);
   });
 
+  it("resources/prompts apply the global permission preset even for a trusted local caller", () => {
+    const start = source.indexOf("function requireReadSurfaceAccess(");
+    const body = source.slice(start, source.indexOf("const grantSnapshot = grantManager.getAuthorizationSnapshot(caller.clientId);", start));
+    expect(body).toMatch(/if \(!caller\) \{[\s\S]*permissions\.check\(tool\)[\s\S]*return \{ accountId: activeAccountId, accountIdentity, services \};/);
+  });
+
   it("the native approval dialog only decides grants that are still pending", () => {
     expect(source).toMatch(/agentGrants\.approve\(\{ clientId: grant\.clientId, preset, onlyIfPending: true \}\)/);
     expect(source).toMatch(/agentGrants\.deny\(grant\.clientId, "Denied at the on-screen prompt", \{ onlyIfPending: true \}\)/);
