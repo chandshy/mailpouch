@@ -76,6 +76,15 @@ const MAX_EMAIL_CACHE_SIZE = 500;
  */
 const MAX_EMAIL_CACHE_BYTES = 50 * 1024 * 1024; // 50 MB
 
+/**
+ * imapflow resolves STORE and EXPUNGE to `false` when the server answers NO/BAD
+ * (or the flag is not in PERMANENTFLAGS) instead of throwing, so an unchecked
+ * call reports success for a mutation that never happened.
+ */
+function requireImapOk(result: unknown, command: string): void {
+  if (result === false) throw new Error(`IMAP ${command} was rejected by the server`);
+}
+
 export class SimpleIMAPService {
   private client: ImapFlow | null = null;
   private isConnected: boolean = false;
@@ -314,6 +323,17 @@ export class SimpleIMAPService {
    * instead of N serial EXPUNGE round-trips that hold the mailbox lock (and
    * block IDLE) for minutes on Bridge.
    */
+  /**
+   * Flag \\Deleted then UID EXPUNGE, failing loudly on either rejection.
+   * messageDelete runs the same STORE internally but ignores its result, so a
+   * rejected STORE would otherwise yield an EXPUNGE that removes nothing yet
+   * resolves `true`.
+   */
+  private async expungeUids(uidSet: string): Promise<void> {
+    requireImapOk(await this.client!.messageFlagsAdd(uidSet, ['\\Deleted'], { uid: true }), 'STORE +FLAGS \\Deleted');
+    requireImapOk(await this.client!.messageDelete(uidSet, { uid: true }), 'EXPUNGE');
+  }
+
   private async chunkedBatchOp(opts: {
     /** UIDs known to exist in the locked folder. */
     present: string[];
@@ -340,7 +360,7 @@ export class SimpleIMAPService {
       try {
         await runMailboxMutation(this, async () => {
           beforeMutation?.();
-          await perChunk(uidSet);
+          requireImapOk(await perChunk(uidSet), `${opName} chunk`);
         });
         for (const id of chunkUids) onSuccess(id);
       } catch (batchErr: unknown) {
@@ -354,7 +374,7 @@ export class SimpleIMAPService {
           try {
             await runMailboxMutation(this, async () => {
               beforeMutation?.();
-              await perUid(id);
+              requireImapOk(await perUid(id), opName);
             });
             fallbackUsed = true;
             onSuccess(id);
@@ -1785,14 +1805,14 @@ export class SimpleIMAPService {
         }
 
         if (isRead) {
-          await runMailboxMutation(this, () => {
+          await runMailboxMutation(this, async () => {
             assertE2EMailboxIdentity(folder, [emailId], this.client!.mailbox);
-            return this.client!.messageFlagsAdd(emailId, ['\\Seen'], { uid: true });
+            requireImapOk(await this.client!.messageFlagsAdd(emailId, ['\\Seen'], { uid: true }), 'STORE +FLAGS');
           });
         } else {
-          await runMailboxMutation(this, () => {
+          await runMailboxMutation(this, async () => {
             assertE2EMailboxIdentity(folder, [emailId], this.client!.mailbox);
-            return this.client!.messageFlagsRemove(emailId, ['\\Seen'], { uid: true });
+            requireImapOk(await this.client!.messageFlagsRemove(emailId, ['\\Seen'], { uid: true }), 'STORE -FLAGS');
           });
         }
 
@@ -1857,14 +1877,14 @@ export class SimpleIMAPService {
         }
 
         if (isStarred) {
-          await runMailboxMutation(this, () => {
+          await runMailboxMutation(this, async () => {
             assertE2EMailboxIdentity(folder, [emailId], this.client!.mailbox);
-            return this.client!.messageFlagsAdd(emailId, ['\\Flagged'], { uid: true });
+            requireImapOk(await this.client!.messageFlagsAdd(emailId, ['\\Flagged'], { uid: true }), 'STORE +FLAGS');
           });
         } else {
-          await runMailboxMutation(this, () => {
+          await runMailboxMutation(this, async () => {
             assertE2EMailboxIdentity(folder, [emailId], this.client!.mailbox);
-            return this.client!.messageFlagsRemove(emailId, ['\\Flagged'], { uid: true });
+            requireImapOk(await this.client!.messageFlagsRemove(emailId, ['\\Flagged'], { uid: true }), 'STORE -FLAGS');
           });
         }
 
@@ -2100,10 +2120,10 @@ export class SimpleIMAPService {
           throw new Error(`Email ${emailId} not found in folder ${folder}`);
         }
 
-        await runMailboxMutation(this, () => {
+        await runMailboxMutation(this, async () => {
           assertE2EUidPlusCapability(this.client!.capabilities);
           assertE2EMailboxIdentity(folder, [emailId], this.client!.mailbox);
-          return this.client!.messageDelete(emailId, { uid: true });
+          await this.expungeUids(emailId);
         });
         // Remove from cache using folder-qualified key
         this.evictCacheEntry(`${folder}:${emailId}`);
@@ -2192,14 +2212,14 @@ export class SimpleIMAPService {
           throw new Error(`Email ${emailId} not found in folder ${folder}`);
         }
         if (set) {
-          await runMailboxMutation(this, () => {
+          await runMailboxMutation(this, async () => {
             assertE2EMailboxIdentity(folder, [emailId], this.client!.mailbox);
-            return this.client!.messageFlagsAdd(emailId, [flag], { uid: true });
+            requireImapOk(await this.client!.messageFlagsAdd(emailId, [flag], { uid: true }), 'STORE +FLAGS');
           });
         } else {
-          await runMailboxMutation(this, () => {
+          await runMailboxMutation(this, async () => {
             assertE2EMailboxIdentity(folder, [emailId], this.client!.mailbox);
-            return this.client!.messageFlagsRemove(emailId, [flag], { uid: true });
+            requireImapOk(await this.client!.messageFlagsRemove(emailId, [flag], { uid: true }), 'STORE -FLAGS');
           });
         }
         logger.info(`Flag ${flag} ${set ? 'set' : 'cleared'} on email ${emailId} in ${folder}`, 'IMAPService');
@@ -2793,8 +2813,11 @@ export class SimpleIMAPService {
             assertE2EUidPlusCapability(this.client!.capabilities);
             assertE2EMailboxIdentity(folder, validIds, this.client!.mailbox);
           },
-          perChunk: (uidSet) => this.client!.messageDelete(uidSet, { uid: true }),
-          perUid: async (id) => { await this.client!.messageFlagsAdd(id, ['\\Deleted'], { uid: true }); flaggedForExpunge.push(id); },
+          perChunk: (uidSet) => this.expungeUids(uidSet),
+          perUid: async (id) => {
+            requireImapOk(await this.client!.messageFlagsAdd(id, ['\\Deleted'], { uid: true }), 'STORE +FLAGS \\Deleted');
+            flaggedForExpunge.push(id);
+          },
           onSuccess: (id) => { this.evictCacheEntry(`${folder}:${id}`); results.success++; },
           onFailure: (id, msg) => { results.failed++; results.errors.push(`Failed to delete ${id} from ${folder}: ${msg}`); },
           opName: 'Bulk delete-from-folder',
@@ -2803,10 +2826,10 @@ export class SimpleIMAPService {
           // bulkDeleteEmails. Bounds the command line; O(N/chunk) round-trips.
           finalize: async () => {
             for (const uidSet of chunkUidsForWire(flaggedForExpunge)) {
-              await runMailboxMutation(this, () => {
+              await runMailboxMutation(this, async () => {
                 assertE2EUidPlusCapability(this.client!.capabilities);
                 assertE2EMailboxIdentity(folder, validIds, this.client!.mailbox);
-                return this.client!.messageDelete(uidSet, { uid: true });
+                requireImapOk(await this.client!.messageDelete(uidSet, { uid: true }), 'EXPUNGE');
               });
             }
           },
@@ -2858,10 +2881,10 @@ export class SimpleIMAPService {
       // messageDelete flags \Deleted + EXPUNGEs; chunk the UID set so a large
       // Trash can't blow the IMAP command-line length.
       for (const uidSet of chunkUidsForWire(uidStrings)) {
-        await runMailboxMutation(this, () => {
+        await runMailboxMutation(this, async () => {
           assertE2EUidPlusCapability(this.client!.capabilities);
           assertE2EMailboxIdentity(trash, uidStrings, this.client!.mailbox);
-          return this.client!.messageDelete(uidSet, { uid: true });
+          await this.expungeUids(uidSet);
         });
       }
       for (const uid of uids) this.evictCacheEntry(`${trash}:${uid}`);
