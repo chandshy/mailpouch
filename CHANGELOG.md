@@ -15,6 +15,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `test/improvement-loop.test.ts` no longer corrupts the checkout when run from the pre-push hook: its temp-repo `git` calls and runner spawns now drop inherited `GIT_*` variables, which previously redirected `git init`/`config`/`commit` into the real repository (setting `core.bare=true`, a test author identity, and a stray commit).
 
+### Security
+
+- Local stdio agents are gated even if the client skips `notifications/initialized` or registration fails (previously there was no caller and the grant gate was skipped). A pending local grant that expires is re-registered on the next call instead of leaving the agent blocked with no approval prompt.
+- A late Approve/Deny click in the on-screen dialog no longer overrides a decision already made in the Settings UI (it re-activated denied agents or dropped the restrictions of a customized approval).
+- Deleting the agent-grants file while mailpouch runs no longer resurrects every grant on the next write; an unreadable grants or service-account file now refuses writes instead of being overwritten with stale state.
+- Resources and prompts honor the global permission preset for trusted local callers (`MAILPOUCH_TRUST_LOCAL` / `gateLocalAgents:false`).
+
+### Fixed
+
+- The HTTP daemon no longer shuts down on the first request when bound to an IPv6 host (`::`, `::1`); issuer and listen URLs bracket IPv6 literals.
+
 ## [4.0.3] — 2026-08-31
 
 ### Fixed
