@@ -734,6 +734,17 @@ describe("SimpleIMAPService.setFlag", () => {
     await expect(svc.setFlag("1", "\\Answered")).rejects.toThrow(/IMAP connection is unavailable.*Proton Bridge/is);
   });
 
+  it("evicts the cached message so flag-derived fields are not served stale", async () => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc);
+    seedUids(client, "INBOX", [68]);
+    (svc as any).setCacheEntry("68", makeEmail("68", "INBOX"));
+
+    await svc.setFlag("68", "\\Answered", true);
+
+    expect((svc as any).emailCache.has("INBOX:68")).toBe(false);
+  });
+
   it("adds flag using cached folder (avoids scanning all folders)", async () => {
     const svc = new SimpleIMAPService();
     const client = connectSvc(svc);

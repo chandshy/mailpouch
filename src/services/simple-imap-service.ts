@@ -2247,6 +2247,9 @@ export class SimpleIMAPService {
             requireImapOk(await this.client!.messageFlagsRemove(emailId, [flag], { uid: true }), 'STORE -FLAGS');
           });
         }
+        // Derived fields (isAnswered/isForwarded/…) come from the flag set, so
+        // drop the cached copy rather than serve stale state for the TTL.
+        this.evictCacheEntry(`${folder}:${emailId}`);
         logger.info(`Flag ${flag} ${set ? 'set' : 'cleared'} on email ${emailId} in ${folder}`, 'IMAPService');
         return true;
       } finally {
