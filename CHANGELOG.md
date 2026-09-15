@@ -15,6 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `test/improvement-loop.test.ts` no longer corrupts the checkout when run from the pre-push hook: its temp-repo `git` calls and runner spawns now drop inherited `GIT_*` variables, which previously redirected `git init`/`config`/`commit` into the real repository (setting `core.bare=true`, a test author identity, and a stray commit).
 
+### Fixed
+
+- A scheduled email cancelled while an earlier email in the same tick was still sending was sent anyway, even though `cancel_scheduled_email` reported success.
+- `schedule_email` and `cancel_scheduled_email` now fail when the queue can't be written, instead of returning success for a schedule a restart would lose or a cancel a restart would undo.
+- History pruning no longer drops an in-flight (`sending`) record older than 30 days, which silently discarded its retry.
+
 ## [4.0.3] — 2026-08-31
 
 ### Fixed
