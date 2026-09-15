@@ -429,24 +429,11 @@ export async function loadRemoteSecrets(): Promise<{ remoteBearerToken: string; 
   }
 }
 
-/** Save remoteBearerToken + remoteOauthAdminPassword to the keychain. */
-export async function saveRemoteSecrets(remoteBearerToken: string, remoteOauthAdminPassword: string): Promise<boolean> {
-  try {
-    const keyring = await getKeyring();
-    if (!keyring) return false;
-    if (remoteBearerToken) new keyring.Entry(SERVICE_NAME, KEY_REMOTE_BEARER).setPassword(remoteBearerToken);
-    if (remoteOauthAdminPassword) new keyring.Entry(SERVICE_NAME, KEY_REMOTE_OAUTH_ADMIN).setPassword(remoteOauthAdminPassword);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 /**
  * Delete the remote-server secrets kept in the OS keychain.
  *
  * A configuration reset must remove these alongside mailbox and integration
- * credentials.  Keep this separate from saveRemoteSecrets(): an empty value
+ * credentials.  An empty value
  * during an ordinary settings save means "leave the existing secret alone",
  * whereas reset is an explicit request to erase it.
  */

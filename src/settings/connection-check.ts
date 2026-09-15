@@ -49,7 +49,7 @@ export function isAllowedProbeHost(host: unknown): host is string {
 
 /** TCP-only reachability — the port answered a connect(). Refuses any host that
  *  is not localhost / private-LAN (SSRF guard) before opening the socket. */
-export function tcpReachable(host: string, port: number, timeoutMs = 5000): Promise<boolean> {
+function tcpReachable(host: string, port: number, timeoutMs = 5000): Promise<boolean> {
   return new Promise((resolve) => {
     if (!isAllowedProbeHost(host)) { resolve(false); return; }
     const safeHost = host;

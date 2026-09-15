@@ -14,6 +14,7 @@ export { chunkUidsForWire, expandImapSequence } from './imap-wire-utils.js';
 import nodemailer, { type SendMailOptions } from 'nodemailer';
 import { EmailMessage, EmailFolder, SearchEmailOptions, SaveDraftOptions } from '../types/index.js';
 import { logger } from '../utils/logger.js';
+import { scrubEmail } from '../security/memory.js';
 import {
   validateImapPath,
   validateAttachmentLimits,
@@ -28,7 +29,7 @@ import {
 } from '../config/e2e-mailbox-identity.js';
 import {
   MailboxMutationDeadlineError,
-  runMailboxMutation,
+  runAccountMailMutation as runMailboxMutation,
 } from './mailbox-mutation-deadline.js';
 
 /** imapflow's append() return value includes uid at runtime but it is omitted from the type declaration. */
@@ -3355,20 +3356,7 @@ export class SimpleIMAPService {
   wipeCache(): void {
     tracer.spanSync('imap.wipeCache', {}, () => {
     // Overwrite email bodies/subjects before clearing
-    for (const [, entry] of this.emailCache) {
-      const email = entry.email;
-      if (email.body) email.body = "";
-      if (email.subject) email.subject = "";
-      if (email.from) email.from = "";
-      if (email.attachments) {
-        for (const att of email.attachments) {
-          if (att.content && Buffer.isBuffer(att.content)) {
-            (att.content as Buffer).fill(0);
-          }
-          att.content = undefined;
-        }
-      }
-    }
+    for (const [, entry] of this.emailCache) scrubEmail(entry.email);
     this.clearCacheAll();
     this.clearFolderCache();
 

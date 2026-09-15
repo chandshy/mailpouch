@@ -19,11 +19,8 @@ import { loadConfig, defaultConfig } from "../config/loader.js";
 import type { PermissionPreset } from "../config/schema.js";
 import { isValidChallengeId, sanitizeText, isValidEscalationTarget } from "../settings/security.js";
 import type { ProtonMailConfig } from "../types/index.js";
-import { logger } from "../utils/logger.js";
 import { requireNonEmptyString } from "../utils/helpers.js";
 import type { ToolDef, ToolResult } from "./types.js";
-
-void logger;
 
 export interface EscalationContext {
   args: Record<string, unknown>;
