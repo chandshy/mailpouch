@@ -550,6 +550,23 @@ describe("SimpleIMAPService private searchSingleFolder", () => {
     expect(results).toHaveLength(0);
   });
 
+  it("keeps the NEWEST matches when more than `limit` match, newest first", async () => {
+    const svc = new SimpleIMAPService();
+    (svc as any).isConnected = true;
+    const mockFetch = vi.fn().mockReturnValue(asyncYield());
+    const mockClient = {
+      getMailboxLock: vi.fn().mockResolvedValue(makeLock()),
+      search: vi.fn().mockResolvedValue([1, 2, 3, 4, 5]),
+      fetch: mockFetch,
+    };
+    (svc as any).client = mockClient;
+
+    await (svc as any).searchSingleFolder("INBOX", {}, 2);
+
+    expect(mockFetch.mock.calls.map((c: unknown[]) => c[0])).toEqual(["5", "4"]);
+    expect(mockClient.search.mock.calls[0][1]).toMatchObject({ returnOptions: [{ partial: "-1:-2" }] });
+  });
+
   it("returns [] immediately when client is null (line 805)", async () => {
     const svc = new SimpleIMAPService();
     (svc as any).client = null;

@@ -1274,19 +1274,19 @@ export class SimpleIMAPService {
     try {
       const searchCriteria = buildSearchCriteria(options);
 
-      // Request ESEARCH PARTIAL so the server returns only the first `limit` UIDs
-      // rather than the full result set. Falls back transparently to a plain number[]
-      // on servers that lack ESEARCH capability (e.g. older Proton Bridge builds),
-      // in which case we slice client-side as before.
+      // Request ESEARCH PARTIAL for the LAST `limit` matches (RFC 9394 negative
+      // range = highest UIDs = newest mail) rather than the full result set. Falls
+      // back transparently to a plain number[] on servers that lack ESEARCH
+      // capability (e.g. older Proton Bridge builds), sliced client-side.
       const searchResult = await this.client.search(searchCriteria, {
         uid: true,
-        returnOptions: [{ partial: `1:${limit}` }],
+        returnOptions: [{ partial: `-1:-${limit}` }],
       });
       const results: EmailMessage[] = [];
 
       let limitedUids: number[];
       if (Array.isArray(searchResult)) {
-        limitedUids = (searchResult as number[]).slice(0, limit);
+        limitedUids = (searchResult as number[]).slice(-limit);
       } else if (searchResult && typeof searchResult === 'object' && 'partial' in searchResult) {
         const { messages } = (searchResult as { partial: { messages?: string } }).partial;
         limitedUids = messages ? expandImapSequence(messages) : [];
@@ -1294,6 +1294,8 @@ export class SimpleIMAPService {
         limitedUids = [];
       }
 
+      // Newest first, matching get_emails.
+      limitedUids.sort((a, b) => b - a);
       for (const uid of limitedUids) {
         const uidStr = uid.toString();
 
