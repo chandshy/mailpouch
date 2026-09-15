@@ -8,7 +8,7 @@
  * to reduce the risk of credential exposure.
  */
 
-import { readFileSync, writeFileSync, existsSync, renameSync, statSync, openSync, closeSync, unlinkSync, chmodSync, realpathSync, fsyncSync, mkdirSync, rmdirSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, statSync, openSync, closeSync, unlinkSync, chmodSync, realpathSync, fsyncSync, mkdirSync, rmdirSync } from "fs";
 import { homedir } from "os";
 import { join, resolve, normalize, dirname, basename, relative, isAbsolute, sep } from "path";
 import { randomBytes } from "crypto";
@@ -17,6 +17,7 @@ import {
   ALL_TOOLS,
   TOOL_CATEGORIES,
   canonicalToolName,
+  parseToolTier,
   CONFIG_VERSION,
   PERMISSION_PRESETS,
   DEFAULT_RESPONSE_LIMITS,
@@ -38,6 +39,7 @@ import {
 import { CredentialEncryption } from "../crypto/credential-encryption.js";
 import { tracer } from "../utils/tracer.js";
 import { logger } from "../utils/logger.js";
+import { writeOwnerOnlyJsonAtomically } from "../utils/atomic-json.js";
 
 /**
  * PERM-015: explicit set of bulk (mass-acting) action tools that get the
@@ -475,6 +477,10 @@ export function loadConfig(): ServerConfig | null {
         ? parsed.gateLocalAgents
         : undefined,
       webhooks: Array.isArray(parsed.webhooks) ? parsed.webhooks : undefined,
+      surfaceSecurityNotifications: typeof parsed.surfaceSecurityNotifications === "boolean"
+        ? parsed.surfaceSecurityNotifications
+        : undefined,
+      toolTier: parsed.toolTier === undefined ? undefined : parseToolTier(parsed.toolTier),
     };
     tags.found = true;
     return result;
@@ -777,19 +783,30 @@ function reassertOwnerOnly(path: string): void {
   } catch { /* file vanished or chmod unsupported — best effort */ }
 }
 
+/**
+ * Detached base for read-modify-write saves. A missing file starts from
+ * defaults, but an existing file that can't be read or parsed throws —
+ * loadConfig() reports that case as null too, and saving defaultConfig() over
+ * it would erase every account, encrypted credential and webhook in the file.
+ */
+export function loadConfigForWrite(): ServerConfig {
+  invalidateConfigCache();
+  const loaded = loadConfig();
+  if (loaded) return structuredClone(loaded);
+  const path = getConfigPath();
+  if (existsSync(path)) {
+    throw new Error(`Config file ${path} exists but could not be read or parsed; refusing to overwrite it. Fix or move the file, then retry.`);
+  }
+  return defaultConfig();
+}
+
 export function saveConfig(config: ServerConfig): void {
   tracer.spanSync('config.save', {}, () => {
   const dest    = getConfigPath();
   withConfigLock(dest, () => {
-  const payload = JSON.stringify(config, null, 2);
-  // Atomic write: write to a temp file then rename into place.
-  // rename(2) is atomic on POSIX only when both sides live on the same
-  // filesystem. On Linux installs where /tmp is tmpfs and $HOME is on
-  // separate storage, using os.tmpdir() produces EXDEV. Put the tmp next
-  // to the destination so rename stays atomic regardless of mount layout.
-  const tmp = `${dest}.${randomBytes(8).toString("hex")}.tmp`;
-  writeFileSync(tmp, payload, { encoding: "utf-8", mode: 0o600 });
-  renameSync(tmp, dest);
+  // Same-directory tmp + rename (atomic, no EXDEV across mounts); the helper
+  // also removes the credential-bearing tmp if the write or rename fails.
+  writeOwnerOnlyJsonAtomically(dest, config);
   // CRED-007: the `mode` arg above is masked by umask at creation, so the
   // file the config lands in may be wider than 0o600. Re-assert owner-only
   // on the destination — the config file carries plaintext credentials in

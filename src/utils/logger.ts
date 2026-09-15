@@ -22,7 +22,7 @@ function chmodSyncSafe(p: string, m: number): void {
  * want on disk"; the second is "email body-like fields" that might carry
  * user content we don't need in a debug log.
  */
-const SENSITIVE_KEYS = /(password|token|secret|apikey|api_key|verifier|credential|authorization|cookie|oauth|bridgecertpath|attachments|content|^body$)/i;
+const SENSITIVE_KEYS = /(password|passphrase|^pass$|^auth$|token|secret|apikey|api_key|verifier|credential|authorization|cookie|oauth|bridgecertpath|attachments|content|^body$)/i;
 
 export function getLogFilePath(): string {
   const envPath = process.env.MAILPOUCH_LOG_FILE;
@@ -66,6 +66,13 @@ export class Logger {
       return data.map((item) => this.sanitizeData(item, tracker, depth + 1));
     }
     const result: Record<string, unknown> = {};
+    // Error name/message/stack are non-enumerable; without this every logged
+    // error was stored as its incidental enumerable props (often just `{}`).
+    if (data instanceof Error) {
+      result.name = data.name;
+      result.message = this.sanitizeData(data.message, tracker, depth + 1);
+      if (data.stack) result.stack = data.stack.split("\n").slice(1, 6).map(l => l.trim()).join(" | ").replace(/[\x00-\x1f\x7f]/g, " ");
+    }
     for (const [key, value] of Object.entries(data as Record<string, unknown>)) {
       result[key] = SENSITIVE_KEYS.test(key) ? "[redacted]" : this.sanitizeData(value, tracker, depth + 1);
     }
@@ -88,24 +95,25 @@ export class Logger {
 
   debug(message: string, context: string = "System", data?: unknown): void {
     if (this.debugMode) {
-      this.log("debug", message, context, data);
-      console.error("%s", `${this.ts()} [DEBUG] [${context}] ${message}`, data || "");
+      // stderr (MCP client logs, journald) gets the same redacted copy as the file.
+      const safe = this.log("debug", message, context, data);
+      console.error("%s", `${this.ts()} [DEBUG] [${context}] ${message}`, safe || "");
     }
   }
 
   info(message: string, context: string = "System", data?: unknown): void {
-    this.log("info", message, context, data);
-    console.error("%s", `${this.ts()} [INFO] [${context}] ${message}`, data || "");
+    const safe = this.log("info", message, context, data);
+    console.error("%s", `${this.ts()} [INFO] [${context}] ${message}`, safe || "");
   }
 
   warn(message: string, context: string = "System", data?: unknown): void {
-    this.log("warn", message, context, data);
-    console.error("%s", `${this.ts()} [WARN] [${context}] ${message}`, data || "");
+    const safe = this.log("warn", message, context, data);
+    console.error("%s", `${this.ts()} [WARN] [${context}] ${message}`, safe || "");
   }
 
   error(message: string, context: string = "System", error?: unknown): void {
-    this.log("error", message, context, error);
-    console.error("%s", `${this.ts()} [ERROR] [${context}] ${message}`, error || "");
+    const safe = this.log("error", message, context, error);
+    console.error("%s", `${this.ts()} [ERROR] [${context}] ${message}`, safe || "");
   }
 
   private log(
@@ -113,7 +121,7 @@ export class Logger {
     message: string,
     context: string,
     data?: unknown
-  ): void {
+  ): unknown {
     const entry: LogEntry = {
       timestamp: new Date(),
       level,
@@ -149,6 +157,7 @@ export class Logger {
         /* best-effort — never crash the server over a log write */
       });
     }
+    return entry.data;
   }
 
   getLogs(

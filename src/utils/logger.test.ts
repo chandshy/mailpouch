@@ -47,8 +47,27 @@ describe('Logger', () => {
     expect(consoleErrorSpy).toHaveBeenCalledWith(
       '%s',
       expect.stringContaining('[ERROR]'),
-      error
+      expect.objectContaining({ name: 'Error', message: 'Test error' })
     );
+  });
+
+  it('prints the redacted copy to stderr, not the raw data', () => {
+    const logger = new Logger();
+    logger.info('connect', 'Test', { user: 'u', password: 'hunter2', auth: { user: 'u', pass: 'hunter2' } });
+    const printed = consoleErrorSpy.mock.calls[0][2];
+    expect(JSON.stringify(printed)).not.toContain('hunter2');
+  });
+
+  it('redacts a nodemailer/imapflow-style { pass } field in stored entries', () => {
+    const logger = new Logger();
+    logger.info('connect', 'Test', { creds: { user: 'u', pass: 'hunter2' } });
+    expect(JSON.stringify(logger.getLogs()[0].data)).not.toContain('hunter2');
+  });
+
+  it('keeps an Error message in the stored entry', () => {
+    const logger = new Logger();
+    logger.error('failed', 'Test', Object.assign(new Error('boom'), { code: 'EAUTH' }));
+    expect(logger.getLogs()[0].data).toMatchObject({ name: 'Error', message: 'boom', code: 'EAUTH' });
   });
 
   it('should log debug message when debug mode is enabled', () => {

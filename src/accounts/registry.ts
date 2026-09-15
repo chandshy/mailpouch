@@ -14,7 +14,7 @@ import type { ServerConfig } from "../config/schema.js";
 import {
   defaultConfig,
   getConfigPath,
-  invalidateConfigCache,
+  loadConfigForWrite,
   loadConfig,
   loadCredentialsFromConfigFile,
   saveConfig,
@@ -90,9 +90,7 @@ export function readRegistry(): AccountRegistry {
  * uncommitted registry state in the shared read cache.
  */
 function loadFreshConfigForRegistryWrite(): ServerConfig {
-  invalidateConfigCache();
-  const loaded = loadConfig();
-  return loaded ? structuredClone(loaded) : defaultConfig();
+  return loadConfigForWrite();
 }
 
 /** Resolve a mutation base from the fresh detached config snapshot. */

@@ -23,7 +23,7 @@ import {
   buildPermissions,
   configExists,
   getConfigPath,
-  invalidateConfigCache,
+  loadConfigForWrite,
   withConfigWriteLock,
 } from "../config/loader.js";
 import { checkConnections, type ProtocolCheck } from "./connection-check.js";
@@ -165,8 +165,7 @@ function loadOrDefault(): ServerConfig {
  */
 function savePresetFromFreshConfig(preset: PermissionPreset): ServerConfig {
   return withConfigWriteLock(() => {
-    invalidateConfigCache();
-    const current = loadConfig() ?? defaultConfig();
+    const current = loadConfigForWrite();
     const next: ServerConfig = {
       ...current,
       connection: { ...current.connection },
