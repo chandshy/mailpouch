@@ -119,7 +119,9 @@ export class ServiceAccountStore {
         if (a && typeof a.clientId === "string") this.accounts.set(a.clientId, a);
       }
     } catch (err) {
+      // Same contract as AgentGrantStore: never persist over an unreadable file.
       logger.warn(`ServiceAccountStore: reloadMerge failed for ${this.path}`, "ServiceAccountStore", err);
+      throw err;
     }
   }
 

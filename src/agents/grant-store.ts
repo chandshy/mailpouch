@@ -145,7 +145,12 @@ export class AgentGrantStore {
    * forward onto the disk record rather than losing the unflushed increments.
    */
   private reloadMerge(): void {
-    if (!existsSync(this.path)) return;
+    // Missing file = no grants (deleted by the operator or a reset). Keeping the
+    // in-memory map here would let the next persist() resurrect every grant.
+    if (!existsSync(this.path)) {
+      this.grants.clear();
+      return;
+    }
     try {
       const parsed = JSON.parse(readFileSync(this.path, "utf-8")) as Partial<StoreFile>;
       const list = Array.isArray(parsed.grants) ? parsed.grants : [];
@@ -168,7 +173,10 @@ export class AgentGrantStore {
         if (!seen.has(clientId)) this.grants.delete(clientId);
       }
     } catch (err) {
+      // Refuse the mutation: persisting the stale map would overwrite the
+      // unreadable file and undo whatever a peer last wrote (e.g. a revoke).
       logger.warn(`AgentGrantStore: reloadMerge failed for ${this.path}`, "AgentGrantStore", err);
+      throw err;
     }
   }
 
