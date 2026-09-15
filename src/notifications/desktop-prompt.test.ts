@@ -55,6 +55,19 @@ describe("DesktopPrompt", () => {
     expect(calls[0].args.join(" ")).toContain("MessageBox");
   });
 
+  it("windows doubles smart-quote delimiters from a client-chosen name", async () => {
+    const { runner, calls } = stub(1);
+    const p = new DesktopPrompt({ platform: "win32", runner });
+    await p.prompt({ title: "T", message: 'Agent "x\u2019);Start-Process calc;(\u2018"' });
+    expect(calls[0].args.join(" ")).toContain("x\u2019\u2019);Start-Process calc;(\u2018\u2018");
+  });
+
+  it("linux zenity disables Pango markup for the client-chosen message", async () => {
+    const { runner, calls } = stub(0);
+    await new DesktopPrompt({ platform: "linux", runner }).prompt({ title: "T", message: "AT&T <x>" });
+    expect(calls[0].args).toContain("--no-markup");
+  });
+
   it("unsupported platform → unavailable", async () => {
     const { runner } = stub(0);
     const p = new DesktopPrompt({ platform: "freebsd" as NodeJS.Platform, runner });
