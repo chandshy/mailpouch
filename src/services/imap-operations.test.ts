@@ -347,7 +347,7 @@ function makeClient(overrides: Record<string, unknown> = {}): Record<string, unk
 
   const client: Record<string, unknown> = {
     [STATE_KEY]: state,
-    capabilities: new Map([["UIDPLUS", true]]),
+    capabilities: new Map<string, boolean>([["UIDPLUS", true], ["MOVE", true]]),
     getMailboxLock,
     messageFlagsAdd,
     messageFlagsRemove,
@@ -641,6 +641,24 @@ describe("SimpleIMAPService.deleteFromFolder", () => {
 
     await expect(svc.deleteFromFolder("52", "INBOX")).rejects.toThrow("EXPUNGED");
   });
+
+  // imapflow resolves STORE/EXPUNGE to false on a server NO instead of throwing.
+  it("throws when the server rejects the \\Deleted STORE (no silent unlabel success)", async () => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc, { messageFlagsAdd: vi.fn().mockResolvedValue(false) });
+    seedUids(client, "Labels/Work", [53]);
+
+    await expect(svc.deleteFromFolder("53", "Labels/Work")).rejects.toThrow(/rejected by the server/);
+    expect(client.messageDelete).not.toHaveBeenCalled();
+  });
+
+  it("throws when the server rejects the EXPUNGE", async () => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc, { messageDelete: vi.fn().mockResolvedValue(false) });
+    seedUids(client, "Labels/Work", [54]);
+
+    await expect(svc.deleteFromFolder("54", "Labels/Work")).rejects.toThrow(/EXPUNGE was rejected/);
+  });
 });
 
 // ─── deleteEmail ──────────────────────────────────────────────────────────────
@@ -701,10 +719,30 @@ describe("SimpleIMAPService.deleteEmail", () => {
 // ─── setFlag ──────────────────────────────────────────────────────────────────
 
 describe("SimpleIMAPService.setFlag", () => {
+  it("throws when imapflow reports the STORE as rejected", async () => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc, { messageFlagsAdd: vi.fn().mockResolvedValue(false) });
+    seedUids(client, "INBOX", [69]);
+    (svc as any).setCacheEntry("69", makeEmail("69", "INBOX"));
+
+    await expect(svc.setFlag("69", "$Forwarded", true)).rejects.toThrow(/STORE \+FLAGS was rejected/);
+  });
+
   it("throws actionable guidance when not connected", async () => {
     const svc = new SimpleIMAPService();
     vi.spyOn(svc as any, "validateEmailId").mockImplementation(() => {});
     await expect(svc.setFlag("1", "\\Answered")).rejects.toThrow(/IMAP connection is unavailable.*Proton Bridge/is);
+  });
+
+  it("evicts the cached message so flag-derived fields are not served stale", async () => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc);
+    seedUids(client, "INBOX", [68]);
+    (svc as any).setCacheEntry("68", makeEmail("68", "INBOX"));
+
+    await svc.setFlag("68", "\\Answered", true);
+
+    expect((svc as any).emailCache.has("INBOX:68")).toBe(false);
   });
 
   it("adds flag using cached folder (avoids scanning all folders)", async () => {
@@ -1393,13 +1431,11 @@ describe("SimpleIMAPService.getEmailById (early-exit)", () => {
     expect(result!.id).toBe("200");
   });
 
-  it("returns null when not connected and cache is empty", async () => {
+  it("throws when not connected and cache is empty (IMAP-012: not 'not found')", async () => {
     const svc = new SimpleIMAPService();
-    // isConnected=false, client=null by default
+    vi.spyOn(svc as any, "reconnect").mockRejectedValue(new Error("ECONNREFUSED"));
 
-    const result = await svc.getEmailById("404");
-
-    expect(result).toBeNull();
+    await expect(svc.getEmailById("404")).rejects.toThrow(/IMAP connection unavailable/);
   });
 });
 
@@ -1880,10 +1916,10 @@ describe("SimpleIMAPService getCacheEntry TTL (lines 216-217)", () => {
     (svc as any).emailCache.set("INBOX:77", { email, cachedAt: Date.now() - 10 * 60 * 1000 });
     (svc as any).cacheByteEstimate = 100;
 
-    // getEmailById calls findCacheEntryByUid internally; with an expired entry and
-    // isConnected=false it should return null (cache miss after TTL eviction)
-    const result = await svc.getEmailById("77");
-    expect(result).toBeNull();
+    // getEmailById calls findCacheEntryByUid internally; an expired entry is a
+    // cache miss, which (disconnected) now surfaces the connection error.
+    vi.spyOn(svc as any, "reconnect").mockRejectedValue(new Error("ECONNREFUSED"));
+    await expect(svc.getEmailById("77")).rejects.toThrow(/IMAP connection unavailable/);
     // Cache entry should have been evicted
     expect((svc as any).emailCache.has("INBOX:77")).toBe(false);
   });
@@ -2164,6 +2200,19 @@ describe("UID existence pre-flight: missing UIDs count as failed, not silent suc
     expect(results.errors).toHaveLength(2); // TEST-021
     // messageMove must NOT have been called — no UIDs to move
     expect(client.messageMove).not.toHaveBeenCalled();
+  });
+
+  it("bulkMarkRead counts server-rejected STOREs as failed, not success", async () => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc, { messageFlagsAdd: vi.fn().mockResolvedValue(false) });
+    seedUids(client, "Folders/BulkTestMove", [1, 2]);
+
+    const results = await svc.bulkMarkRead(["1", "2"], true, "Folders/BulkTestMove");
+
+    expect(results.success).toBe(0);
+    expect(results.failed).toBe(2);
+    // Chunk rejected, then each per-UID fallback rejected.
+    expect(client.messageFlagsAdd).toHaveBeenCalledTimes(3);
   });
 
   it("bulkMarkRead counts missing UIDs as failed (Bug C)", async () => {
@@ -2991,11 +3040,22 @@ describe("SimpleIMAPService.emptyTrash (Phase 3 — gated permanent delete)", ()
         return { release: () => { locked = null; } };
       }),
       search: vi.fn().mockResolvedValue(uids),
+      messageFlagsAdd: vi.fn().mockResolvedValue(true),
       messageDelete: vi.fn().mockResolvedValue(undefined),
       get _locked() { return locked; },
       ...over,
     };
   }
+
+  it("rejects instead of reporting deletions when the server refuses the EXPUNGE", async () => {
+    const svc = new SimpleIMAPService();
+    vi.spyOn(svc as any, "resolveTrashPath").mockResolvedValue("Trash");
+    vi.spyOn(svc as any, "checkAndUpdateUidValidity").mockImplementation(() => {});
+    (svc as any).isConnected = true;
+    (svc as any).client = trashClient([11, 12], { messageDelete: vi.fn().mockResolvedValue(false) });
+
+    await expect(svc.emptyTrash()).rejects.toThrow(/EXPUNGE was rejected/);
+  });
 
   it("EXPUNGEs every message in the resolved Trash mailbox and only Trash", async () => {
     const svc = new SimpleIMAPService();
@@ -3110,6 +3170,22 @@ describe("SimpleIMAPService live Bridge E2E mailbox identity fence", () => {
     await expect(runLive(proof("17", ["42"]), () => operation(svc)))
       .rejects.toThrow(/UIDPLUS/i);
     expect(client[wire] as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["move", (svc: SimpleIMAPService) => svc.moveEmail("42", target, source)],
+    ["bulk move", (svc: SimpleIMAPService) => svc.bulkMoveEmails(["42"], target, source)],
+    ["delete to Trash", (svc: SimpleIMAPService) => svc.deleteEmail("42", source)],
+  ])("refuses %s when MOVE is not advertised (imapflow would COPY + unconditional EXPUNGE)", async (_name, operation) => {
+    const svc = new SimpleIMAPService();
+    const client = connectSvc(svc, { capabilities: new Map([["UIDPLUS", true]]) });
+    seedUids(client, source, [42]);
+    vi.spyOn(svc as any, "resolveTrashPath").mockResolvedValue("Trash");
+
+    const outcome = await operation(svc).then((r) => r, (e: Error) => e);
+    if (!(outcome instanceof Error)) expect(outcome).toMatchObject({ success: 0 });
+    expect(client.messageMove).not.toHaveBeenCalled();
+    expect(client.messageDelete).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -3232,7 +3308,8 @@ describe("SimpleIMAPService live Bridge E2E mailbox identity fence", () => {
     client.messageDelete = vi.fn().mockRejectedValue(new Error("simulated batch delete failure"));
     client.messageFlagsAdd = vi.fn(async (...args: unknown[]) => {
       await originalFlagsAdd(...args);
-      setIdentity(18n);
+      // Drift on the per-UID fallback STORE, not the fast-path chunk STORE.
+      if (!String(args[0]).includes(",")) setIdentity(18n);
     });
 
     await expect(runLive(
@@ -3243,6 +3320,7 @@ describe("SimpleIMAPService live Bridge E2E mailbox identity fence", () => {
     // One failed fast-path DELETE only. The final UID EXPUNGE is never sent
     // after the first fallback STORE observes a different mailbox identity.
     expect(client.messageDelete).toHaveBeenCalledTimes(1);
-    expect(client.messageFlagsAdd).toHaveBeenCalledTimes(1);
+    // Fast-path chunk STORE \Deleted + the single drifting fallback STORE.
+    expect(client.messageFlagsAdd).toHaveBeenCalledTimes(2);
   });
 });

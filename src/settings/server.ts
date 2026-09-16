@@ -1844,23 +1844,21 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
           return;
         }
         try {
-          if (bridgeExe) {
-            // Async 'error' would crash the server without a listener, even
-            // after .unref() — existsSync above doesn't guarantee spawn.
-            const bridgeProc = spawn(bridgeExe, [], {
-              stdio: "ignore", detached: true, shell: false,
-            });
-            bridgeProc.on("error", (err) => {
-              // Log at warn level so operators can diagnose launch failures
-              // from `tail ~/.mailpouch.log`. The tcp poll below will also
-              // surface this to the HTTP caller as `reachable: false`, but
-              // the specific error (ENOENT vs EACCES vs EPERM) only shows
-              // up here.
-              const msg = err instanceof Error ? err.message : String(err);
-              logger.warn(`Failed to launch Proton Bridge (${bridgeExe}): ${msg}`, "SettingsServer");
-            });
-            bridgeProc.unref();
-          }
+          // Async 'error' would crash the server without a listener, even
+          // after .unref() — existsSync above doesn't guarantee spawn.
+          const bridgeProc = spawn(bridgeExe, [], {
+            stdio: "ignore", detached: true, shell: false,
+          });
+          bridgeProc.on("error", (err) => {
+            // Log at warn level so operators can diagnose launch failures
+            // from `tail ~/.mailpouch.log`. The tcp poll below will also
+            // surface this to the HTTP caller as `reachable: false`, but
+            // the specific error (ENOENT vs EACCES vs EPERM) only shows
+            // up here.
+            const msg = err instanceof Error ? err.message : String(err);
+            logger.warn(`Failed to launch Proton Bridge (${bridgeExe}): ${msg}`, "SettingsServer");
+          });
+          bridgeProc.unref();
         } catch (e: unknown) {
           logger.error("Failed to launch Proton Bridge", "SettingsServer", e);
           json(res, 200, { launched: false, alreadyRunning: false, reachable: false,
@@ -2332,23 +2330,6 @@ export function createSettingsServer(secOpts: ServerSecurityOptions): http.Serve
         if (method === "GET" && path === "/api/agents/audit") {
           const limit = Math.min(Math.max(1, parseInt(url.searchParams.get("limit") ?? "200", 10)), 1000);
           json(res, 200, { rows: audit.readTail(limit) });
-          return;
-        }
-
-        // GET /api/agents/service-account — list service accounts (no secrets).
-        if (method === "GET" && path === "/api/agents/service-account") {
-          const sa = getServiceAccountStore();
-          if (!sa) { json(res, 503, { error: "Service accounts not initialized." }); return; }
-          json(res, 200, {
-            accounts: sa.list().map(a => ({
-              clientId: a.clientId,
-              clientName: a.clientName,
-              preset: a.preset,
-              conditions: a.conditions,
-              createdAt: a.createdAt,
-              status: grants.get(a.clientId)?.status ?? "active",
-            })),
-          });
           return;
         }
 
