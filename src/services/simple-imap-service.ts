@@ -17,6 +17,7 @@ import { logger } from '../utils/logger.js';
 import {
   validateImapPath,
   validateAttachmentLimits,
+  toMailerAttachments,
 } from '../utils/helpers.js';
 import { buildBridgeTlsConfig } from './bridge-tls.js';
 import { classifyError, ConnectionStateError } from '../utils/error-classify.js';
@@ -1690,29 +1691,8 @@ export class SimpleIMAPService {
         const limitErr = validateAttachmentLimits(options.attachments);
         if (limitErr) return { success: false, error: limitErr };
 
-        // Mirror the sanitization performed in smtp-service.ts sendEmail() to prevent
-        // MIME header injection via crafted attachment filenames or content-type values.
-        // A filename like "a.pdf\r\nContent-Type: text/html" or a contentType like
-        // "text/html\r\nX-Injected: yes" could break the MIME structure of the draft.
-        mailOptions.attachments = options.attachments.map(att => {
-          // Strip CRLF/NUL from filename to prevent Content-Disposition header injection.
-          const safeFilename = att.filename
-            ? att.filename.replace(/[\r\n\x00]/g, "").slice(0, 255) || "attachment"
-            : undefined;
-
-          // Strip CRLF/NUL from contentType and validate it matches type/subtype format.
-          // An unsanitized contentType is placed directly in the Content-Type MIME header.
-          const rawCt = att.contentType ? att.contentType.replace(/[\r\n\x00]/g, "").trim() : undefined;
-          const safeContentType =
-            rawCt && /^[\w!#$&\-^]+\/[\w!#$&\-^+.]+$/.test(rawCt) ? rawCt : undefined;
-
-          return {
-            filename:    safeFilename,
-            content:     att.content,
-            contentType: safeContentType,
-            cid:         att.contentId,
-          };
-        });
+        // Shared with SMTP sendEmail: header scrubbing + base64 declaration.
+        mailOptions.attachments = toMailerAttachments(options.attachments);
       }
 
       const info = await transport.sendMail(mailOptions);

@@ -8,7 +8,7 @@ import nodemailer from "nodemailer";
 import { ProtonMailConfig, SendEmailOptions } from "../types/index.js";
 import { logger } from "../utils/logger.js";
 import { buildBridgeTlsConfig } from "./bridge-tls.js";
-import { parseEmails, parseEmailsDetailed, isValidEmail, sanitizeForLog, validateAttachmentLimits } from "../utils/helpers.js";
+import { parseEmails, parseEmailsDetailed, isValidEmail, sanitizeForLog, validateAttachmentLimits, toMailerAttachments } from "../utils/helpers.js";
 import { tracer } from "../utils/tracer.js";
 import { classifyError } from "../utils/error-classify.js";
 import { BackoffTracker, isTransientAbuseError } from "../utils/backoff.js";
@@ -621,28 +621,7 @@ export class SMTPService {
         const limitErr = validateAttachmentLimits(options.attachments);
         if (limitErr) throw new Error(limitErr);
 
-        mailOptions.attachments = options.attachments.map((att) => {
-          // Strip CRLF and NUL from filename — a value like
-          // "report.pdf\r\nContent-Type: text/html" would break the
-          // Content-Disposition MIME header and inject a bogus part header.
-          const safeFilename = att.filename
-            ? stripHeaderInjection(att.filename).slice(0, 255) || "attachment"
-            : undefined;
-
-          // Strip CRLF from contentType to prevent MIME header injection.
-          // Also reject the value if it doesn't look like a valid MIME type
-          // (type/subtype) to avoid smuggling arbitrary header content.
-          const rawCt = att.contentType ? stripHeaderInjection(att.contentType).trim() : undefined;
-          const safeContentType =
-            rawCt && /^[\w!#$&\-^]+\/[\w!#$&\-^+.]+$/.test(rawCt) ? rawCt : undefined;
-
-          return {
-            filename:    safeFilename,
-            content:     att.content,
-            contentType: safeContentType,
-            cid:         att.contentId,
-          };
-        });
+        mailOptions.attachments = toMailerAttachments(options.attachments);
       }
 
       // Capture the exact pooled transport being dispatched. A concurrent
