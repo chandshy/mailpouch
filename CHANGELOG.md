@@ -15,10 +15,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `test/improvement-loop.test.ts` no longer corrupts the checkout when run from the pre-push hook: its temp-repo `git` calls and runner spawns now drop inherited `GIT_*` variables, which previously redirected `git init`/`config`/`commit` into the real repository (setting `core.bare=true`, a test author identity, and a stray commit).
 
-### Fixed
-
-- Attachments sent or drafted by agents arrived corrupted: the tools take base64 content, but it reached nodemailer without `encoding: "base64"`, so it was encoded a second time and recipients got a file containing the base64 text. The SMTP send and IMAP draft paths now share one attachment mapper that declares the encoding.
-
 ## [4.0.3] — 2026-08-31
 
 ### Fixed
