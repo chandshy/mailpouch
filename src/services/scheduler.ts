@@ -413,8 +413,15 @@ export class SchedulerService {
       createdAt: new Date().toISOString(),
     };
 
+    // Fail the call if the record doesn't reach disk: a returned id for an
+    // email that a restart would silently lose is worse than an error.
     this.items.push(item);
-    this.persist();
+    try {
+      this.writeItems(this.items);
+    } catch (err) {
+      this.items.splice(this.items.indexOf(item), 1);
+      throw err;
+    }
     logger.info(`Email scheduled for ${item.scheduledAt}`, "Scheduler", { id: item.id });
     return item.id;
     }); // end tracer.spanSync('scheduler.schedule')
@@ -439,8 +446,15 @@ export class SchedulerService {
     const item = this.items.find(i => i.id === id && this.isInScope(i, scope));
     if (!item) return { ok: false, error: "not_found" } as const;
     if (item.status === "pending") {
+      // A cancel that isn't on disk would be undone by a restart (the record
+      // reloads as pending and sends), so a write failure fails the cancel.
       item.status = "cancelled";
-      this.persist();
+      try {
+        this.writeItems(this.items);
+      } catch (err) {
+        item.status = "pending";
+        throw err;
+      }
       logger.info(`Scheduled email cancelled`, "Scheduler", { id });
       return { ok: true } as const;
     }
@@ -514,6 +528,9 @@ export class SchedulerService {
       logger.info(`Processing ${due.length} due scheduled email(s)`, "Scheduler");
 
       for (const item of due) {
+        // `due` was captured before earlier items' sends were awaited; a
+        // cancel() (or quarantine) during those awaits must stop this one.
+        if (item.status !== "pending" || !this.items.includes(item)) continue;
         // A registry rebuild can happen after this tick captured `due`; do a
         // fresh identity check immediately before selecting a transport.
         if (!this.isRecordCurrent(item)) {
@@ -708,9 +725,12 @@ export class SchedulerService {
   private pruneHistory(items: StoredScheduledEmail[]): StoredScheduledEmail[] {
     const cutoff = Date.now() - MAX_HISTORY_AGE_MS;
 
-    const pending = items.filter(i => i.status === "pending");
+    // "sending" is live work, not history: pruning it by age would orphan an
+    // in-flight delivery whose retry or outcome still has to be recorded.
+    const isLive = (i: StoredScheduledEmail): boolean => i.status === "pending" || i.status === "sending";
+    const pending = items.filter(isLive);
     let history = items.filter(
-      i => i.status !== "pending" && Date.parse(i.createdAt) >= cutoff
+      i => !isLive(i) && Date.parse(i.createdAt) >= cutoff
     );
 
     if (history.length > MAX_HISTORY_RECORDS) {

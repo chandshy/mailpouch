@@ -58,6 +58,3 @@ export const defs: ToolDef[] = [
     },
   },
 ];
-
-const mod = { defs, handlers: {} };
-export default mod;
