@@ -1144,7 +1144,8 @@ export class SimpleIMAPService {
               body: bodyPreview,
               bodyPreview,
               isHtml: looksLikeHtml,
-              date: env.date ?? new Date(),
+              // imapflow 2.x widened envelope.date to `string | Date`.
+              date: env.date ? new Date(env.date) : new Date(),
               folder,
               // #9: stable cross-folder identity (the `id` UID is per-folder).
               messageId: env.messageId || undefined,
