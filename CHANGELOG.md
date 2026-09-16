@@ -15,16 +15,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `test/improvement-loop.test.ts` no longer corrupts the checkout when run from the pre-push hook: its temp-repo `git` calls and runner spawns now drop inherited `GIT_*` variables, which previously redirected `git init`/`config`/`commit` into the real repository (setting `core.bare=true`, a test author identity, and a stray commit).
 
-### Fixed
-
-- The `surfaceSecurityNotifications` setting ("Surface security messages") and `toolTier` in the config file were dropped by the config loader, so they never took effect and were erased by the next settings save.
-- A config file that exists but can't be parsed (for example after a hand edit left a trailing comma) is no longer replaced with defaults by the next Settings, account or TUI save, which erased every account and encrypted credential in it. The save now fails with a message pointing at the file.
-- A failed config write no longer leaves a credential-bearing `*.tmp` file next to the config.
-
-### Security
-
-- Log output to stderr (MCP client logs, the systemd journal) now gets the same redaction as the log file and `get_logs`; `pass`, `passphrase` and `auth` fields are redacted too. Logged errors keep their message and a short stack instead of being stored as `{}`.
-
 ## [4.0.3] — 2026-08-31
 
 ### Fixed
