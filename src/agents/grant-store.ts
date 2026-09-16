@@ -40,7 +40,7 @@ export type AuthorizationGrantSnapshot =
   | { kind: "unavailable" };
 
 /** Historical marker used before AgentGrant gained credentialKind. */
-export const LEGACY_SERVICE_ACCOUNT_GRANT_NOTE = "service account (client_credentials)";
+const LEGACY_SERVICE_ACCOUNT_GRANT_NOTE = "service account (client_credentials)";
 
 /**
  * True only for a credential-backed grant. Interactive OAuth grants must

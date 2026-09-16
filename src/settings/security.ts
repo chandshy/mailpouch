@@ -23,19 +23,16 @@ import { randomBytes, createHash, timingSafeEqual } from "crypto";
 // ─── Constants ─────────────────────────────────────────────────────────────────
 
 /** Max POST body size: 64 KiB.  Rejects bodies that could exhaust heap. */
-export const MAX_BODY_BYTES = 65_536;
+const MAX_BODY_BYTES = 65_536;
 
 /** Abort reading body after this many ms (Slow Loris / slow POST). */
-export const BODY_TIMEOUT_MS = 15_000;
+const BODY_TIMEOUT_MS = 15_000;
 
 /** Per-IP request rate: general endpoints (req / window). */
 export const GENERAL_RATE_LIMIT    = 120; // per minute
 
 /** Per-IP request rate: mutating escalation endpoints. */
 export const ESCALATION_RATE_LIMIT = 20;  // per minute
-
-/** Per-IP request rate: any request when serving over LAN. */
-export const LAN_RATE_LIMIT        = 200; // per minute (slightly tighter)
 
 // ─── Rate Limiter ──────────────────────────────────────────────────────────────
 

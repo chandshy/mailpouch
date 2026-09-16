@@ -14,7 +14,7 @@
 import { EventEmitter } from "events";
 import type { AgentGrant } from "./types.js";
 
-export type NotificationKind =
+type NotificationKind =
   | "grant-created"    // new DCR → pending grant just created
   | "grant-approved"   // user approved in UI
   | "grant-denied"

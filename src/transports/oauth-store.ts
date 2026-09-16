@@ -67,7 +67,7 @@ export const OAUTH_ACCESS_TOKEN_TTL_MS = 24 * 60 * 60_000;  // 24 h — self-hos
  * new one — matches the "self-host, keep the live session working"
  * philosophy. Evicted clients will simply re-register on their next use.
  */
-export const OAUTH_MAX_CLIENTS = 1000;
+const OAUTH_MAX_CLIENTS = 1000;
 export const OAUTH_MAX_CODES   = 500;
 export const OAUTH_MAX_TOKENS  = 5000;
 

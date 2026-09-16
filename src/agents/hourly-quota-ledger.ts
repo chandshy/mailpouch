@@ -18,7 +18,7 @@ import { MAX_AGENT_TOOL_CALLS_PER_HOUR, isValidAgentToolHourlyCap } from "./gran
 
 const require = createRequire(import.meta.url);
 
-export const HOUR_MS = 60 * 60 * 1_000;
+const HOUR_MS = 60 * 60 * 1_000;
 const SQLITE_BUSY_TIMEOUT_MS = 250;
 
 interface SqliteStatement {
