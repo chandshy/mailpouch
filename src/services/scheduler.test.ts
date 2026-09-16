@@ -786,13 +786,12 @@ describe("SchedulerService", () => {
     expect(pruned.length).toBe(1000);
   });
 
-  it("persist() error path — warns when write fails", () => {
+  it("schedule() surfaces a store write failure instead of returning an id that would not survive a restart", () => {
     const smtp = makeSMTP();
     // Use a path inside a non-existent directory to force writeFileSync to fail
     const badPath = join(tmpDir, "nonexistent", "subdir", "scheduled.json");
     const svc = new SchedulerService(smtp, badPath);
-    // schedule() calls persist() internally; the error should be swallowed and warned
-    expect(() => svc.schedule(makeOptions(), futureDate(120))).not.toThrow();
+    expect(() => svc.schedule(makeOptions(), futureDate(120))).toThrow();
   });
 
   it("processDue() is a no-op when already processing (concurrent lock guard — line 157)", async () => {
@@ -918,6 +917,54 @@ describe("SchedulerService", () => {
 
     const finalItem = svc.list().find(i => i.id === id)!;
     expect(finalItem.status).toBe("cancelled");
+  });
+
+  it("does not send a later due item that was cancelled while an earlier item was sending", async () => {
+    let resolveFirst!: (val: { success: boolean; messageId?: string }) => void;
+    const sendEmail = vi.fn()
+      .mockReturnValueOnce(new Promise(res => { resolveFirst = res; }))
+      .mockResolvedValue({ success: true, messageId: "msg-2" });
+    const svc = new SchedulerService({ sendEmail } as unknown as SMTPService, storePath);
+    const first = svc.schedule(makeOptions(), futureDate(120));
+    const second = svc.schedule(makeOptions(), futureDate(121));
+    vi.advanceTimersByTime(122 * 1000);
+
+    const processing = svc.processDue();
+    await Promise.resolve();
+    // Second is still pending (not yet on the wire), so the cancel succeeds...
+    expect(svc.cancel(second)).toEqual({ ok: true });
+
+    resolveFirst({ success: true, messageId: "msg-1" });
+    await processing;
+
+    // ...and must stay cancelled, never sent.
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+    expect(svc.list().find(i => i.id === second)!.status).toBe("cancelled");
+    expect(svc.list().find(i => i.id === first)!.status).toBe("sent");
+  });
+
+  it("schedule() throws and keeps nothing when the record cannot be persisted", () => {
+    const svc = new SchedulerService(makeSMTP(), storePath);
+    vi.spyOn(svc as any, "writeItems").mockImplementation(() => { throw new Error("ENOSPC"); });
+
+    expect(() => svc.schedule(makeOptions(), futureDate(120))).toThrow("ENOSPC");
+    expect(svc.list()).toHaveLength(0);
+  });
+
+  it("cancel() throws and leaves the email pending when the cancel cannot be persisted", () => {
+    const svc = new SchedulerService(makeSMTP(), storePath);
+    const id = svc.schedule(makeOptions(), futureDate(120));
+    vi.spyOn(svc as any, "writeItems").mockImplementation(() => { throw new Error("ENOSPC"); });
+
+    expect(() => svc.cancel(id)).toThrow("ENOSPC");
+    expect(svc.list().find(i => i.id === id)!.status).toBe("pending");
+  });
+
+  it("history pruning keeps an in-flight 'sending' record older than the history window", () => {
+    const svc = new SchedulerService(makeSMTP(), storePath);
+    const old = { id: "old", status: "sending", createdAt: new Date(Date.now() - 40 * 86_400_000).toISOString() };
+    const kept = (svc as any).pruneHistory([old]);
+    expect(kept.map((i: { id: string }) => i.id)).toEqual(["old"]);
   });
 
   it("SMTP-002: cancel() returns in_flight error while sendEmail is awaited", async () => {
