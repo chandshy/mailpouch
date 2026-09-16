@@ -34,11 +34,6 @@
     },
     {
       "name": "@zone-eu/mailsplit",
-      "version": "5.4.15",
-      "license": "(MIT OR EUPL-1.1+)"
-    },
-    {
-      "name": "@zone-eu/mailsplit",
       "version": "5.4.16",
       "license": "(MIT OR EUPL-1.1+)"
     },
@@ -170,11 +165,6 @@
     {
       "name": "encodeurl",
       "version": "2.0.0",
-      "license": "MIT"
-    },
-    {
-      "name": "encoding-japanese",
-      "version": "2.2.0",
       "license": "MIT"
     },
     {
@@ -334,7 +324,7 @@
     },
     {
       "name": "imapflow",
-      "version": "1.7.6",
+      "version": "2.0.2",
       "license": "MIT"
     },
     {
@@ -390,11 +380,6 @@
     {
       "name": "libbase64",
       "version": "1.3.0",
-      "license": "MIT"
-    },
-    {
-      "name": "libmime",
-      "version": "5.4.2",
       "license": "MIT"
     },
     {
@@ -654,7 +639,7 @@
     },
     {
       "name": "socks",
-      "version": "2.8.9",
+      "version": "2.8.10",
       "license": "MIT"
     },
     {
