@@ -11,6 +11,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Cleared all open Dependabot advisories: `nodemailer` 9.1.1 (recipient-domain validation bypasses, addressparser quadratic DoS, `resolveContent()` file/URL-access bypass), `mailparser` 3.9.26 (drops its vulnerable nested `nodemailer`), and lockfile/override floors for `fast-uri` 4.1.4 (SSRF / host confusion), `hono` 4.13.7, and `qs` 6.16.0 (DoS / array-limit bypass).
 
+- A client-chosen tool name that matches an `Object.prototype` key (e.g. `constructor`) resolved to a built-in in the dispatch tables and was invoked before any agent-grant or permission gate, echoing the call context — including the loaded config and mailbox credentials — back to an unapproved caller. Handler and alias tables are now prototype-free and unregistered tool names are rejected before any gate runs.
+- Windows native approval dialog and toasts: PowerShell treats the Unicode quotes U+2018–U+201B as single-quote delimiters, but only ASCII `'` was escaped, so a crafted agent `client_name` could break out of the script literal. All delimiters are now doubled by one shared escaper (the two notifier copies are merged).
+- Linux zenity approval dialog passes `--no-markup`, so markup characters in an agent name can no longer blank or garble the prompt.
+- Local stdio agents are gated even if the client skips `notifications/initialized` or registration fails (previously there was no caller and the grant gate was skipped). A pending local grant that expires is re-registered on the next call instead of leaving the agent blocked with no approval prompt.
+- A late Approve/Deny click in the on-screen dialog no longer overrides a decision already made in the Settings UI (it re-activated denied agents or dropped the restrictions of a customized approval).
+- Deleting the agent-grants file while mailpouch runs no longer resurrects every grant on the next write; an unreadable grants or service-account file now refuses writes instead of being overwritten with stale state.
+- Resources and prompts honor the global permission preset for trusted local callers (`MAILPOUCH_TRUST_LOCAL` / `gateLocalAgents:false`).
+
+### Fixed
+
+- `test/improvement-loop.test.ts` no longer corrupts the checkout when run from the pre-push hook: its temp-repo `git` calls and runner spawns now drop inherited `GIT_*` variables, which previously redirected `git init`/`config`/`commit` into the real repository (setting `core.bare=true`, a test author identity, and a stray commit).
+- Attachments sent or drafted by agents arrived corrupted: the tools take base64 content, but it reached nodemailer without `encoding: "base64"`, so it was encoded a second time and recipients got a file containing the base64 text. The SMTP send and IMAP draft paths now share one attachment mapper that declares the encoding.
+- IMAP flag changes, `remove_label`, bulk flag/unlabel and `empty_trash` no longer report success when the server rejects the STORE or EXPUNGE (imapflow resolves `false` instead of throwing); rejected bulk chunks now fall back per message and count real failures.
+- Moves (including delete-to-Trash) are refused on a server that does not advertise MOVE, where imapflow's emulation would permanently expunge the source even if the copy failed. Proton Bridge advertises MOVE, so normal behavior is unchanged.
+- `search_emails` now returns the newest matches when more than `limit` match (it returned the oldest), newest first.
+- `get_email_by_id`, `get_thread`, `download_attachment` and the other by-id reads report a lost IMAP connection instead of "Email not found".
+- `mark_answered`/`mark_forwarded` (and the reply/forward flag step) no longer leave stale `isAnswered`/`isForwarded` in the message cache.
+- A scheduled email cancelled while an earlier email in the same tick was still sending was sent anyway, even though `cancel_scheduled_email` reported success.
+- `schedule_email` and `cancel_scheduled_email` now fail when the queue can't be written, instead of returning success for a schedule a restart would lose or a cancel a restart would undo.
+- History pruning no longer drops an in-flight (`sending`) record older than 30 days, which silently discarded its retry.
+- The HTTP daemon no longer shuts down on the first request when bound to an IPv6 host (`::`, `::1`); issuer and listen URLs bracket IPv6 literals.
+
+### Changed
+
+- Removed dead code found by knip and review: unused `SecureBuffer`/`wipeString`/`wipeObject`/`wipeEmailArray`/`wipeEmailCache` helpers (the IMAP cache wipe now reuses the shared `scrubEmail`, which also blanks attachment filenames the hand-copied version missed), the test-only `saveRemoteSecrets`, the uncalled `GET /api/agents/service-account` settings route, the unused `LAN_RATE_LIMIT` constant, the `runMailboxMutation` re-export alias, the unused `reading.defs`/`diagnostics` default exports, and exports of module-private constants.
+
 ## [4.0.3] — 2026-08-31
 
 ### Fixed

@@ -23,6 +23,7 @@
 
 import { spawn } from "child_process";
 import { logger } from "../utils/logger.js";
+import { escAppleScript, escPowerShell } from "./escape.js";
 
 export interface DesktopNotification {
   title: string;
@@ -35,25 +36,6 @@ export interface DesktopNotification {
    * suppresses sound on platforms that support it.
    */
   sound?: boolean | string;
-}
-
-/** Escape a string for inclusion in an AppleScript double-quoted literal.
- *  AppleScript strings can carry literal newlines and other control chars
- *  that — even when the outer quote-escape is correct — allow breaking out
- *  of the `display notification "…" with title …` clause and injecting
- *  e.g. a second `with title` or a `do shell script`. Strip every control
- *  char up to ASCII 0x1F plus DEL (0x7F); they have no legitimate place in
- *  a toast notification body. */
-function escAppleScript(s: string): string {
-  return s
-    .replace(/[\x00-\x1f\x7f]/g, " ")
-    .replace(/\\/g, "\\\\")
-    .replace(/"/g, '\\"');
-}
-
-/** PowerShell single-quoted literal: double internal single quotes. */
-function escPowerShell(s: string): string {
-  return s.replace(/'/g, "''");
 }
 
 /** HTML/XML escape for content embedded in the Windows toast XML. The toast

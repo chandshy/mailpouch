@@ -11,8 +11,7 @@
  *
  * Preserving the historical ordering is load-bearing — ListTools output
  * ordering affects client-side system prompts. The registry splices these
- * two arrays in at the correct positions. `defs` below is the concatenated
- * full list; `defsEarly` / `defsLate` expose the split for the registry.
+ * two arrays in at the correct positions via `defsEarly` / `defsLate`.
  */
 
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
@@ -495,8 +494,6 @@ export const defsLate: ToolDef[] = [
     },
   },
 ];
-
-export const defs: ToolDef[] = [...defsEarly, ...defsLate];
 
 /**
  * A folder allowlist is meaningful only when it has at least one path. The

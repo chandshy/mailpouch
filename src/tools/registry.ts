@@ -126,7 +126,7 @@ export function advertisedToolDefs(capabilities: ToolCapabilities): ToolDef[] {
 
 /** Tool-name-keyed dispatch table for the (post-gate) CallTool handlers. */
 export function allHandlers(): Record<string, ToolHandler> {
-  return {
+  return nameKeyedTable({
     ...sending.handlers,
     ...reading.handlers,
     ...folders.handlers,
@@ -138,7 +138,16 @@ export function allHandlers(): Record<string, ToolHandler> {
     ...aliases.handlers,
     ...pass.handlers,
     ...drafts.handlers,
-  };
+  });
+}
+
+/**
+ * Tool names arrive from the client, so a lookup table must not inherit
+ * Object.prototype: `table["constructor"]` would otherwise resolve to `Object`,
+ * which returns its argument — the call context — as the "tool result".
+ */
+function nameKeyedTable<T>(entries: Record<string, T>): Record<string, T> {
+  return Object.assign(Object.create(null) as Record<string, T>, entries);
 }
 
 /**
@@ -147,7 +156,7 @@ export function allHandlers(): Record<string, ToolHandler> {
  * gates run, so an over-restricted agent can always ask for more access.
  */
 export function escalationHandlers(): Record<string, EscalationHandler> {
-  return { ...escalation.handlers };
+  return nameKeyedTable({ ...escalation.handlers });
 }
 
 export { describeRequestEscalation } from "./escalation.js";
