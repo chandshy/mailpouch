@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-09-14",
+  "generatedAt": "2026-09-16",
   "rootPackage": "mailpouch@4.0.3",
   "deps": [
     {
@@ -14,17 +14,12 @@
     },
     {
       "name": "@napi-rs/keyring",
-      "version": "1.3.0",
+      "version": "2.0.0",
       "license": "MIT"
     },
     {
       "name": "@napi-rs/keyring-linux-x64-gnu",
-      "version": "1.3.0",
-      "license": "MIT"
-    },
-    {
-      "name": "@napi-rs/keyring-linux-x64-musl",
-      "version": "1.3.0",
+      "version": "2.0.0",
       "license": "MIT"
     },
     {
