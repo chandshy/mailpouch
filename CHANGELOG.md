@@ -10,7 +10,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 
 - Cleared all open Dependabot advisories: `nodemailer` 9.1.1 (recipient-domain validation bypasses, addressparser quadratic DoS, `resolveContent()` file/URL-access bypass), `mailparser` 3.9.26 (drops its vulnerable nested `nodemailer`), and lockfile/override floors for `fast-uri` 4.1.4 (SSRF / host confusion), `hono` 4.13.7, and `qs` 6.16.0 (DoS / array-limit bypass).
-
 - A client-chosen tool name that matches an `Object.prototype` key (e.g. `constructor`) resolved to a built-in in the dispatch tables and was invoked before any agent-grant or permission gate, echoing the call context — including the loaded config and mailbox credentials — back to an unapproved caller. Handler and alias tables are now prototype-free and unregistered tool names are rejected before any gate runs.
 - Windows native approval dialog and toasts: PowerShell treats the Unicode quotes U+2018–U+201B as single-quote delimiters, but only ASCII `'` was escaped, so a crafted agent `client_name` could break out of the script literal. All delimiters are now doubled by one shared escaper (the two notifier copies are merged).
 - Linux zenity approval dialog passes `--no-markup`, so markup characters in an agent name can no longer blank or garble the prompt.
@@ -18,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A late Approve/Deny click in the on-screen dialog no longer overrides a decision already made in the Settings UI (it re-activated denied agents or dropped the restrictions of a customized approval).
 - Deleting the agent-grants file while mailpouch runs no longer resurrects every grant on the next write; an unreadable grants or service-account file now refuses writes instead of being overwritten with stale state.
 - Resources and prompts honor the global permission preset for trusted local callers (`MAILPOUCH_TRUST_LOCAL` / `gateLocalAgents:false`).
+- Log output to stderr (MCP client logs, the systemd journal) now gets the same redaction as the log file and `get_logs`; `pass`, `passphrase` and `auth` fields are redacted too. Logged errors keep their message and a short stack instead of being stored as `{}`.
 
 ### Fixed
 
@@ -32,6 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `schedule_email` and `cancel_scheduled_email` now fail when the queue can't be written, instead of returning success for a schedule a restart would lose or a cancel a restart would undo.
 - History pruning no longer drops an in-flight (`sending`) record older than 30 days, which silently discarded its retry.
 - The HTTP daemon no longer shuts down on the first request when bound to an IPv6 host (`::`, `::1`); issuer and listen URLs bracket IPv6 literals.
+- The `surfaceSecurityNotifications` setting ("Surface security messages") and `toolTier` in the config file were dropped by the config loader, so they never took effect and were erased by the next settings save.
+- A config file that exists but can't be parsed (for example after a hand edit left a trailing comma) is no longer replaced with defaults by the next Settings, account or TUI save, which erased every account and encrypted credential in it. The save now fails with a message pointing at the file.
+- A failed config write no longer leaves a credential-bearing `*.tmp` file next to the config.
 
 ### Changed
 
