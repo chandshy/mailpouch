@@ -5,6 +5,9 @@
 
 import { Socket } from "node:net";
 import nodemailer from "nodemailer";
+// nodemailer 10 ships its own types and no longer exposes a `nodemailer` type
+// namespace, so these come from the package's named type exports instead.
+import type { SendMailOptions, Transporter } from "nodemailer";
 import { ProtonMailConfig, SendEmailOptions } from "../types/index.js";
 import { logger } from "../utils/logger.js";
 import { buildBridgeTlsConfig } from "./bridge-tls.js";
@@ -89,7 +92,7 @@ const BLOCKED_HEADER_KEYS = /^(to|cc|bcc|from|return-path|reply-to|sender)$/i;
 // shared with the IMAP saveDraft path.
 
 export class SMTPService {
-  private transporter: nodemailer.Transporter | null = null;
+  private transporter: Transporter | null = null;
   /** Raw sockets are tracked before Nodemailer creates a PoolResource connection. */
   private readonly smtpSockets = new Set<Socket>();
   /** Connecting callbacks that must be failed synchronously on retirement. */
@@ -129,7 +132,8 @@ export class SMTPService {
    * SMTP/STARTTLS setup; the close listener keeps our tracking set accurate.
    */
   private openTrackedSocket(
-    options: { host?: string; port?: number; localAddress?: string },
+    // nodemailer 10 widened the port on its transport options to `string | number`.
+    options: { host?: string; port?: string | number; localAddress?: string },
     callback: (error: Error | null, socketOptions?: { connection: Socket }) => void,
     generation: number,
   ): void {
@@ -138,7 +142,7 @@ export class SMTPService {
       return;
     }
     const host = options.host;
-    const port = options.port;
+    const port = typeof options.port === "string" ? Number(options.port) : options.port;
     if (!host || !Number.isInteger(port) || (port ?? 0) < 1 || (port ?? 0) > 65_535) {
       callback(new Error("SMTP socket requires a valid host and port"));
       return;
@@ -551,7 +555,7 @@ export class SMTPService {
       const fromAddress = fromOverride && isValidEmail(fromOverride)
         ? fromOverride
         : this.config.smtp.username;
-      const mailOptions: nodemailer.SendMailOptions = {
+      const mailOptions: SendMailOptions = {
         from: fromAddress,
         to: toAddresses.join(", "),
         // Strip CRLF/NUL to prevent header injection via a crafted subject line.

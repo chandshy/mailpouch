@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `nodemailer` 10.0.9. It ships its own types, so the obsolete `@types/nodemailer` is dropped and the SMTP service imports `Transporter`/`SendMailOptions` as named types; the transport-options port widened to `string | number` and is normalized before validation. `tsconfig.json` now sets `types: ["node"]` — with nodemailer 10 installed, TypeScript's automatic `@types` discovery stopped including any package at all (534 spurious "Cannot find name 'crypto'/'process'" errors); listing the global types explicitly is deterministic and fixes it. The root cause in TypeScript's discovery is not understood.
+
 ### Security
 
 - Cleared all open Dependabot advisories: `nodemailer` 9.1.1 (recipient-domain validation bypasses, addressparser quadratic DoS, `resolveContent()` file/URL-access bypass), `mailparser` 3.9.26 (drops its vulnerable nested `nodemailer`), and lockfile/override floors for `fast-uri` 4.1.4 (SSRF / host confusion), `hono` 4.13.7, and `qs` 6.16.0 (DoS / array-limit bypass).
