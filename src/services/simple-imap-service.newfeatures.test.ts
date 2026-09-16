@@ -25,7 +25,7 @@ describe("SimpleIMAPService.downloadAttachment", () => {
     const svc = new SimpleIMAPService();
     vi.spyOn(svc as any, "validateEmailId").mockImplementation(() => {});
     // Inject an email with no attachments into cache (new format: { email, cachedAt })
-    (svc as any).emailCache.set("123", {
+    (svc as any).emailCache.set("INBOX:123", {
       email: {
         id: "123",
         from: "a@b.com",
@@ -49,7 +49,7 @@ describe("SimpleIMAPService.downloadAttachment", () => {
     const svc = new SimpleIMAPService();
     vi.spyOn(svc as any, "validateEmailId").mockImplementation(() => {});
     const buf = Buffer.from("hello");
-    (svc as any).emailCache.set("123", {
+    (svc as any).emailCache.set("INBOX:123", {
       email: {
         id: "123",
         from: "a@b.com",
@@ -179,7 +179,7 @@ describe("SimpleIMAPService.downloadAttachment", () => {
   it("returns null when attachment has no content", async () => {
     const svc = new SimpleIMAPService();
     vi.spyOn(svc as any, "validateEmailId").mockImplementation(() => {});
-    (svc as any).emailCache.set("999", {
+    (svc as any).emailCache.set("INBOX:999", {
       email: {
         id: "999",
         from: "a@b.com",
@@ -198,6 +198,8 @@ describe("SimpleIMAPService.downloadAttachment", () => {
       },
       cachedAt: Date.now(),
     });
+    // Content was stripped from the cache, so the re-fetch runs; the server copy has none either.
+    vi.spyOn(svc as any, "fetchEmailFullSource").mockResolvedValue(null);
     const result = await svc.downloadAttachment("999", 0);
     expect(result).toBeNull();
   });
@@ -253,7 +255,7 @@ describe("SimpleIMAPService.downloadAttachment", () => {
   it("returns null when re-fetched source also has no attachment content", async () => {
     const svc = new SimpleIMAPService();
     vi.spyOn(svc as any, "validateEmailId").mockImplementation(() => {});
-    (svc as any).emailCache.set("777", {
+    (svc as any).emailCache.set("INBOX:777", {
       email: {
         id: "777",
         from: "a@b.com",
@@ -713,11 +715,10 @@ describe("SimpleIMAPService private findDraftsFolder", () => {
 // ─── fetchEmailFullSource (private) ───────────────────────────────────────────
 
 describe("SimpleIMAPService private fetchEmailFullSource", () => {
-  it("returns null when not connected", async () => {
+  it("throws when not connected instead of reporting the email missing", async () => {
     const svc = new SimpleIMAPService();
-    // isConnected=false, client=null by default
-    const result = await (svc as any).fetchEmailFullSource("1");
-    expect(result).toBeNull();
+    vi.spyOn(svc as any, "reconnect").mockRejectedValue(new Error("ECONNREFUSED"));
+    await expect((svc as any).fetchEmailFullSource("1")).rejects.toThrow(/IMAP connection unavailable/);
   });
 
   it("returns null when getFolders() is empty (no match found)", async () => {
@@ -730,14 +731,13 @@ describe("SimpleIMAPService private fetchEmailFullSource", () => {
     expect(result).toBeNull();
   });
 
-  it("returns null when getFolders() throws (catch path)", async () => {
+  it("rethrows when getFolders() throws instead of reporting the email missing", async () => {
     const svc = new SimpleIMAPService();
     (svc as any).isConnected = true;
     (svc as any).client = {};
     vi.spyOn(svc, "getFolders").mockRejectedValue(new Error("connection lost"));
 
-    const result = await (svc as any).fetchEmailFullSource("42");
-    expect(result).toBeNull();
+    await expect((svc as any).fetchEmailFullSource("42")).rejects.toThrow("connection lost");
   });
 
   it("returns null when fetch yields no messages (email not in that folder)", async () => {
