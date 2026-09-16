@@ -66,6 +66,8 @@ export interface ApproveArgs {
   toolOverrides?: Partial<Record<ToolName, boolean>>;
   conditions?: GrantConditions;
   note?: string;
+  /** Apply only while the grant is still pending (a decision made elsewhere wins). */
+  onlyIfPending?: boolean;
 }
 
 export interface AgentGrantStoreOptions {
@@ -145,7 +147,12 @@ export class AgentGrantStore {
    * forward onto the disk record rather than losing the unflushed increments.
    */
   private reloadMerge(): void {
-    if (!existsSync(this.path)) return;
+    // Missing file = no grants (deleted by the operator or a reset). Keeping the
+    // in-memory map here would let the next persist() resurrect every grant.
+    if (!existsSync(this.path)) {
+      this.grants.clear();
+      return;
+    }
     try {
       const parsed = JSON.parse(readFileSync(this.path, "utf-8")) as Partial<StoreFile>;
       const list = Array.isArray(parsed.grants) ? parsed.grants : [];
@@ -168,7 +175,10 @@ export class AgentGrantStore {
         if (!seen.has(clientId)) this.grants.delete(clientId);
       }
     } catch (err) {
+      // Refuse the mutation: persisting the stale map would overwrite the
+      // unreadable file and undo whatever a peer last wrote (e.g. a revoke).
       logger.warn(`AgentGrantStore: reloadMerge failed for ${this.path}`, "AgentGrantStore", err);
+      throw err;
     }
   }
 
@@ -287,7 +297,7 @@ export class AgentGrantStore {
   approve(args: ApproveArgs): AgentGrant | null {
     return this.mutate(() => {
       const g = this.grants.get(args.clientId);
-      if (!g) return null;
+      if (!g || (args.onlyIfPending && g.status !== "pending")) return null;
       g.status = "active";
       g.preset = args.preset;
       g.toolOverrides = args.toolOverrides;
@@ -301,10 +311,10 @@ export class AgentGrantStore {
     });
   }
 
-  deny(clientId: string, note?: string): AgentGrant | null {
+  deny(clientId: string, note?: string, opts: { onlyIfPending?: boolean } = {}): AgentGrant | null {
     return this.mutate(() => {
       const g = this.grants.get(clientId);
-      if (!g) return null;
+      if (!g || (opts.onlyIfPending && g.status !== "pending")) return null;
       const wasPending = g.status === "pending";
       g.status = "revoked";
       g.revokedAt = new Date().toISOString();
