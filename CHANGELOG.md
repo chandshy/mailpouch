@@ -15,10 +15,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `test/improvement-loop.test.ts` no longer corrupts the checkout when run from the pre-push hook: its temp-repo `git` calls and runner spawns now drop inherited `GIT_*` variables, which previously redirected `git init`/`config`/`commit` into the real repository (setting `core.bare=true`, a test author identity, and a stray commit).
 
-### Changed
-
-- Removed dead code found by knip and review: unused `SecureBuffer`/`wipeString`/`wipeObject`/`wipeEmailArray`/`wipeEmailCache` helpers (the IMAP cache wipe now reuses the shared `scrubEmail`, which also blanks attachment filenames the hand-copied version missed), the test-only `saveRemoteSecrets`, the uncalled `GET /api/agents/service-account` settings route, the unused `LAN_RATE_LIMIT` constant, the `runMailboxMutation` re-export alias, the unused `reading.defs`/`diagnostics` default exports, and exports of module-private constants.
-
 ## [4.0.3] — 2026-08-31
 
 ### Fixed
