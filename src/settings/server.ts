@@ -43,7 +43,7 @@ import {
   type TlsCredentials,
 } from "./security.js";
 import {
-  invalidateConfigCache,
+  loadConfigForWrite,
   loadConfig,
   saveConfig,
   getConfigPath,
@@ -221,8 +221,7 @@ interface SettingsConfigPatch {
  * point; invalidating first makes the read the current state at that point.
  */
 function loadConfigForSettingsWrite(): ServerConfig {
-  invalidateConfigCache();
-  return loadConfig() ?? defaultConfig();
+  return loadConfigForWrite();
 }
 
 /**

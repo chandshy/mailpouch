@@ -586,8 +586,14 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
   });
 
   const url = `${scheme}://${urlHost(host)}:${opts.port}${path}`;
+  // The issuer is deliberately absent from this message. The message string is
+  // the one argument `log()` cannot redact, and a configured `oauthIssuer` is
+  // exactly the kind of value this change stops leaking to stderr. Nothing is
+  // lost: the derived issuer is `url` without the path, and a configured one
+  // was supplied by the operator reading this log. Callers that need the
+  // effective value get it from the returned `issuer` field.
   logger.info(
-    `MCP HTTP transport listening at ${url}${oauthHandlers ? ` (OAuth enabled, issuer ${issuer})` : ""}`,
+    `MCP HTTP transport listening at ${url}${oauthHandlers ? " (OAuth enabled)" : ""}`,
     "HttpTransport",
   );
 

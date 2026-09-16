@@ -3434,7 +3434,9 @@ async function main() {
         serviceAccounts,
         oauthTokensPath: OAUTH_TOKENS_PATH,
       });
-      logger.info(`mailpouch started on HTTP transport at ${handle.url}${handle.issuer ? ` (OAuth issuer ${handle.issuer})` : ""}`, "MCPServer");
+      // As in startHttpTransport: the issuer value is not interpolated into the
+      // message, which is the one argument log() cannot redact.
+      logger.info(`mailpouch started on HTTP transport at ${handle.url}${handle.issuer ? " (OAuth enabled)" : ""}`, "MCPServer");
       (globalThis as unknown as { __mailpouchHttpHandle?: { close(): Promise<void> } }).__mailpouchHttpHandle = handle;
     } else {
       const transport = new StdioServerTransport();
