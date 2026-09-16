@@ -448,11 +448,6 @@
       "license": "MIT-0"
     },
     {
-      "name": "nodemailer",
-      "version": "9.1.1",
-      "license": "MIT-0"
-    },
-    {
       "name": "object-assign",
       "version": "4.1.1",
       "license": "MIT"
