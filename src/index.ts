@@ -959,6 +959,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     };
   }
 
+  // Reject names that are not registered tools before any gate, audit row, or
+  // lookup keyed by the name runs (client-chosen names such as "constructor"
+  // must never reach a plain-object table).
+  if (!Object.hasOwn(_escalationHandlers, name) && !Object.hasOwn(_toolHandlers, name)) {
+    throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
+  }
+
   // ── Always-available meta-tools (bypass permission gate) ─────────────────
   // These tools let the agent REQUEST more access — but they can never GRANT it.
   // Approval is strictly out-of-band (settings UI browser click or terminal).

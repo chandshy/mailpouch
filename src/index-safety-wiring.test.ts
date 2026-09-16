@@ -31,6 +31,13 @@ describe("production safety wiring", () => {
     expect(source).not.toMatch(/globalPreset,\n\s*\}, \{ snapshot: grantSnapshot \}\)/);
   });
 
+  it("rejects unregistered tool names before the escalation pre-gate", () => {
+    const reject = source.indexOf("if (!Object.hasOwn(_escalationHandlers, name) && !Object.hasOwn(_toolHandlers, name))");
+    const escalation = source.indexOf("if (_escalationHandlers[name])");
+    expect(reject).toBeGreaterThan(-1);
+    expect(reject).toBeLessThan(escalation);
+  });
+
   it("resolves the local stdio caller per call so gates never see 'no caller' while local gating is on", () => {
     // No handshake-only cached caller: a skipped notifications/initialized or a
     // failed registration must not leave the gate with an undefined caller.
