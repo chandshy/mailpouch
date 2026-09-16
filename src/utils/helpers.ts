@@ -647,3 +647,33 @@ export function sanitizeAttachments(attachments: unknown): EmailAttachment[] | u
     return out;
   });
 }
+
+/**
+ * Map sanitized attachments to nodemailer attachment objects — shared by the
+ * SMTP send and IMAP draft paths so their header scrubbing can't drift.
+ *
+ * - CR/LF/NUL are stripped from the filename and contentType, and a contentType
+ *   that isn't `type/subtype` is dropped, so neither can inject a MIME header.
+ * - String content is the tools' documented base64, so it is declared as such;
+ *   without `encoding`, nodemailer treats it as text and base64-encodes it again,
+ *   delivering a file that contains the base64 text instead of the bytes.
+ */
+export function toMailerAttachments(attachments: ReadonlyArray<EmailAttachment>): Array<{
+  filename?: string;
+  content?: string | Buffer;
+  contentType?: string;
+  cid?: string;
+  encoding?: "base64";
+}> {
+  const scrub = (s: string): string => s.replace(/[\r\n\x00]/g, "");
+  return attachments.map((att) => {
+    const rawCt = att.contentType ? scrub(att.contentType).trim() : undefined;
+    return {
+      filename: att.filename ? scrub(att.filename).slice(0, 255) || "attachment" : undefined,
+      content: att.content,
+      contentType: rawCt && /^[\w!#$&\-^]+\/[\w!#$&\-^+.]+$/.test(rawCt) ? rawCt : undefined,
+      cid: att.contentId,
+      ...(typeof att.content === "string" ? { encoding: "base64" as const } : {}),
+    };
+  });
+}

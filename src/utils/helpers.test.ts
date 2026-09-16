@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import {
+  toMailerAttachments,
   parseEmails,
   parseEmailsDetailed,
   formatDate,
@@ -891,4 +892,28 @@ describe('helpers', () => {
     });
   });
 
+});
+
+describe("toMailerAttachments", () => {
+  it("delivers base64 string content as the decoded bytes, not the base64 text", async () => {
+    const { default: MailComposer } = await import("nodemailer/lib/mail-composer/index.js");
+    const attachments = toMailerAttachments([{ filename: "note.txt", content: "aGVsbG8=", contentType: "text/plain", size: 5 }]);
+    const mime: string = await new Promise((resolve, reject) =>
+      new MailComposer({ from: "a@x.test", to: "b@x.test", text: "t", attachments })
+        .compile()
+        .build((err: Error | null, msg: Buffer) => (err ? reject(err) : resolve(msg.toString()))),
+    );
+    const part = mime.slice(mime.indexOf("filename=note.txt"));
+    const encoded = part.split("\r\n\r\n")[1].split("\r\n")[0];
+    expect(Buffer.from(encoded, "base64").toString()).toBe("hello");
+  });
+
+  it("leaves Buffer content unencoded-flagged and scrubs header-injection characters", () => {
+    const [out] = toMailerAttachments([
+      { filename: "a.pdf\r\nX-Injected: 1", content: Buffer.from("x"), contentType: "text/html\r\nX: y", size: 1 },
+    ]);
+    expect(out.encoding).toBeUndefined();
+    expect(out.filename).toBe("a.pdfX-Injected: 1");
+    expect(out.contentType).toBeUndefined();
+  });
 });
