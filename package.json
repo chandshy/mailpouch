@@ -92,7 +92,7 @@
     "better-sqlite3": "^13.0.2",
     "imapflow": "^2.0.2",
     "mailparser": "^3.9.26",
-    "nodemailer": "^9.1.1"
+    "nodemailer": "^10.0.9"
   },
   "optionalDependencies": {
     "@napi-rs/keyring": "~2.0.0",
