@@ -587,7 +587,14 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
 
   const url = `${scheme}://${urlHost(host)}:${opts.port}${path}`;
   logger.info(
-    `MCP HTTP transport listening at ${url}${oauthHandlers ? ` (OAuth enabled, issuer ${issuer})` : ""}`,
+    // The issuer VALUE is deliberately not interpolated: the message string is
+    // the one thing `log()` cannot redact, and a configured `oauthIssuer` is
+    // exactly the kind of value this PR stops leaking to stderr. Nothing is
+    // lost — the derived issuer is `url` minus the path, and a configured one
+    // was supplied by the operator reading this log.
+    `MCP HTTP transport listening at ${url}${
+      oauthHandlers ? ` (OAuth enabled, issuer ${opts.oauthIssuer ? "from config" : "derived"})` : ""
+    }`,
     "HttpTransport",
   );
 
