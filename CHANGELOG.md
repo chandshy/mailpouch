@@ -7,9 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-
-- `nodemailer` 10.0.9. It ships its own types, so the obsolete `@types/nodemailer` is dropped and the SMTP service imports `Transporter`/`SendMailOptions` as named types; the transport-options port widened to `string | number` and is normalized before validation. `tsconfig.json` now sets `types: ["node"]` — with nodemailer 10 installed, TypeScript's automatic `@types` discovery stopped including any package at all (534 spurious "Cannot find name 'crypto'/'process'" errors); listing the global types explicitly is deterministic and fixes it. The root cause in TypeScript's discovery is not understood.
+## [4.0.4] — 2026-09-17
 
 ### Security
 
@@ -42,6 +40,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `nodemailer` 10.0.9. It ships its own types, so the obsolete `@types/nodemailer` is dropped and the SMTP service imports `Transporter`/`SendMailOptions` as named types; the transport-options port widened to `string | number` and is normalized before validation. `tsconfig.json` now sets `types: ["node"]` — with nodemailer 10 installed, TypeScript's automatic `@types` discovery stopped including any package at all (534 spurious "Cannot find name 'crypto'/'process'" errors); listing the global types explicitly is deterministic and fixes it. The root cause in TypeScript's discovery is not understood.
+- `imapflow` 2.0.2. `envelope.date` widened to `string | Date`; the IMAP service now coerces it to a Date at the boundary.
+- `@napi-rs/keyring` 2.0.0.
 - Removed dead code found by knip and review: unused `SecureBuffer`/`wipeString`/`wipeObject`/`wipeEmailArray`/`wipeEmailCache` helpers (the IMAP cache wipe now reuses the shared `scrubEmail`, which also blanks attachment filenames the hand-copied version missed), the test-only `saveRemoteSecrets`, the uncalled `GET /api/agents/service-account` settings route, the unused `LAN_RATE_LIMIT` constant, the `runMailboxMutation` re-export alias, the unused `reading.defs`/`diagnostics` default exports, and exports of module-private constants.
 
 ## [4.0.3] — 2026-08-31
