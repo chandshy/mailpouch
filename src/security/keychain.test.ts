@@ -408,8 +408,10 @@ describe('Keychain (positive-path with stub @napi-rs/keyring) — TEST-005', () 
   });
 
   it('deleteRemoteSecrets removes both remote-server entries', async () => {
-    const { saveRemoteSecrets, loadRemoteSecrets, deleteRemoteSecrets } = await import('./keychain.js');
-    await saveRemoteSecrets('bearer-secret', 'oauth-admin-secret');
+    const { loadRemoteSecrets, deleteRemoteSecrets } = await import('./keychain.js');
+    backend.store.set('mailpouch|remote-bearer-token', 'bearer-secret');
+    backend.store.set('mailpouch|remote-oauth-admin-password', 'oauth-admin-secret');
+    expect(await loadRemoteSecrets()).not.toBeNull();
     expect(await deleteRemoteSecrets()).toBe(true);
     expect(await loadRemoteSecrets()).toBeNull();
     expect(backend.store.has('mailpouch|remote-bearer-token')).toBe(false);

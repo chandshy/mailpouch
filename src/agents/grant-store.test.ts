@@ -49,6 +49,50 @@ describe("AgentGrantStore", () => {
     }
   });
 
+  it("onlyIfPending approve/deny leave an already-decided grant untouched", () => {
+    const s = new AgentGrantStore(path);
+    try {
+      s.createPending({ clientId: "pmc_1", clientName: "A" });
+      s.approve({ clientId: "pmc_1", preset: "read_only", conditions: { folderAllowlist: ["INBOX"] } });
+      expect(s.approve({ clientId: "pmc_1", preset: "full", onlyIfPending: true })).toBeNull();
+      expect(s.deny("pmc_1", "late", { onlyIfPending: true })).toBeNull();
+      expect(s.get("pmc_1")).toMatchObject({ status: "active", preset: "read_only", conditions: { folderAllowlist: ["INBOX"] } });
+
+      s.createPending({ clientId: "pmc_2", clientName: "B" });
+      s.deny("pmc_2");
+      expect(s.approve({ clientId: "pmc_2", preset: "full", onlyIfPending: true })).toBeNull();
+      expect(s.get("pmc_2")?.status).toBe("revoked");
+    } finally {
+      s.close();
+    }
+  });
+
+  it("does not resurrect grants after the grants file is deleted", () => {
+    const s = new AgentGrantStore(path);
+    try {
+      s.createPending({ clientId: "pmc_old", clientName: "Old" });
+      s.approve({ clientId: "pmc_old", preset: "full" });
+      rmSync(path);
+      s.createPending({ clientId: "pmc_new", clientName: "New" });
+      const onDisk = JSON.parse(readFileSync(path, "utf-8")) as { grants: Array<{ clientId: string }> };
+      expect(onDisk.grants.map(g => g.clientId)).toEqual(["pmc_new"]);
+    } finally {
+      s.close();
+    }
+  });
+
+  it("refuses to persist over an unreadable grants file", () => {
+    const s = new AgentGrantStore(path);
+    try {
+      s.createPending({ clientId: "pmc_1", clientName: "A" });
+      writeFileSync(path, "{ corrupt", "utf-8");
+      expect(() => s.createPending({ clientId: "pmc_2", clientName: "B" })).toThrow();
+      expect(readFileSync(path, "utf-8")).toBe("{ corrupt");
+    } finally {
+      s.close();
+    }
+  });
+
   it("reports malformed durable grants as unavailable instead of missing", () => {
     writeFileSync(path, "{ definitely not JSON", "utf-8");
     const s = new AgentGrantStore(path);

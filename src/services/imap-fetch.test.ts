@@ -66,11 +66,10 @@ describe("SimpleIMAPService.getEmailById (fetch loop)", () => {
     expect(result!.id).toBe("1");
   });
 
-  it("returns null when not connected and cache miss", async () => {
+  it("throws IMAPNotConnectedError (not null = 'not found') when disconnected on a cache miss", async () => {
     const svc = new SimpleIMAPService();
-    // isConnected=false by default
-    const result = await svc.getEmailById("999");
-    expect(result).toBeNull();
+    vi.spyOn(svc as any, "reconnect").mockRejectedValue(new Error("ECONNREFUSED"));
+    await expect(svc.getEmailById("999")).rejects.toThrow(/IMAP connection unavailable/);
   });
 
   it("fetches and parses email via async iterator when not cached", async () => {
@@ -548,6 +547,23 @@ describe("SimpleIMAPService private searchSingleFolder", () => {
     // With limit=2, fetch is called at most 2 times (once per UID)
     expect(mockFetch.mock.calls.length).toBeLessThanOrEqual(2);
     expect(results).toHaveLength(0);
+  });
+
+  it("keeps the NEWEST matches when more than `limit` match, newest first", async () => {
+    const svc = new SimpleIMAPService();
+    (svc as any).isConnected = true;
+    const mockFetch = vi.fn().mockReturnValue(asyncYield());
+    const mockClient = {
+      getMailboxLock: vi.fn().mockResolvedValue(makeLock()),
+      search: vi.fn().mockResolvedValue([1, 2, 3, 4, 5]),
+      fetch: mockFetch,
+    };
+    (svc as any).client = mockClient;
+
+    await (svc as any).searchSingleFolder("INBOX", {}, 2);
+
+    expect(mockFetch.mock.calls.map((c: unknown[]) => c[0])).toEqual(["5", "4"]);
+    expect(mockClient.search.mock.calls[0][1]).toMatchObject({ returnOptions: [{ partial: "-1:-2" }] });
   });
 
   it("returns [] immediately when client is null (line 805)", async () => {

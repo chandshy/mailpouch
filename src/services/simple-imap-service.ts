@@ -14,9 +14,11 @@ export { chunkUidsForWire, expandImapSequence } from './imap-wire-utils.js';
 import nodemailer, { type SendMailOptions } from 'nodemailer';
 import { EmailMessage, EmailFolder, SearchEmailOptions, SaveDraftOptions } from '../types/index.js';
 import { logger } from '../utils/logger.js';
+import { scrubEmail } from '../security/memory.js';
 import {
   validateImapPath,
   validateAttachmentLimits,
+  toMailerAttachments,
 } from '../utils/helpers.js';
 import { buildBridgeTlsConfig } from './bridge-tls.js';
 import { classifyError, ConnectionStateError } from '../utils/error-classify.js';
@@ -28,7 +30,7 @@ import {
 } from '../config/e2e-mailbox-identity.js';
 import {
   MailboxMutationDeadlineError,
-  runMailboxMutation,
+  runAccountMailMutation as runMailboxMutation,
 } from './mailbox-mutation-deadline.js';
 
 /** imapflow's append() return value includes uid at runtime but it is omitted from the type declaration. */
@@ -75,6 +77,26 @@ const MAX_EMAIL_CACHE_SIZE = 500;
  * still allows hundreds of typical messages while preventing memory exhaustion.
  */
 const MAX_EMAIL_CACHE_BYTES = 50 * 1024 * 1024; // 50 MB
+
+/**
+ * imapflow resolves STORE and EXPUNGE to `false` when the server answers NO/BAD
+ * (or the flag is not in PERMANENTFLAGS) instead of throwing, so an unchecked
+ * call reports success for a mutation that never happened.
+ */
+function requireImapOk(result: unknown, command: string): void {
+  if (result === false) throw new Error(`IMAP ${command} was rejected by the server`);
+}
+
+/**
+ * Without the MOVE capability imapflow emulates MOVE as COPY followed by an
+ * unconditional \\Deleted + EXPUNGE of the source — even when the COPY failed —
+ * which would permanently delete mail that never reached its destination.
+ */
+function requireMoveCapability(capabilities: Map<string, unknown> | undefined): void {
+  if (!capabilities?.has('MOVE')) {
+    throw new Error('IMAP server does not advertise MOVE; refusing to emulate it with COPY + EXPUNGE');
+  }
+}
 
 export class SimpleIMAPService {
   private client: ImapFlow | null = null;
@@ -314,6 +336,17 @@ export class SimpleIMAPService {
    * instead of N serial EXPUNGE round-trips that hold the mailbox lock (and
    * block IDLE) for minutes on Bridge.
    */
+  /**
+   * Flag \\Deleted then UID EXPUNGE, failing loudly on either rejection.
+   * messageDelete runs the same STORE internally but ignores its result, so a
+   * rejected STORE would otherwise yield an EXPUNGE that removes nothing yet
+   * resolves `true`.
+   */
+  private async expungeUids(uidSet: string): Promise<void> {
+    requireImapOk(await this.client!.messageFlagsAdd(uidSet, ['\\Deleted'], { uid: true }), 'STORE +FLAGS \\Deleted');
+    requireImapOk(await this.client!.messageDelete(uidSet, { uid: true }), 'EXPUNGE');
+  }
+
   private async chunkedBatchOp(opts: {
     /** UIDs known to exist in the locked folder. */
     present: string[];
@@ -340,7 +373,7 @@ export class SimpleIMAPService {
       try {
         await runMailboxMutation(this, async () => {
           beforeMutation?.();
-          await perChunk(uidSet);
+          requireImapOk(await perChunk(uidSet), `${opName} chunk`);
         });
         for (const id of chunkUids) onSuccess(id);
       } catch (batchErr: unknown) {
@@ -354,7 +387,7 @@ export class SimpleIMAPService {
           try {
             await runMailboxMutation(this, async () => {
               beforeMutation?.();
-              await perUid(id);
+              requireImapOk(await perUid(id), opName);
             });
             fallbackUsed = true;
             onSuccess(id);
@@ -796,6 +829,17 @@ export class SimpleIMAPService {
   /**
    * Ensure connection is active, reconnect if needed
    */
+  /** ensureConnection for read paths, mapped to IMAPNotConnectedError (IMAP-012). */
+  private async requireReadConnection(what: string): Promise<void> {
+    try {
+      await this.ensureConnection();
+    } catch (error) {
+      logger.warn(`IMAP not connected: cannot ${what}`, 'IMAPService', error);
+      throw new IMAPNotConnectedError(`Cannot ${what}: IMAP connection unavailable`);
+    }
+    if (!this.client) throw new IMAPNotConnectedError(`Cannot ${what}: IMAP client not available`);
+  }
+
   private async ensureConnection(): Promise<void> {
     // Known login failure → fail fast with operator-actionable guidance and do
     // NOT re-attempt (another bad-password login just re-trips Bridge's "too
@@ -1100,7 +1144,8 @@ export class SimpleIMAPService {
               body: bodyPreview,
               bodyPreview,
               isHtml: looksLikeHtml,
-              date: env.date ?? new Date(),
+              // imapflow 2.x widened envelope.date to `string | Date`.
+              date: env.date ? new Date(env.date) : new Date(),
               folder,
               // #9: stable cross-folder identity (the `id` UID is per-folder).
               messageId: env.messageId || undefined,
@@ -1160,10 +1205,9 @@ export class SimpleIMAPService {
       return cachedEntry;
     }
 
-    if (!this.client || !this.isConnected) {
-      logger.warn('IMAP not connected', 'IMAPService');
-      return null;
-    }
+    // IMAP-012: null means "not found" to every caller, so a lost connection
+    // must surface as an error rather than masquerade as a missing message.
+    await this.requireReadConnection(`fetch email ${emailId}`);
 
     try {
       // If a folder hint is provided, only look there; otherwise scan all
@@ -1179,13 +1223,13 @@ export class SimpleIMAPService {
           );
 
       for (const folder of foldersToSearch) {
-        const lock = await this.client.getMailboxLock(folder.path);
+        const lock = await this.client!.getMailboxLock(folder.path);
 
         try {
           // GAP 7.4: check for UIDVALIDITY changes after opening the mailbox
           this.checkAndUpdateUidValidity(folder.path);
 
-          for await (const message of this.client.fetch(emailId, {
+          for await (const message of this.client!.fetch(emailId, {
             envelope: true,
             bodyStructure: true,
             flags: true,
@@ -1243,19 +1287,19 @@ export class SimpleIMAPService {
     try {
       const searchCriteria = buildSearchCriteria(options);
 
-      // Request ESEARCH PARTIAL so the server returns only the first `limit` UIDs
-      // rather than the full result set. Falls back transparently to a plain number[]
-      // on servers that lack ESEARCH capability (e.g. older Proton Bridge builds),
-      // in which case we slice client-side as before.
+      // Request ESEARCH PARTIAL for the LAST `limit` matches (RFC 9394 negative
+      // range = highest UIDs = newest mail) rather than the full result set. Falls
+      // back transparently to a plain number[] on servers that lack ESEARCH
+      // capability (e.g. older Proton Bridge builds), sliced client-side.
       const searchResult = await this.client.search(searchCriteria, {
         uid: true,
-        returnOptions: [{ partial: `1:${limit}` }],
+        returnOptions: [{ partial: `-1:-${limit}` }],
       });
       const results: EmailMessage[] = [];
 
       let limitedUids: number[];
       if (Array.isArray(searchResult)) {
-        limitedUids = (searchResult as number[]).slice(0, limit);
+        limitedUids = (searchResult as number[]).slice(-limit);
       } else if (searchResult && typeof searchResult === 'object' && 'partial' in searchResult) {
         const { messages } = (searchResult as { partial: { messages?: string } }).partial;
         limitedUids = messages ? expandImapSequence(messages) : [];
@@ -1263,6 +1307,8 @@ export class SimpleIMAPService {
         limitedUids = [];
       }
 
+      // Newest first, matching get_emails.
+      limitedUids.sort((a, b) => b - a);
       for (const uid of limitedUids) {
         const uidStr = uid.toString();
 
@@ -1538,13 +1584,13 @@ export class SimpleIMAPService {
    * when the cache entry has had its attachment content stripped (GAP 7.5).
    */
   private async fetchEmailFullSource(emailId: string, folderHint?: string): Promise<EmailMessage | null> {
-    if (!this.client || !this.isConnected) return null;
+    await this.requireReadConnection(`download attachments for email ${emailId}`);
     try {
       const foldersToSearch = folderHint ? [{ path: folderHint }] : await this.getFolders();
       for (const folder of foldersToSearch) {
-        const lock = await this.client.getMailboxLock(folder.path);
+        const lock = await this.client!.getMailboxLock(folder.path);
         try {
-          for await (const message of this.client.fetch(emailId, {
+          for await (const message of this.client!.fetch(emailId, {
             uid: true,
             flags: true,
             source: true,
@@ -1582,6 +1628,7 @@ export class SimpleIMAPService {
       }
     } catch (error) {
       logger.error('Failed to fetch full email source for attachment download', 'IMAPService', error);
+      throw error;
     }
     return null;
   }
@@ -1690,29 +1737,8 @@ export class SimpleIMAPService {
         const limitErr = validateAttachmentLimits(options.attachments);
         if (limitErr) return { success: false, error: limitErr };
 
-        // Mirror the sanitization performed in smtp-service.ts sendEmail() to prevent
-        // MIME header injection via crafted attachment filenames or content-type values.
-        // A filename like "a.pdf\r\nContent-Type: text/html" or a contentType like
-        // "text/html\r\nX-Injected: yes" could break the MIME structure of the draft.
-        mailOptions.attachments = options.attachments.map(att => {
-          // Strip CRLF/NUL from filename to prevent Content-Disposition header injection.
-          const safeFilename = att.filename
-            ? att.filename.replace(/[\r\n\x00]/g, "").slice(0, 255) || "attachment"
-            : undefined;
-
-          // Strip CRLF/NUL from contentType and validate it matches type/subtype format.
-          // An unsanitized contentType is placed directly in the Content-Type MIME header.
-          const rawCt = att.contentType ? att.contentType.replace(/[\r\n\x00]/g, "").trim() : undefined;
-          const safeContentType =
-            rawCt && /^[\w!#$&\-^]+\/[\w!#$&\-^+.]+$/.test(rawCt) ? rawCt : undefined;
-
-          return {
-            filename:    safeFilename,
-            content:     att.content,
-            contentType: safeContentType,
-            cid:         att.contentId,
-          };
-        });
+        // Shared with SMTP sendEmail: header scrubbing + base64 declaration.
+        mailOptions.attachments = toMailerAttachments(options.attachments);
       }
 
       const info = await transport.sendMail(mailOptions);
@@ -1785,14 +1811,14 @@ export class SimpleIMAPService {
         }
 
         if (isRead) {
-          await runMailboxMutation(this, () => {
+          await runMailboxMutation(this, async () => {
             assertE2EMailboxIdentity(folder, [emailId], this.client!.mailbox);
-            return this.client!.messageFlagsAdd(emailId, ['\\Seen'], { uid: true });
+            requireImapOk(await this.client!.messageFlagsAdd(emailId, ['\\Seen'], { uid: true }), 'STORE +FLAGS');
           });
         } else {
-          await runMailboxMutation(this, () => {
+          await runMailboxMutation(this, async () => {
             assertE2EMailboxIdentity(folder, [emailId], this.client!.mailbox);
-            return this.client!.messageFlagsRemove(emailId, ['\\Seen'], { uid: true });
+            requireImapOk(await this.client!.messageFlagsRemove(emailId, ['\\Seen'], { uid: true }), 'STORE -FLAGS');
           });
         }
 
@@ -1857,14 +1883,14 @@ export class SimpleIMAPService {
         }
 
         if (isStarred) {
-          await runMailboxMutation(this, () => {
+          await runMailboxMutation(this, async () => {
             assertE2EMailboxIdentity(folder, [emailId], this.client!.mailbox);
-            return this.client!.messageFlagsAdd(emailId, ['\\Flagged'], { uid: true });
+            requireImapOk(await this.client!.messageFlagsAdd(emailId, ['\\Flagged'], { uid: true }), 'STORE +FLAGS');
           });
         } else {
-          await runMailboxMutation(this, () => {
+          await runMailboxMutation(this, async () => {
             assertE2EMailboxIdentity(folder, [emailId], this.client!.mailbox);
-            return this.client!.messageFlagsRemove(emailId, ['\\Flagged'], { uid: true });
+            requireImapOk(await this.client!.messageFlagsRemove(emailId, ['\\Flagged'], { uid: true }), 'STORE -FLAGS');
           });
         }
 
@@ -1958,6 +1984,7 @@ export class SimpleIMAPService {
         movedMid = (await this.fetchMessageIdsForUids([emailId])).get(emailId);
 
         const moveResult = await runMailboxMutation(this, () => {
+          requireMoveCapability(this.client!.capabilities);
           assertE2EUidPlusCapability(this.client!.capabilities);
           assertE2EMailboxIdentity(folder, [emailId], this.client!.mailbox);
           return this.client!.messageMove(emailId, targetFolder, { uid: true });
@@ -2100,10 +2127,10 @@ export class SimpleIMAPService {
           throw new Error(`Email ${emailId} not found in folder ${folder}`);
         }
 
-        await runMailboxMutation(this, () => {
+        await runMailboxMutation(this, async () => {
           assertE2EUidPlusCapability(this.client!.capabilities);
           assertE2EMailboxIdentity(folder, [emailId], this.client!.mailbox);
-          return this.client!.messageDelete(emailId, { uid: true });
+          await this.expungeUids(emailId);
         });
         // Remove from cache using folder-qualified key
         this.evictCacheEntry(`${folder}:${emailId}`);
@@ -2192,16 +2219,19 @@ export class SimpleIMAPService {
           throw new Error(`Email ${emailId} not found in folder ${folder}`);
         }
         if (set) {
-          await runMailboxMutation(this, () => {
+          await runMailboxMutation(this, async () => {
             assertE2EMailboxIdentity(folder, [emailId], this.client!.mailbox);
-            return this.client!.messageFlagsAdd(emailId, [flag], { uid: true });
+            requireImapOk(await this.client!.messageFlagsAdd(emailId, [flag], { uid: true }), 'STORE +FLAGS');
           });
         } else {
-          await runMailboxMutation(this, () => {
+          await runMailboxMutation(this, async () => {
             assertE2EMailboxIdentity(folder, [emailId], this.client!.mailbox);
-            return this.client!.messageFlagsRemove(emailId, [flag], { uid: true });
+            requireImapOk(await this.client!.messageFlagsRemove(emailId, [flag], { uid: true }), 'STORE -FLAGS');
           });
         }
+        // Derived fields (isAnswered/isForwarded/…) come from the flag set, so
+        // drop the cached copy rather than serve stale state for the TTL.
+        this.evictCacheEntry(`${folder}:${emailId}`);
         logger.info(`Flag ${flag} ${set ? 'set' : 'cleared'} on email ${emailId} in ${folder}`, 'IMAPService');
         return true;
       } finally {
@@ -2362,6 +2392,7 @@ export class SimpleIMAPService {
         await this.chunkedBatchOp({
           present,
           beforeMutation: () => {
+            requireMoveCapability(this.client!.capabilities);
             assertE2EUidPlusCapability(this.client!.capabilities);
             assertE2EMailboxIdentity(folder, ids, this.client!.mailbox);
           },
@@ -2793,8 +2824,11 @@ export class SimpleIMAPService {
             assertE2EUidPlusCapability(this.client!.capabilities);
             assertE2EMailboxIdentity(folder, validIds, this.client!.mailbox);
           },
-          perChunk: (uidSet) => this.client!.messageDelete(uidSet, { uid: true }),
-          perUid: async (id) => { await this.client!.messageFlagsAdd(id, ['\\Deleted'], { uid: true }); flaggedForExpunge.push(id); },
+          perChunk: (uidSet) => this.expungeUids(uidSet),
+          perUid: async (id) => {
+            requireImapOk(await this.client!.messageFlagsAdd(id, ['\\Deleted'], { uid: true }), 'STORE +FLAGS \\Deleted');
+            flaggedForExpunge.push(id);
+          },
           onSuccess: (id) => { this.evictCacheEntry(`${folder}:${id}`); results.success++; },
           onFailure: (id, msg) => { results.failed++; results.errors.push(`Failed to delete ${id} from ${folder}: ${msg}`); },
           opName: 'Bulk delete-from-folder',
@@ -2803,10 +2837,10 @@ export class SimpleIMAPService {
           // bulkDeleteEmails. Bounds the command line; O(N/chunk) round-trips.
           finalize: async () => {
             for (const uidSet of chunkUidsForWire(flaggedForExpunge)) {
-              await runMailboxMutation(this, () => {
+              await runMailboxMutation(this, async () => {
                 assertE2EUidPlusCapability(this.client!.capabilities);
                 assertE2EMailboxIdentity(folder, validIds, this.client!.mailbox);
-                return this.client!.messageDelete(uidSet, { uid: true });
+                requireImapOk(await this.client!.messageDelete(uidSet, { uid: true }), 'EXPUNGE');
               });
             }
           },
@@ -2858,10 +2892,10 @@ export class SimpleIMAPService {
       // messageDelete flags \Deleted + EXPUNGEs; chunk the UID set so a large
       // Trash can't blow the IMAP command-line length.
       for (const uidSet of chunkUidsForWire(uidStrings)) {
-        await runMailboxMutation(this, () => {
+        await runMailboxMutation(this, async () => {
           assertE2EUidPlusCapability(this.client!.capabilities);
           assertE2EMailboxIdentity(trash, uidStrings, this.client!.mailbox);
-          return this.client!.messageDelete(uidSet, { uid: true });
+          await this.expungeUids(uidSet);
         });
       }
       for (const uid of uids) this.evictCacheEntry(`${trash}:${uid}`);
@@ -3355,20 +3389,7 @@ export class SimpleIMAPService {
   wipeCache(): void {
     tracer.spanSync('imap.wipeCache', {}, () => {
     // Overwrite email bodies/subjects before clearing
-    for (const [, entry] of this.emailCache) {
-      const email = entry.email;
-      if (email.body) email.body = "";
-      if (email.subject) email.subject = "";
-      if (email.from) email.from = "";
-      if (email.attachments) {
-        for (const att of email.attachments) {
-          if (att.content && Buffer.isBuffer(att.content)) {
-            (att.content as Buffer).fill(0);
-          }
-          att.content = undefined;
-        }
-      }
-    }
+    for (const [, entry] of this.emailCache) scrubEmail(entry.email);
     this.clearCacheAll();
     this.clearFolderCache();
 

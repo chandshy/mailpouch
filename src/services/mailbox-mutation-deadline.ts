@@ -191,9 +191,6 @@ export async function runAccountMailMutation<T>(
   }
 }
 
-/** IMAP-facing alias retained to make transport intent explicit at call sites. */
-export const runMailboxMutation = runAccountMailMutation;
-
 /**
  * A routed service owns one primary transport shared by concurrent requests.
  * Closing it for request A also makes request B's in-flight command ambiguous.

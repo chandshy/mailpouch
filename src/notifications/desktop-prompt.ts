@@ -18,6 +18,7 @@
 
 import { spawn } from "child_process";
 import { logger } from "../utils/logger.js";
+import { escAppleScript, escPowerShell } from "./escape.js";
 
 export type ApprovalChoice = "approve" | "deny" | "unavailable";
 
@@ -41,12 +42,6 @@ const DEFAULT_TIMEOUT_MS = 5 * 60_000;
  *  belt-and-suspenders against a crafted client name breaking the dialog. */
 function clean(s: string): string {
   return (s ?? "").replace(/[\x00-\x1f\x7f]/g, " ");
-}
-function escAppleScript(s: string): string {
-  return clean(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-}
-function escPowerShell(s: string): string {
-  return clean(s).replace(/'/g, "''");
 }
 
 function defaultRunner(cmd: string, args: string[], timeoutMs: number): Promise<number> {
@@ -105,7 +100,9 @@ export class DesktopPrompt {
   private async promptLinux(p: ApprovalPrompt, timeoutMs: number): Promise<ApprovalChoice> {
     // zenity: OK(Approve)=0, Cancel(Deny)=1, missing→-1. Fall back to kdialog.
     const z = await this.run("zenity", [
-      "--question", "--title", clean(p.title), "--text", clean(p.message),
+      // --no-markup: the message carries a client-chosen name; Pango markup
+      // would blank or garble the label (e.g. "AT&T", "a<").
+      "--question", "--no-markup", "--title", clean(p.title), "--text", clean(p.message),
       "--ok-label=Approve", "--cancel-label=Deny", "--no-wrap",
     ], timeoutMs);
     if (z !== -1) return this.map(z);

@@ -5,10 +5,13 @@
 
 import { Socket } from "node:net";
 import nodemailer from "nodemailer";
+// nodemailer 10 ships its own types and no longer exposes a `nodemailer` type
+// namespace, so these come from the package's named type exports instead.
+import type { SendMailOptions, Transporter } from "nodemailer";
 import { ProtonMailConfig, SendEmailOptions } from "../types/index.js";
 import { logger } from "../utils/logger.js";
 import { buildBridgeTlsConfig } from "./bridge-tls.js";
-import { parseEmails, parseEmailsDetailed, isValidEmail, sanitizeForLog, validateAttachmentLimits } from "../utils/helpers.js";
+import { parseEmails, parseEmailsDetailed, isValidEmail, sanitizeForLog, validateAttachmentLimits, toMailerAttachments } from "../utils/helpers.js";
 import { tracer } from "../utils/tracer.js";
 import { classifyError } from "../utils/error-classify.js";
 import { BackoffTracker, isTransientAbuseError } from "../utils/backoff.js";
@@ -89,7 +92,7 @@ const BLOCKED_HEADER_KEYS = /^(to|cc|bcc|from|return-path|reply-to|sender)$/i;
 // shared with the IMAP saveDraft path.
 
 export class SMTPService {
-  private transporter: nodemailer.Transporter | null = null;
+  private transporter: Transporter | null = null;
   /** Raw sockets are tracked before Nodemailer creates a PoolResource connection. */
   private readonly smtpSockets = new Set<Socket>();
   /** Connecting callbacks that must be failed synchronously on retirement. */
@@ -129,7 +132,8 @@ export class SMTPService {
    * SMTP/STARTTLS setup; the close listener keeps our tracking set accurate.
    */
   private openTrackedSocket(
-    options: { host?: string; port?: number; localAddress?: string },
+    // nodemailer 10 widened the port on its transport options to `string | number`.
+    options: { host?: string; port?: string | number; localAddress?: string },
     callback: (error: Error | null, socketOptions?: { connection: Socket }) => void,
     generation: number,
   ): void {
@@ -138,7 +142,7 @@ export class SMTPService {
       return;
     }
     const host = options.host;
-    const port = options.port;
+    const port = typeof options.port === "string" ? Number(options.port) : options.port;
     if (!host || !Number.isInteger(port) || (port ?? 0) < 1 || (port ?? 0) > 65_535) {
       callback(new Error("SMTP socket requires a valid host and port"));
       return;
@@ -551,7 +555,7 @@ export class SMTPService {
       const fromAddress = fromOverride && isValidEmail(fromOverride)
         ? fromOverride
         : this.config.smtp.username;
-      const mailOptions: nodemailer.SendMailOptions = {
+      const mailOptions: SendMailOptions = {
         from: fromAddress,
         to: toAddresses.join(", "),
         // Strip CRLF/NUL to prevent header injection via a crafted subject line.
@@ -621,28 +625,7 @@ export class SMTPService {
         const limitErr = validateAttachmentLimits(options.attachments);
         if (limitErr) throw new Error(limitErr);
 
-        mailOptions.attachments = options.attachments.map((att) => {
-          // Strip CRLF and NUL from filename — a value like
-          // "report.pdf\r\nContent-Type: text/html" would break the
-          // Content-Disposition MIME header and inject a bogus part header.
-          const safeFilename = att.filename
-            ? stripHeaderInjection(att.filename).slice(0, 255) || "attachment"
-            : undefined;
-
-          // Strip CRLF from contentType to prevent MIME header injection.
-          // Also reject the value if it doesn't look like a valid MIME type
-          // (type/subtype) to avoid smuggling arbitrary header content.
-          const rawCt = att.contentType ? stripHeaderInjection(att.contentType).trim() : undefined;
-          const safeContentType =
-            rawCt && /^[\w!#$&\-^]+\/[\w!#$&\-^+.]+$/.test(rawCt) ? rawCt : undefined;
-
-          return {
-            filename:    safeFilename,
-            content:     att.content,
-            contentType: safeContentType,
-            cid:         att.contentId,
-          };
-        });
+        mailOptions.attachments = toMailerAttachments(options.attachments);
       }
 
       // Capture the exact pooled transport being dispatched. A concurrent

@@ -56,7 +56,7 @@ export function bridgeWatchdogRouteForAccount(
 }
 
 /** Whether two active-account recovery routes are operationally identical. */
-export function sameBridgeWatchdogRoute(
+function sameBridgeWatchdogRoute(
   left: BridgeWatchdogRoute | null,
   right: BridgeWatchdogRoute | null,
 ): boolean {

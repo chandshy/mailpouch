@@ -221,6 +221,20 @@ describe("HTTP transport", () => {
     expect(body.status).toBe("ok");
   });
 
+  it("serves requests when bound to an IPv6 host", async () => {
+    const port = await freePort();
+    handle = await startHttpTransport({
+      server: buildServer(),
+      port,
+      host: "::1",
+      oauthEnabled: true,
+    });
+    expect(handle.url).toBe(`http://[::1]:${port}/mcp`);
+    expect(handle.issuer).toBe(`http://[::1]:${port}`);
+    const res = await fetch(`http://[::1]:${port}/health`);
+    expect(res.status).toBe(200);
+  });
+
   it("rejects MCP requests with no Authorization header (401 + WWW-Authenticate)", async () => {
     const port = await freePort();
     handle = await startHttpTransport({

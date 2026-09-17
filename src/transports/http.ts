@@ -251,7 +251,9 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
   // well-behaved MCP host's discovery breaks. When no explicit issuer is set and
   // we'd otherwise derive 0.0.0.0, substitute loopback for the advertised URL.
   const issuerHost = host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
-  const derivedIssuer = `${scheme}://${issuerHost}:${opts.port}`;
+  // IPv6 literals must be bracketed inside a URL authority.
+  const urlHost = (h: string): string => (h.includes(":") ? `[${h}]` : h);
+  const derivedIssuer = `${scheme}://${urlHost(issuerHost)}:${opts.port}`;
   const issuer = opts.oauthIssuer ?? derivedIssuer;
 
   // XPORT-012: validate the OAuth-without-password misconfiguration BEFORE we
@@ -331,7 +333,10 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
   }, 60_000).unref();
 
   const listener = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
-    const url = new URL(req.url ?? "/", `${scheme}://${host}:${opts.port}`);
+    // Only the path/query are read; a constant base keeps parsing independent
+    // of the bind host (an unbracketed IPv6 host made every request throw
+    // here, outside any try, which took the daemon down).
+    const url = new URL(req.url ?? "/", "http://localhost");
     // XPORT-011: every response carries the defence-in-depth header set.
     setSecurityHeaders(res);
 
@@ -580,9 +585,15 @@ export async function startHttpTransport(opts: HttpTransportOptions): Promise<Ht
     server.listen(opts.port, host);
   });
 
-  const url = `${scheme}://${host}:${opts.port}${path}`;
+  const url = `${scheme}://${urlHost(host)}:${opts.port}${path}`;
+  // The issuer is deliberately absent from this message. The message string is
+  // the one argument `log()` cannot redact, and a configured `oauthIssuer` is
+  // exactly the kind of value this change stops leaking to stderr. Nothing is
+  // lost: the derived issuer is `url` without the path, and a configured one
+  // was supplied by the operator reading this log. Callers that need the
+  // effective value get it from the returned `issuer` field.
   logger.info(
-    `MCP HTTP transport listening at ${url}${oauthHandlers ? ` (OAuth enabled, issuer ${issuer})` : ""}`,
+    `MCP HTTP transport listening at ${url}${oauthHandlers ? " (OAuth enabled)" : ""}`,
     "HttpTransport",
   );
 

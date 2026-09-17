@@ -31,6 +31,35 @@ describe("production safety wiring", () => {
     expect(source).not.toMatch(/globalPreset,\n\s*\}, \{ snapshot: grantSnapshot \}\)/);
   });
 
+  it("rejects unregistered tool names before the escalation pre-gate", () => {
+    const reject = source.indexOf("if (!Object.hasOwn(_escalationHandlers, name) && !Object.hasOwn(_toolHandlers, name))");
+    const escalation = source.indexOf("if (_escalationHandlers[name])");
+    expect(reject).toBeGreaterThan(-1);
+    expect(reject).toBeLessThan(escalation);
+  });
+
+  it("resolves the local stdio caller per call so gates never see 'no caller' while local gating is on", () => {
+    // No handshake-only cached caller: a skipped notifications/initialized or a
+    // failed registration must not leave the gate with an undefined caller.
+    expect(source).not.toMatch(/_stdioCaller/);
+    expect(source.match(/currentCaller\(\) \?\? localCaller\(\)/g)).toHaveLength(4);
+    const body = source.slice(source.indexOf("function localCaller()"), source.indexOf("server.oninitialized"));
+    expect(body).toMatch(/if \(!agentGrants\.get\(clientId\)\) agentGrants\.createPending/);
+    // Registration failure must still return the identity (gate then denies: no grant).
+    expect(body).toMatch(/\}\s*catch \(err: unknown\) \{[\s\S]*?\}\s*return \{ clientId, clientName: name \};/);
+  });
+
+  it("resources/prompts apply the global permission preset even for a trusted local caller", () => {
+    const start = source.indexOf("function requireReadSurfaceAccess(");
+    const body = source.slice(start, source.indexOf("const grantSnapshot = grantManager.getAuthorizationSnapshot(caller.clientId);", start));
+    expect(body).toMatch(/if \(!caller\) \{[\s\S]*permissions\.check\(tool\)[\s\S]*return \{ accountId: activeAccountId, accountIdentity, services \};/);
+  });
+
+  it("the native approval dialog only decides grants that are still pending", () => {
+    expect(source).toMatch(/agentGrants\.approve\(\{ clientId: grant\.clientId, preset, onlyIfPending: true \}\)/);
+    expect(source).toMatch(/agentGrants\.deny\(grant\.clientId, "Denied at the on-screen prompt", \{ onlyIfPending: true \}\)/);
+  });
+
   it("binds the request-local mailbox identity around the real tool handler invocation", () => {
     expect(source).toMatch(
       /withE2EMailboxIdentity\(\s*args as Record<string, unknown>,\s*\(\) => handler\(ctx\),\s*\)/,

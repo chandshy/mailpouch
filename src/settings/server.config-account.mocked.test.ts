@@ -40,6 +40,7 @@ vi.mock("../config/loader.js", async (importOriginal) => {
     // processes do not share a mutable loader-cache object, so each request
     // must be safe even when it began from its own stale clone.
     loadConfig: () => mocks.config ? structuredClone(mocks.config) : null,
+    loadConfigForWrite: () => mocks.config ? structuredClone(mocks.config) : actual.defaultConfig(),
     saveConfig: (config: ServerConfig) => {
       mocks.saveConfig(config);
       mocks.config = structuredClone(config);
