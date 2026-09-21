@@ -95,7 +95,7 @@
     "nodemailer": "^10.0.9"
   },
   "optionalDependencies": {
-    "@napi-rs/keyring": "~2.0.0",
+    "@napi-rs/keyring": "~2.1.0",
     "systray2": "~2.1.4"
   },
   "devDependencies": {
