@@ -133,7 +133,7 @@
     "@hono/node-server": ">=1.19.13",
     "path-to-regexp": ">=8.4.2",
     "fast-uri": ">=4.1.4",
-    "ip-address": ">=10.4.0"
+    "ip-address": ">=10.7.2"
   },
   "publishConfig": {
     "access": "public",
