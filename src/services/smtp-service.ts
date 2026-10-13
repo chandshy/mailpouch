@@ -382,7 +382,7 @@ export class SMTPService {
       connectionTimeout: SMTP_CONNECTION_TIMEOUT_MS,
       greetingTimeout: SMTP_GREETING_TIMEOUT_MS,
       socketTimeout: SMTP_SOCKET_TIMEOUT_MS,
-      getSocket: (options, callback) => { this.openTrackedSocket(options, callback, generation); },
+      getSocket: (options: Parameters<SMTPService['openTrackedSocket']>[0], callback: Parameters<SMTPService['openTrackedSocket']>[1]) => { this.openTrackedSocket(options, callback, generation); },
       host: this.config.smtp.host,
       port: this.config.smtp.port,
       secure: this.config.smtp.secure,

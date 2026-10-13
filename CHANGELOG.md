@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.5] — 2026-10-13
+
+### Security
+
+- Upgrade the MCP SDK and enforce patched `proxy-addr`, `fast-uri`, and `ip-address` versions to clear the current dependency advisories.
+
+### Fixed
+
+- Preserve folder listings when ImapFlow returns `false` from a STATUS probe, with regression coverage for both rejected and false results.
+- Keep the tracked SMTP socket callback compatible with Nodemailer's updated types.
+
+### Maintenance
+
+- Refresh pending mail, keyring, Node types, Vitest, and coverage dependencies and regenerate the production license inventory.
+
 ## [4.0.4] — 2026-09-17
 
 ### Security

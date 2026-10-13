@@ -982,7 +982,7 @@ export class SimpleIMAPService {
 
       folders.forEach((folder, i) => {
         const settled = statuses[i];
-        const status = settled.status === 'fulfilled' ? settled.value : undefined;
+        const status = settled.status === 'fulfilled' ? settled.value || undefined : undefined;
         if (!status) {
           logger.warn(`STATUS probe failed for folder '${folder.path}' — reporting 0 counts`, 'IMAPService');
         }

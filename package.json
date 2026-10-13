@@ -1,6 +1,6 @@
 {
   "name": "mailpouch",
-  "version": "4.0.4",
+  "version": "4.0.5",
   "description": "mailpouch — lean, permission-gated MCP access to Proton Mail via Proton Bridge, with up to 86 tools, resources, and prompts.",
   "type": "module",
   "main": "dist/index.js",
@@ -88,23 +88,23 @@
     "arm64"
   ],
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "better-sqlite3": "^13.0.2",
-    "imapflow": "^2.0.2",
-    "mailparser": "^3.9.26",
-    "nodemailer": "^10.0.9"
+    "imapflow": "^2.4.0",
+    "mailparser": "^3.9.38",
+    "nodemailer": "^10.1.0"
   },
   "optionalDependencies": {
-    "@napi-rs/keyring": "~2.0.0",
+    "@napi-rs/keyring": "~2.1.0",
     "systray2": "~2.1.4"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^9.6.0",
-    "@types/node": "^26.1.2",
-    "@vitest/coverage-v8": "^5.0.0",
+    "@types/node": "^26.6.5",
+    "@vitest/coverage-v8": "^5.0.4",
     "simple-git-hooks": "^2.13.1",
     "typescript": "^6.0.3",
-    "vitest": "^5.0.0"
+    "vitest": "^5.0.4"
   },
   "simple-git-hooks": {
     "pre-push": "npm run preship:fast"
@@ -132,8 +132,9 @@
     "hono": ">=4.13.5",
     "@hono/node-server": ">=1.19.13",
     "path-to-regexp": ">=8.4.2",
-    "fast-uri": ">=4.1.4",
-    "ip-address": ">=10.4.0"
+    "fast-uri": ">=4.2.2",
+    "ip-address": ">=10.7.4",
+    "proxy-addr": ">=2.0.8"
   },
   "publishConfig": {
     "access": "public",

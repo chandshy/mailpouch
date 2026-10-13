@@ -1332,7 +1332,7 @@ describe("SimpleIMAPService.getFolders", () => {
     await expect(svc.getFolders()).rejects.toThrow("IMAP list failed");
   });
 
-  it("one folder's STATUS rejection does not nuke the whole listing (allSettled)", async () => {
+  it.each(['rejected', 'false'])("one folder's %s STATUS does not nuke the whole listing", async (failure) => {
     const svc = new SimpleIMAPService();
     const mockClient = {
       list: vi.fn().mockResolvedValue([
@@ -1341,7 +1341,7 @@ describe("SimpleIMAPService.getFolders", () => {
       ]),
       status: vi.fn().mockImplementation((path: string) =>
         path === "Folders/Flaky"
-          ? Promise.reject(new Error("STATUS failed for this mailbox"))
+          ? (failure === 'false' ? Promise.resolve(false) : Promise.reject(new Error("STATUS failed for this mailbox")))
           : Promise.resolve({ messages: 7, unseen: 1 })),
     };
     vi.spyOn(svc as any, "ensureConnection").mockResolvedValue(undefined);
