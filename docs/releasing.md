@@ -58,10 +58,10 @@ but only as a deliberate, recorded act:
 gh workflow run publish.yml -f release_tag=vX.Y.Z -f waive_bridge_e2e=true
 ```
 
-The waiver is a **`workflow_dispatch` input only**. It is not a repo variable and not a
-default, so it shows up in the run's inputs and cannot become ambient state that quietly
-erodes the gate. The `release: published` trigger has no inputs, so the automatic path stays
-strict. CI and preship attestations are **never** waivable.
+For the automatic `release: published` trigger, include `[bridge-e2e: waived]` in
+the GitHub release notes. Both channels record the waiver explicitly; it is not a
+repository variable or a default. A waiver covers missing Bridge evidence and cannot
+suppress a failed Bridge run. CI and preship attestations are **never** waivable.
 
 Do **not** hand-POST a green `proton-bridge-e2e` status instead. That would make the gate look
 satisfied while proving nothing, and would devalue every future release's attestation. Waiving
